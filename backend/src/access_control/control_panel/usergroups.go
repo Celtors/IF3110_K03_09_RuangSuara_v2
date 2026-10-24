@@ -17,8 +17,7 @@ type UserGroupPayload struct {
 
 type UserFromGroupPayload struct {
 	UserId   uuid.UUID `json:"user_id"`
-	Name     string            `json:"name"`
-	Email    string            `json:"email"`
+	Username     string        `json:"username"`
 	Status   string			   `json:"status"`
 	PlacedAt time.Time         `json:"placed_at"`
 }
@@ -98,7 +97,7 @@ func GetUsersFromGroupRequest(c *gin.Context, db *gorm.DB) {
 	}
 
 	db.Model(&models.UserGroup{}).
-		Select("user_groups.user_id, users.name, users.email, users.status, user_groups.created_at AS placed_at").
+		Select("user_groups.user_id, users.username, users.status, user_groups.created_at AS placed_at").
 		Joins("LEFT JOIN users ON users.id = user_groups.user_id").
 		Where("group_id = ?", groupPKey.Id).
 		Find(&usersFromGroup)

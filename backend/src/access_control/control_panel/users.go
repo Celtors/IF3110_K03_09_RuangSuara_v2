@@ -1,9 +1,9 @@
 package controlpanel
 
 import (
-	"net/http"
-	"backend/access_control/utility"
 	"backend/access_control/models"
+	"backend/access_control/utility"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -11,17 +11,15 @@ import (
 )
 
 type CreateUserPayload struct {
-	Name     string `json:"name" binding:"required"`
-	Email    string `json:"email" binding:"required,email"`
+	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required,gte=8"`
 }
 
 type UpdateUserPayload struct {
 	Id       uuid.UUID `json:"id" binding:"required"`
-	Name     string            `json:"name"`
-	Email    string            `json:"email" binding:"omitempty,email"`
-	Password string            `json:"password" binding:"omitempty,gte=8"`
-	Status   string            `json:"status"`
+	Username string    `json:"username"`
+	Password string    `json:"password" binding:"omitempty,gte=8"`
+	Status   string    `json:"status"`
 }
 
 type PKeyPayload struct {
@@ -31,8 +29,7 @@ type PKeyPayload struct {
 func (payload CreateUserPayload) GetDBStruct() (models.User, error) {
 	hashedPass, err := utility.HashPassword(payload.Password)
 	return models.User{
-		Name:         payload.Name,
-		Email:        payload.Email,
+		Username:     payload.Username,
 		PasswordHash: hashedPass,
 		Status:       "Active",
 	}, err
@@ -49,8 +46,7 @@ func (payload UpdateUserPayload) GetDBStruct() (models.User, models.User, error)
 			ID: payload.Id,
 		},
 		models.User{
-			Name:         payload.Name,
-			Email:        payload.Email,
+			Username:     payload.Username,
 			PasswordHash: hashedPass,
 			Status:       payload.Status,
 		}, err
@@ -117,8 +113,7 @@ func UpdateUserRequest(c *gin.Context, db *gorm.DB) {
 		})
 		return
 	}
-	
-	
+
 	userQuery, updatedUserModel, err := userPayload.GetDBStruct()
 
 	if err != nil {

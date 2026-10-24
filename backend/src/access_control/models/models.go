@@ -9,12 +9,11 @@ import (
 
 type User struct {
 	ID           uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	Name         string            `json:"name"`
-	Email        string            `json:"email"`
-	PasswordHash string            `json:"password_hash"`
-	Status       string            `json:"status"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"password_hash"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 func (u User) IsActive() bool {
@@ -52,10 +51,10 @@ func (u User) GetLatestActiveSession(db *gorm.DB) *uuid.UUID {
 
 type Group struct {
 	ID          uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func (Group) TableName() string {
@@ -66,7 +65,7 @@ type UserGroup struct {
 	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	UserId    uuid.UUID `json:"user_id"`
 	GroupId   uuid.UUID `json:"group_id"`
-	CreatedAt time.Time         `json:"created_at"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (u User) GetGroupsUUID(db *gorm.DB) *[]uuid.UUID {
@@ -78,8 +77,6 @@ func (u User) GetGroupsUUID(db *gorm.DB) *[]uuid.UUID {
 	}
 	return &groupsUUID
 }
-
-
 
 type SSOSession struct {
 	ID               uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
@@ -115,11 +112,11 @@ func (session SSOSession) MarkActivity(db *gorm.DB) {
 }
 
 type GroupPolicy struct {
-	ID            uuid.UUID
-	GroupId   	  uuid.UUID
-	Policy 		  string
-	Effect 		  string
-	CreatedAt     time.Time
+	ID        uuid.UUID
+	GroupId   uuid.UUID
+	Policy    string
+	Effect    string
+	CreatedAt time.Time
 }
 
 func (GroupPolicy) TableName() string {
