@@ -101,4 +101,8 @@ func SetupAccessControl(r *gin.Engine) {
 	r.POST("session-manager/login", func(c *gin.Context) {
 		sessionmanager.LoginRequest(c, access_control_db)
 	})
+
+	r.POST("session-manager/logout", func(c *gin.Context) {
+		sessionmanager.LogoutRequest(c, access_control_db)
+	})
 }
