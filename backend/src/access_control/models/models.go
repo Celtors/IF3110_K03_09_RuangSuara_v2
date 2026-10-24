@@ -3,12 +3,12 @@ package models
 import (
 	"time"
 
-	"gorm.io/datatypes"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 type User struct {
-	ID           datatypes.BinUUID `json:"id"`
+	ID           uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	Name         string            `json:"name"`
 	Email        string            `json:"email"`
 	PasswordHash string            `json:"password_hash"`
@@ -39,7 +39,7 @@ func (u User) IsAuthorized(policy string, db *gorm.DB) bool {
 	return (u.AuthorizedGroupCount(policy, db) > 0) && (len(userGroup) == 0)
 }
 
-func (u User) GetLatestActiveSession(db *gorm.DB) *datatypes.BinUUID {
+func (u User) GetLatestActiveSession(db *gorm.DB) *uuid.UUID {
 	var sessions []SSOSession
 	db.Model(&SSOSession{}).Where("user_id = ? AND status = ?", u.ID, "Active").Find(&sessions)
 
@@ -51,7 +51,7 @@ func (u User) GetLatestActiveSession(db *gorm.DB) *datatypes.BinUUID {
 }
 
 type Group struct {
-	ID          datatypes.BinUUID `json:"id"`
+	ID          uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
 	CreatedAt   time.Time         `json:"created_at"`
@@ -63,16 +63,16 @@ func (Group) TableName() string {
 }
 
 type UserGroup struct {
-	ID        datatypes.BinUUID `json:"id"`
-	UserId    datatypes.BinUUID `json:"user_id"`
-	GroupId   datatypes.BinUUID `json:"group_id"`
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	UserId    uuid.UUID `json:"user_id"`
+	GroupId   uuid.UUID `json:"group_id"`
 	CreatedAt time.Time         `json:"created_at"`
 }
 
-func (u User) GetGroupsUUID(db *gorm.DB) *[]datatypes.BinUUID {
+func (u User) GetGroupsUUID(db *gorm.DB) *[]uuid.UUID {
 	var groups []UserGroup
 	db.Where("user_id = ?", u.ID).Find(&groups)
-	groupsUUID := make([]datatypes.BinUUID, len(groups))
+	groupsUUID := make([]uuid.UUID, len(groups))
 	for i := 0; i < len(groups); i++ {
 		groupsUUID[i] = groups[i].GroupId
 	}
@@ -82,8 +82,8 @@ func (u User) GetGroupsUUID(db *gorm.DB) *[]datatypes.BinUUID {
 
 
 type SSOSession struct {
-	ID               datatypes.BinUUID
-	UserId           datatypes.BinUUID
+	ID               uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	UserId           uuid.UUID
 	SessionTokenHash string
 	Status           string
 	CreatedAt        time.Time
@@ -115,8 +115,8 @@ func (session SSOSession) MarkActivity(db *gorm.DB) {
 }
 
 type GroupPolicy struct {
-	ID            datatypes.BinUUID
-	GroupId   	  datatypes.BinUUID
+	ID            uuid.UUID
+	GroupId   	  uuid.UUID
 	Policy 		  string
 	Effect 		  string
 	CreatedAt     time.Time
