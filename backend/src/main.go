@@ -27,20 +27,19 @@ func main() {
 
 	r.Use(cors.Default())
 
-		r.POST("/users", func(c *gin.Context) {
+	r.POST("admin-control-panel/users", func(c *gin.Context) {
 		controlpanel.CreateUserRequest(c, db)
 	})
 
-	r.GET("/users", func(c *gin.Context) {
+	r.GET("admin-control-panel/users", func(c *gin.Context) {
 		controlpanel.GetAllUsersRequest(c, db)
 	})
 
-
-	r.PATCH("/users", func(c *gin.Context) {
+	r.PATCH("admin-control-panel/users", func(c *gin.Context) {
 		controlpanel.UpdateUserRequest(c, db)
 	})
 
-	r.DELETE("/users", func(c *gin.Context) {
+	r.DELETE("admin-control-panel/users", func(c *gin.Context) {
 		controlpanel.DeleteUserRequest(c, db)
 	})
 
