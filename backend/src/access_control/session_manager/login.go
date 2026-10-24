@@ -16,7 +16,7 @@ type LoginPayload struct {
 	Password string `json:"password" binding:"omitempty,gte=8"`
 }
 
-const session_exp_duration time.Duration = 24 * time.Hour
+const session_absolute_exp_duration time.Duration = 3600 * time.Hour
 
 func GenerateSession(user models.User, c *gin.Context) (models.SSOSession, string, error) {
 	session_token, err := utility.CryptoRandString(16)
@@ -31,7 +31,7 @@ func GenerateSession(user models.User, c *gin.Context) (models.SSOSession, strin
 		IpAddress: c.ClientIP(),
 		UserAgent: c.Request.UserAgent(),
 		CreatedAt:        time.Now(),
-		ExpiresAt:        time.Now().Add(session_exp_duration),
+		ExpiresAt:        time.Now().Add(session_absolute_exp_duration),
 	}, session_token, nil
 }
 
@@ -102,6 +102,6 @@ func LoginRequest(c *gin.Context, db *gorm.DB) {
 	   Updates(models.SSOSession{Status: "Revoked", RevokedReason: "new_session_created"})
 	
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("ssid", session_token, int(session_exp_duration.Seconds()), "/", "localhost", true, true)   
+	c.SetCookie("ssid", session_token, int(session_absolute_exp_duration.Seconds()), "/", "localhost", true, true)   
 }
 
