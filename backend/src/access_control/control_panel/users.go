@@ -24,12 +24,6 @@ type UpdateUserPayload struct {
 	Status   string            `json:"status"`
 }
 
-type UserCompact struct {
-	Id       uuid.UUID `json:"id"`
-	Name     string            `json:"name"`
-	Email    string            `json:"email"`
-}
-
 type PKeyPayload struct {
 	Id uuid.UUID `json:"id" binding:"required"`
 }
