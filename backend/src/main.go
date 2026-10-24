@@ -74,13 +74,33 @@ func main() {
 	r.POST("admin-control-panel/groups/users", func(c *gin.Context) {
 		controlpanel.AddUserToGroup(c, access_control_db)
 	})
-	
+
 	r.GET("admin-control-panel/groups/users", func(c *gin.Context) {
 		controlpanel.GetUsersFromGroupRequest(c, access_control_db)
 	})
-	
+
 	r.DELETE("admin-control-panel/groups/users", func(c *gin.Context) {
 		controlpanel.RemoveUserFromGroup(c, access_control_db)
+	})
+
+	r.POST("admin-control-panel/policy", func(c *gin.Context) {
+		controlpanel.AddGroupPolicyRequest(c, access_control_db)
+	})
+
+	r.GET("admin-control-panel/policy/groups", func(c *gin.Context) {
+		controlpanel.GetPoliciesFromGroup(c, access_control_db)
+	})
+
+	r.GET("admin-control-panel/groups/policy", func(c *gin.Context) {
+		controlpanel.GetPoliciesFromGroup(c, access_control_db)
+	})
+
+	r.PATCH("admin-control-panel/policy", func(c *gin.Context) {
+		controlpanel.UpdateGroupPolicyRequest(c, access_control_db)
+	})
+
+	r.DELETE("admin-control-panel/policy", func(c *gin.Context) {
+		controlpanel.RemoveGroupPolicyRequest(c, access_control_db)
 	})
 
 	r.Run(":8080")
