@@ -48,7 +48,7 @@ func run(ctx context.Context) error {
 		log.Print("PLATFORM_DATABASE_URL is unset; Migration storage is unavailable")
 	}
 
-	service, closeDependencies, err := migrationService(ctx, repository)
+	service, closeDependencies, err := migration.MigrationService(ctx, repository)
 	if err != nil {
 		return err
 	}
@@ -62,12 +62,12 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer closePlatform()
-	registerMigrationSession(router, service)
+	migration.RegisterMigrationSession(router, service)
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
 		addr = ":8080" // Preserve the shared backend's default listener.
 	}
-	if err = validateListenAddress(addr); err != nil {
+	if err = migration.ValidateListenAddress(addr); err != nil {
 		return err
 	}
 	server := &http.Server{
