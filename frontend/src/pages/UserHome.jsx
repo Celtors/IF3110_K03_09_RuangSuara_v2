@@ -15,7 +15,7 @@ export default function UserHome({ username, admin }) {
         <p className="muted">
           {admin
             ? 'You can manage users, groups and database access.'
-            : 'You’re signed in, but your account can’t open the admin console. If you need access, ask a platform admin to add you to a group that has it.'}
+            : 'You’re signed in'}
         </p>
         <div className="actions home-actions">
           <a className="btn" href="/migrations/">Open migrations</a>

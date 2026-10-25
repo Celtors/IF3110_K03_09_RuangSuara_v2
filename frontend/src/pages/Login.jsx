@@ -34,7 +34,6 @@ export default function Login({ next }) {
         <div className="foam" />
         <div className="login-art-copy">
           <span className="brand-mark">RuangSuara</span>
-          <p>One place to decide who can open, read and change every shared database.</p>
         </div>
       </section>
 
