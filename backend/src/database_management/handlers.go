@@ -161,8 +161,9 @@ func (h *Handler) createDatabase(c *gin.Context) {
 		fail(c, 400, "INVALID_REQUEST", err.Error())
 		return
 	}
-	mode := normalizeSSLMode(req.SSLMode)
-	if validateSSLMode(mode) == "" {
+	engine := normalizeDBMS(req.DBMS)
+	mode := normalizeSSLModeForDBMS(engine, req.SSLMode)
+	if validateDBMSSSLMode(engine, mode) == "" {
 		fail(c, 400, "INVALID_REQUEST", "Unsupported SSL mode")
 		return
 	}
@@ -171,7 +172,7 @@ func (h *Handler) createDatabase(c *gin.Context) {
 		fail(c, 500, "CREDENTIALS_NOT_CONFIGURED", "Secure credential encryption is not configured")
 		return
 	}
-	db := Database{Name: strings.TrimSpace(req.Name), Host: strings.TrimSpace(req.Host), Port: req.Port, DatabaseName: req.DatabaseName, Username: req.Username, PasswordCiphertext: ciphertext, SSLMode: mode}
+	db := Database{DBMS: engine, Name: strings.TrimSpace(req.Name), Host: strings.TrimSpace(req.Host), Port: req.Port, DatabaseName: req.DatabaseName, Username: req.Username, PasswordCiphertext: ciphertext, SSLMode: mode}
 	if err := h.platform.Create(&db).Error; err != nil {
 		fail(c, 500, "DATABASE_CREATE_FAILED", "Could not register database")
 		return
@@ -205,6 +206,16 @@ func (h *Handler) updateDatabase(c *gin.Context) {
 		fail(c, 400, "INVALID_REQUEST", "Invalid update request")
 		return
 	}
+	if req.DBMS != "" {
+		if !validDBMS(req.DBMS) {
+			fail(c, 400, "INVALID_REQUEST", "Unsupported DBMS")
+			return
+		}
+		d.DBMS = normalizeDBMS(req.DBMS)
+		if req.SSLMode == "" {
+			d.SSLMode = normalizeSSLModeForDBMS(d.DBMS, "")
+		}
+	}
 	if req.Name != "" {
 		d.Name = req.Name
 	}
@@ -229,7 +240,7 @@ func (h *Handler) updateDatabase(c *gin.Context) {
 		d.Username = req.Username
 	}
 	if req.SSLMode != "" {
-		if validateSSLMode(req.SSLMode) == "" {
+		if validateDBMSSSLMode(normalizeDBMS(d.DBMS), req.SSLMode) == "" {
 			fail(c, 400, "INVALID_REQUEST", "Unsupported SSL mode")
 			return
 		}
@@ -310,6 +321,7 @@ func (h *Handler) target(c *gin.Context) (*gorm.DB, bool) {
 	}
 	return db, true
 }
+func isMaria(db *gorm.DB) bool { return db.Dialector.Name() == "mysql" }
 func (h *Handler) schemas(c *gin.Context) {
 	db, ok := h.target(c)
 	if !ok {
@@ -319,7 +331,11 @@ func (h *Handler) schemas(c *gin.Context) {
 	var rows []struct {
 		Name string `json:"name"`
 	}
-	err := db.Raw("SELECT schema_name AS name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') AND schema_name NOT LIKE 'pg_toast%' ORDER BY schema_name").Scan(&rows).Error
+	query := "SELECT schema_name AS name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') AND schema_name NOT LIKE 'pg_toast%' ORDER BY schema_name"
+	if isMaria(db) {
+		query = "SELECT schema_name AS name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys') ORDER BY schema_name"
+	}
+	err := db.Raw(query).Scan(&rows).Error
 	if err != nil {
 		fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect target schemas")
 		return
@@ -365,7 +381,11 @@ func (h *Handler) metadata(c *gin.Context, kind string) {
 	switch kind {
 	case "columns":
 		var rows []map[string]interface{}
-		err := db.Raw("SELECT column_name, ordinal_position, data_type, udt_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position", schema, table).Scan(&rows).Error
+		query := "SELECT column_name, ordinal_position, data_type, udt_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position"
+		if isMaria(db) {
+			query = "SELECT column_name, ordinal_position, data_type, column_type AS udt_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position"
+		}
+		err := db.Raw(query, schema, table).Scan(&rows).Error
 		if err != nil {
 			fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect columns")
 			return
@@ -373,7 +393,11 @@ func (h *Handler) metadata(c *gin.Context, kind string) {
 		c.JSON(200, rows)
 	case "constraints":
 		var rows []map[string]interface{}
-		err := db.Raw("SELECT tc.constraint_name, tc.constraint_type, kcu.column_name, ccu.table_schema AS foreign_table_schema, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name FROM information_schema.table_constraints tc LEFT JOIN information_schema.key_column_usage kcu ON tc.constraint_catalog=kcu.constraint_catalog AND tc.constraint_schema=kcu.constraint_schema AND tc.constraint_name=kcu.constraint_name AND tc.table_name=kcu.table_name LEFT JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_catalog=tc.constraint_catalog AND ccu.constraint_schema=tc.constraint_schema AND ccu.constraint_name=tc.constraint_name WHERE tc.table_schema=? AND tc.table_name=? ORDER BY tc.constraint_name", schema, table).Scan(&rows).Error
+		query := "SELECT tc.constraint_name, tc.constraint_type, kcu.column_name, ccu.table_schema AS foreign_table_schema, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name FROM information_schema.table_constraints tc LEFT JOIN information_schema.key_column_usage kcu ON tc.constraint_catalog=kcu.constraint_catalog AND tc.constraint_schema=kcu.constraint_schema AND tc.constraint_name=kcu.constraint_name AND tc.table_name=kcu.table_name LEFT JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_catalog=tc.constraint_catalog AND ccu.constraint_schema=tc.constraint_schema AND ccu.constraint_name=tc.constraint_name WHERE tc.table_schema=? AND tc.table_name=? ORDER BY tc.constraint_name"
+		if isMaria(db) {
+			query = "SELECT tc.constraint_name,tc.constraint_type,kcu.column_name,kcu.referenced_table_schema AS foreign_table_schema,kcu.referenced_table_name AS foreign_table_name,kcu.referenced_column_name AS foreign_column_name FROM information_schema.table_constraints tc LEFT JOIN information_schema.key_column_usage kcu ON tc.constraint_schema=kcu.constraint_schema AND tc.table_schema=kcu.table_schema AND tc.table_name=kcu.table_name AND tc.constraint_name=kcu.constraint_name WHERE tc.table_schema=? AND tc.table_name=? ORDER BY tc.constraint_name"
+		}
+		err := db.Raw(query, schema, table).Scan(&rows).Error
 		if err != nil {
 			fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect constraints")
 			return
@@ -381,7 +405,11 @@ func (h *Handler) metadata(c *gin.Context, kind string) {
 		c.JSON(200, rows)
 	case "indexes":
 		var rows []map[string]interface{}
-		err := db.Raw("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ? ORDER BY indexname", schema, table).Scan(&rows).Error
+		query := "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ? ORDER BY indexname"
+		if isMaria(db) {
+			query = "SELECT index_name AS indexname, CONCAT('columns: ',GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ', '),'; unique: ',IF(non_unique=0,'yes','no')) AS indexdef FROM information_schema.statistics WHERE table_schema=? AND table_name=? GROUP BY index_name,non_unique ORDER BY index_name"
+		}
+		err := db.Raw(query, schema, table).Scan(&rows).Error
 		if err != nil {
 			fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect indexes")
 			return
@@ -418,6 +446,9 @@ func (h *Handler) rows(c *gin.Context) {
 		return
 	}
 	quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+	if isMaria(db) {
+		quote = func(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
+	}
 	query := fmt.Sprintf("SELECT * FROM %s.%s LIMIT ? OFFSET ?", quote(schema), quote(table))
 	var rows []map[string]interface{}
 	if err := db.Raw(query, limit, offset).Scan(&rows).Error; err != nil {

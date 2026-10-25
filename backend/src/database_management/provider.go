@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -33,38 +35,80 @@ var ErrDatabaseNotFound = errors.New("managed database not found")
 func NewProvider(platform *gorm.DB) *Provider {
 	return &Provider{platform: platform, timeout: 5 * time.Second, pools: make(map[poolKey]*pgxpool.Pool)}
 }
+func (p *Provider) targetConfiguration(ctx context.Context, id string) (Database, string, error) {
+	var d Database
+	if err := p.platform.WithContext(ctx).Where("id = ?", id).First(&d).Error; err != nil {
+		return d, "", err
+	}
+	if err := validateHost(d.Host); err != nil {
+		return d, "", fmt.Errorf("target host rejected by security policy")
+	}
+	if !validDBMS(d.DBMS) {
+		return d, "", errors.New("unsupported target database engine")
+	}
+	if validateDBMSSSLMode(normalizeDBMS(d.DBMS), d.SSLMode) == "" {
+		return d, "", errors.New("invalid target TLS configuration")
+	}
+	password, err := decryptPassword(d.PasswordCiphertext)
+	return d, password, err
+}
+func postgresDSN(d Database, password string) string {
+	u := &url.URL{Scheme: "postgres", Host: net.JoinHostPort(d.Host, strconv.Itoa(d.Port)), Path: "/" + d.DatabaseName, User: url.UserPassword(d.Username, password)}
+	q := u.Query()
+	q.Set("sslmode", d.SSLMode)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+func mariaDSN(d Database, password string) (string, error) {
+	cfg := mysqldriver.NewConfig()
+	cfg.User = d.Username
+	cfg.Passwd = password
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
+	cfg.DBName = d.DatabaseName
+	cfg.ParseTime = true
+	cfg.Timeout = 5 * time.Second
+	cfg.ReadTimeout = 5 * time.Second
+	cfg.WriteTimeout = 5 * time.Second
+	// TLS must never silently downgrade: require the driver to verify the server.
+	if d.SSLMode == "require" {
+		cfg.TLSConfig = "true"
+	} else if d.SSLMode != "disable" {
+		return "", errors.New("invalid MariaDB TLS mode")
+	}
+	return cfg.FormatDSN(), nil
+}
 func (p *Provider) targetDSN(ctx context.Context, id string) (string, error) {
-	var target Database
-	if err := p.platform.WithContext(ctx).Where("id = ?", id).First(&target).Error; err != nil {
-		return "", err
-	}
-	if err := validateHost(target.Host); err != nil {
-		return "", fmt.Errorf("target host rejected by security policy")
-	}
-	password, err := decryptPassword(target.PasswordCiphertext)
+	d, password, err := p.targetConfiguration(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	// lib/pq-style keyword DSN uses proper escaping via url.UserPassword and URL encoding.
-	u := &url.URL{Scheme: "postgres", Host: net.JoinHostPort(target.Host, strconv.Itoa(target.Port)), Path: "/" + target.DatabaseName, User: url.UserPassword(target.Username, password)}
-	q := u.Query()
-	q.Set("sslmode", target.SSLMode)
-	u.RawQuery = q.Encode()
-	return u.String(), nil
+	if normalizeDBMS(d.DBMS) != DBMSPostgres {
+		return "", errors.New("target is not PostgreSQL")
+	}
+	return postgresDSN(d, password), nil
 }
-
 func (p *Provider) Target(ctx context.Context, id string) (*gorm.DB, error) {
-	dsn, err := p.targetDSN(ctx, id)
+	d, password, err := p.targetConfiguration(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableAutomaticPing: true})
+	var db *gorm.DB
+	if normalizeDBMS(d.DBMS) == DBMSMariaDB {
+		dsn, e := mariaDSN(d, password)
+		if e != nil {
+			return nil, e
+		}
+		db, err = gorm.Open(gormmysql.Open(dsn), &gorm.Config{DisableAutomaticPing: true})
+	} else {
+		db, err = gorm.Open(postgres.Open(postgresDSN(d, password)), &gorm.Config{DisableAutomaticPing: true})
+	}
 	if err != nil {
-		return nil, fmt.Errorf("target database connection failed")
+		return nil, errors.New("target database connection failed")
 	}
 	sqlDB, err := db.DB()
 	if err != nil {
-		return nil, fmt.Errorf("target database connection failed")
+		return nil, errors.New("target database connection failed")
 	}
 	sqlDB.SetMaxOpenConns(4)
 	sqlDB.SetMaxIdleConns(1)
@@ -73,8 +117,8 @@ func (p *Provider) Target(ctx context.Context, id string) (*gorm.DB, error) {
 	pingCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	if err := sqlDB.PingContext(pingCtx); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("target database connection failed or timed out")
+		_ = sqlDB.Close()
+		return nil, errors.New("target database connection failed or timed out")
 	}
 	return db, nil
 }

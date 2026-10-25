@@ -93,3 +93,28 @@ func TestReadOnlyMethods(t *testing.T) {
 		}
 	}
 }
+
+func TestSupportedDBMSAndTLS(t *testing.T) {
+	for _, engine := range []string{"postgres", "mariadb"} {
+		if !validDBMS(engine) {
+			t.Fatalf("expected %s", engine)
+		}
+	}
+	for _, engine := range []string{"sqlite", "mysql", "unknown"} {
+		if validDBMS(engine) {
+			t.Fatalf("unexpected engine %s", engine)
+		}
+	}
+	if normalizeDBMS("") != "postgres" {
+		t.Fatal("legacy registrations must default to postgres")
+	}
+	if normalizeSSLModeForDBMS("mariadb", "") != "disable" {
+		t.Fatal("incorrect MariaDB default")
+	}
+	if validateDBMSSSLMode("mariadb", "verify-full") != "" {
+		t.Fatal("invalid MariaDB mode accepted")
+	}
+	if validateDBMSSSLMode("mariadb", "require") != "require" {
+		t.Fatal("MariaDB TLS require must be supported")
+	}
+}
