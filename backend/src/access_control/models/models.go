@@ -10,7 +10,7 @@ import (
 type User struct {
 	ID           uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	Username     string    `json:"username"`
-	PasswordHash string    `json:"password_hash"`
+	PasswordHash string    `json:"-"`
 	Status       string    `json:"status"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -48,8 +48,6 @@ func (u User) GetLatestActiveSession(db *gorm.DB) *uuid.UUID {
 
 	return &(sessions[0].ID)
 }
-
-
 
 type Group struct {
 	ID          uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
@@ -115,16 +113,17 @@ func (session SSOSession) MarkActivity(db *gorm.DB) {
 
 type Databasae struct {
 	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type GroupPolicy struct {
-	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	DatabaseId uuid.UUID `json:"database_id"`
-	GroupId   uuid.UUID `json:"group_id"`
-	Effect    string `json:"effect"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	DatabaseId uuid.UUID `json:"database_id" gorm:"column:database_id;type:uuid"`
+	GroupId    uuid.UUID `json:"group_id" gorm:"column:group_id;type:uuid"`
+	Permission string    `json:"permission" gorm:"default:VIEW_ONLY"`
+	Effect     string    `json:"effect" gorm:"default:ALLOW"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 func (GroupPolicy) TableName() string {
@@ -132,12 +131,11 @@ func (GroupPolicy) TableName() string {
 }
 
 type AccessLog struct {
-	ID        uuid.UUID
-	EventType string
+	ID         uuid.UUID
+	EventType  string
 	DatabaseId uuid.UUID
-	UserId    uuid.UUID
-	SessionId uuid.UUID
-	Result    string
-	CreatedAt time.Time
+	UserId     uuid.UUID
+	SessionId  uuid.UUID
+	Result     string
+	CreatedAt  time.Time
 }
-
