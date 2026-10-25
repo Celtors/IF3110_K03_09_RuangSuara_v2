@@ -36,7 +36,7 @@ func (payload GroupPolicyPayload) GetDBStructCreate() models.GroupPolicy {
 	return models.GroupPolicy{
 		GroupId:    payload.GroupId,
 		DatabaseId: payload.DatabaseId,
-		Effect:     "Allow",
+		Effect:     "ViewOnly",
 	}
 }
 
