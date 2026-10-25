@@ -1,20 +1,12 @@
 import { useState } from 'react'
-import { Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { useAuth } from '../auth/auth-context'
+import { login } from '../auth/session'
 
-export default function Login() {
-  const { username: current, login } = useAuth()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const from = location.state?.from || '/admin'
-
+export default function Login({ next }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-
-  if (current) return <Navigate to={from} replace />
 
   async function onSubmit(e) {
     e.preventDefault()
@@ -26,7 +18,7 @@ export default function Login() {
     setBusy(true)
     try {
       await login(username.trim(), password)
-      navigate(from, { replace: true })
+      window.location.assign(next)
     } catch (err) {
       setError(err.message)
       setPassword('')
@@ -40,6 +32,7 @@ export default function Login() {
         <div className="foam" />
         <div className="login-art-copy">
           <span className="brand-mark">RuangSuara</span>
+          <p>One place to decide who can open, read and change every shared database.</p>
         </div>
       </section>
 

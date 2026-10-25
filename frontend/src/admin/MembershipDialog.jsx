@@ -5,6 +5,7 @@ import Modal from '../components/Modal'
 import { useToast } from '../components/toast-context'
 import { formatDate } from '../components/format'
 
+// mode "group": manage the users in a group. mode "user": manage the groups of a user.
 export default function MembershipDialog({ mode, entity, options, onClose }) {
   const toast = useToast()
   const isGroup = mode === 'group'

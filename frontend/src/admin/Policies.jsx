@@ -7,13 +7,11 @@ import { useToast } from '../components/toast-context'
 import { UUID_RE, formatDate } from '../components/format'
 
 const fetchGroups = () => api.listGroups()
-const fetchDatabases = () => api.listDatabases()
 const fetchPolicies = () => api.listPolicies()
 
 export default function Policies() {
   const toast = useToast()
   const groups = useResource(fetchGroups)
-  const databases = useResource(fetchDatabases)
   const policies = useResource(fetchPolicies)
 
   const [groupId, setGroupId] = useState('')
@@ -25,7 +23,6 @@ export default function Policies() {
   const [removing, setRemoving] = useState(null)
 
   const groupName = (id) => (groups.data ?? []).find((g) => g.id === id)?.name ?? id
-  const databaseName = (id) => (databases.data ?? []).find((d) => d.id === id)?.name ?? id
   const rows = (policies.data ?? []).filter((p) => !filter || p.group_id === filter)
 
   async function add(e) {
@@ -76,12 +73,9 @@ export default function Policies() {
             {(groups.data ?? []).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
         </label>
-        <label className="field">
-          <span>Group</span>
-          <select className="select" value={databaseId} onChange={(e) => setDatabaseId(e.target.value)}>
-            <option value="">Choose a Database</option>
-            {(databases.data ?? []).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-          </select>
+        <label className="field grow">
+          <span>Database ID</span>
+          <input className="input mono" value={databaseId} onChange={(e) => setDatabaseId(e.target.value)} placeholder="00000000-0000-0000-0000-000000000000" spellCheck={false} />
         </label>
         <label className="field">
           <span>Access level</span>
@@ -110,13 +104,13 @@ export default function Policies() {
         <div className="table-wrap">
           <table className="table">
             <thead>
-              <tr><th>Group</th><th>Database</th><th>Access level</th><th>Granted</th><th><span className="sr-only">Actions</span></th></tr>
+              <tr><th>Group</th><th>Database ID</th><th>Access level</th><th>Granted</th><th><span className="sr-only">Actions</span></th></tr>
             </thead>
             <tbody>
               {rows.map((p) => (
                 <tr key={p.id}>
                   <td><strong>{groupName(p.group_id)}</strong></td>
-                  <td className="mono small">{databaseName(p.database_id)}</td>
+                  <td className="mono small">{p.database_id}</td>
                   <td>
                     <select className="select select-inline" value={p.effect} onChange={(e) => change(p, e.target.value)} aria-label={`Access level for ${groupName(p.group_id)}`}>
                       {!ACCESS_LEVELS.some((l) => l.value === p.effect) && (

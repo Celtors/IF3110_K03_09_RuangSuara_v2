@@ -7,7 +7,9 @@ export class ApiError extends Error {
   }
 }
 
-
+// Backend error shapes:
+//   login/logout:  { error: { code, message, requestId } }
+//   control panel: { status: "error", message }
 async function request(method, path, body) {
   let res
   try {

@@ -2,6 +2,8 @@ import { http } from './client'
 
 const CP = '/admin-control-panel'
 
+// Access levels a group can have on a database. The backend stores `effect` as a
+// free string (VARCHAR(10)), so these two values are the contract of this UI.
 export const ACCESS_LEVELS = [
   { value: 'ViewOnly', label: 'View only' },
   { value: 'ViewEdit', label: 'View + edit' },
@@ -28,8 +30,8 @@ export const api = {
   addMember: (user_id, group_id) => http.post(`${CP}/groups/users`, { user_id, group_id }),
   removeMember: (user_id, group_id) => http.delete(`${CP}/groups/users`, { user_id, group_id }),
 
-  listDatabases: () => http.get(`${CP}/databases`),
   listPolicies: () => http.get(`${CP}/policy`),
+  // The backend always creates a policy as "Allow"; the chosen level is applied with a PATCH.
   addPolicy: async (group_id, database_id, effect) => {
     await http.post(`${CP}/policy`, { group_id, database_id })
     await http.patch(`${CP}/policy`, { group_id, database_id, effect })
