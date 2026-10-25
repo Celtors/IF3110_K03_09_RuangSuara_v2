@@ -12,12 +12,12 @@ import (
 )
 
 type GroupPolicyPayload struct {
-	GroupId uuid.UUID `json:"group_id" binding:"required"`
-	Policy  string    `json:"policy" binding:"required"`
-	Effect  string    `json:"effect"`
+	GroupId    uuid.UUID `json:"group_id" binding:"required"`
+	DatabaseId uuid.UUID `json:"database_id" binding:"required"`
+	Effect     string    `json:"effect"`
 }
 
-type GroupFromPolicy struct {
+type GroupFromDatabasePolicy struct {
 	GroupId     uuid.UUID `json:"group_id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
@@ -25,21 +25,18 @@ type GroupFromPolicy struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-type PolicyFromGroup struct {
-	Policy    string    `json:"policy"`
+type DatabaseFromGroupPolicy struct {
+	DatabaseId uuid.UUID `json:"database_id"`
+
 	Effect    string    `json:"effect"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type PolicyTypePayload struct {
-	Policy string `json:"policy"`
-}
-
 func (payload GroupPolicyPayload) GetDBStructCreate() models.GroupPolicy {
 	return models.GroupPolicy{
-		GroupId: payload.GroupId,
-		Policy:  payload.Policy,
-		Effect:  "Allow",
+		GroupId:    payload.GroupId,
+		DatabaseId: payload.DatabaseId,
+		Effect:     "Allow",
 	}
 }
 
@@ -81,7 +78,7 @@ func RemoveGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	db.Where("group_id = ? AND policy = ?", policyPayload.GroupId, policyPayload.Policy).Delete(&models.GroupPolicy{})
+	db.Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).Delete(&models.GroupPolicy{})
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
@@ -101,7 +98,7 @@ func UpdateGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 	}
 
 	db.Model(&models.GroupPolicy{}).
-		Where("group_id = ? AND policy = ?", policyPayload.GroupId, policyPayload.Policy).
+		Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).
 		Update("effect", policyPayload.Effect)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -110,46 +107,53 @@ func UpdateGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 	})
 }
 
-func GetPoliciesFromGroup(c *gin.Context, db *gorm.DB) {
-	var policiesFromGroup []PolicyFromGroup
 
-	var groupPKey PKeyPayload
 
-	if err := c.ShouldBindJSON(&groupPKey); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"status":  "error",
-			"message": "Failed to get groups: " + err.Error(),
-		})
-		return
+func GetPoliciesRequest(c *gin.Context, db *gorm.DB) {
+	group_id := c.DefaultQuery("groupId", "") 
+	database_id := c.DefaultQuery("databaseId", "")
+
+	if group_id != "" && database_id != "" {
+		var groupPolicies []models.GroupPolicy
+
+		db.Model(&models.GroupPolicy{}).
+			Joins("INNER JOIN groups_ ON groups_.id = group_policies.group_id").
+			Joins("INNER JOIN databases ON databases.id = group_policies.database_id").
+			Where("group_id = ? AND database_id = ?", group_id, database_id).
+			Find(&groupPolicies)
+
+		c.JSON(http.StatusOK, groupPolicies)
+	} else if group_id != "" {
+		var databasesFromGroup []DatabaseFromGroupPolicy
+
+		db.Model(&models.GroupPolicy{}).
+			Select("databases.id, databases.name, group_policies.effect, group_policies.created_at").
+			Joins("INNER JOIN databases ON databases.id = group_policies.database_id").
+			Where("group_id = ?", group_id).
+			Find(&databasesFromGroup)
+
+		c.JSON(http.StatusOK, databasesFromGroup)
+	} else if database_id != "" {
+		var groupFromDatabase []GroupFromDatabasePolicy
+
+		db.Model(&models.GroupPolicy{}).
+			Select("groups_.id, groups_.name, groups_.description, group_policies.effect, group_policies.created_at").
+			Joins("INNER JOIN groups_ ON groups_.id = group_policies.group_id").
+			Where("database_id = ?", database_id).
+			Find(&groupFromDatabase)
+
+		c.JSON(http.StatusOK, groupFromDatabase)
+	} else {
+		var policies []models.GroupPolicy
+
+		if err := db.Find(&policies).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status":  "error",
+				"message": "Failed to get user data: " + err.Error(),
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, policies)
 	}
-
-	db.Model(&models.GroupPolicy{}).
-		Select("group_policies.policy, group_policies.effect, group_policies.created_at").
-		Joins("JOIN groups_ ON groups_.id = group_policies.group_id").
-		Where("group_id = ?", groupPKey.Id).
-		Find(&policiesFromGroup)
-
-	c.JSON(http.StatusOK, policiesFromGroup)
-}
-
-func GetGroupWithPolicy(c *gin.Context, db *gorm.DB) {
-	var policiesFromGroup []GroupFromPolicy
-
-	var policy PolicyTypePayload
-
-	if err := c.ShouldBindJSON(&policy); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"status":  "error",
-			"message": "Failed to get apps: " + err.Error(),
-		})
-		return
-	}
-
-	db.Model(&models.GroupPolicy{}).
-		Select("groups_.id, groups_.name, groups_.description, group_policies.effect, group_policies.created_at").
-		Joins("JOIN groups_ ON groups_.id = group_policies.group_id").
-		Where("policy = ?", policy.Policy).
-		Find(&policiesFromGroup)
-
-	c.JSON(http.StatusOK, policiesFromGroup)
 }

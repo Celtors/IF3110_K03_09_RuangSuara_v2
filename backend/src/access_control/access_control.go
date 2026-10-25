@@ -5,6 +5,7 @@ import (
 
 	controlpanel "backend/access_control/control_panel"
 	sessionmanager "backend/access_control/session_manager"
+
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -20,7 +21,6 @@ func SetupAccessControl(r *gin.Engine) {
 	if access_control_db == nil {
 		return
 	}
-
 
 	r.POST("admin-control-panel/users", func(c *gin.Context) {
 		controlpanel.CreateUserRequest(c, access_control_db)
@@ -82,12 +82,8 @@ func SetupAccessControl(r *gin.Engine) {
 		controlpanel.AddGroupPolicyRequest(c, access_control_db)
 	})
 
-	r.GET("admin-control-panel/policy/groups", func(c *gin.Context) {
-		controlpanel.GetPoliciesFromGroup(c, access_control_db)
-	})
-
-	r.GET("admin-control-panel/groups/policy", func(c *gin.Context) {
-		controlpanel.GetPoliciesFromGroup(c, access_control_db)
+	r.GET("admin-control-panel/policy", func(c *gin.Context) {
+		controlpanel.GetPoliciesRequest(c, access_control_db)
 	})
 
 	r.PATCH("admin-control-panel/policy", func(c *gin.Context) {

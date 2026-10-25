@@ -49,6 +49,8 @@ func (u User) GetLatestActiveSession(db *gorm.DB) *uuid.UUID {
 	return &(sessions[0].ID)
 }
 
+
+
 type Group struct {
 	ID          uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	Name        string    `json:"name"`
@@ -111,14 +113,31 @@ func (session SSOSession) MarkActivity(db *gorm.DB) {
 	db.Model(&SSOSession{}).Where("id = ?", session.ID).Updates(SSOSession{LastActivityAt: &t})
 }
 
+type Databasae struct {
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 type GroupPolicy struct {
-	ID        uuid.UUID
-	GroupId   uuid.UUID
-	Policy    string
-	Effect    string
-	CreatedAt time.Time
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	DatabaseId uuid.UUID `json:"database_id"`
+	GroupId   uuid.UUID `json:"group_id"`
+	Effect    string `json:"effect"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (GroupPolicy) TableName() string {
 	return "group_policies"
 }
+
+type AccessLog struct {
+	ID        uuid.UUID
+	EventType string
+	DatabaseId uuid.UUID
+	UserId    uuid.UUID
+	SessionId uuid.UUID
+	Result    string
+	CreatedAt time.Time
+}
+
