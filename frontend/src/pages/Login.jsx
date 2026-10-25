@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { login } from '../auth/session'
+import { HOME_PAGE, fetchMe, login } from '../auth/session'
 
 export default function Login({ next }) {
   const [username, setUsername] = useState('')
@@ -18,7 +18,9 @@ export default function Login({ next }) {
     setBusy(true)
     try {
       await login(username.trim(), password)
-      window.location.assign(next)
+      // Admins continue to where they were going; everyone else lands on the home page.
+      const me = await fetchMe()
+      window.location.assign(me?.admin ? next : HOME_PAGE)
     } catch (err) {
       setError(err.message)
       setPassword('')

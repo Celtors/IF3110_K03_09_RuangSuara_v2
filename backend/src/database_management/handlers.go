@@ -38,6 +38,7 @@ func RegisterRoutes(r gin.IRouter, platform *gorm.DB) {
 	admin.DELETE("/:id", h.deleteDatabase)
 	admin.POST("/:id/test", h.testConnection)
 	admin.PUT("/:id/groups/:groupID/policy", h.setPolicy)
+	r.GET("/session-manager/me", h.requireSession, h.me)
 	viewer := r.Group("/api/databases/:id", h.requireSession, h.requireView)
 	viewer.GET("/schemas", h.schemas)
 	viewer.GET("/schemas/:schema/tables", h.tables)
@@ -68,15 +69,55 @@ func (h *Handler) requireSession(c *gin.Context) {
 	c.Set("principal_id", user.ID.String())
 	c.Next()
 }
+
+func adminDatabaseName() string {
+	if v := strings.TrimSpace(os.Getenv("ADMIN_DATABASE_NAME")); v != "" {
+		return v
+	}
+	return "users_db"
+}
+
+func (h *Handler) adminAccess(userID string) (view, edit bool) {
+	var ids []string
+	if err := h.platform.Table("databases").Where("name = ?", adminDatabaseName()).Pluck("id", &ids).Error; err != nil || len(ids) != 1 {
+		return false, false
+	}
+	return h.hasPermission(userID, ids[0], false), h.hasPermission(userID, ids[0], true)
+}
+
+func isReadOnlyMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
+}
+
 func (h *Handler) requireAdmin(c *gin.Context) {
 	id, _ := c.Get("principal_id")
-	for _, candidate := range strings.Split(os.Getenv("PLATFORM_ADMIN_USER_IDS"), ",") {
-		if strings.TrimSpace(candidate) == fmt.Sprint(id) && candidate != "" {
-			c.Next()
-			return
-		}
+	view, edit := h.adminAccess(fmt.Sprint(id))
+	if !view {
+		fail(c, http.StatusForbidden, "FORBIDDEN", "You do not have access to the admin console")
+		return
 	}
-	fail(c, http.StatusForbidden, "FORBIDDEN", "Platform Admin role is required")
+	if !isReadOnlyMethod(c.Request.Method) && !edit {
+		fail(c, http.StatusForbidden, "READ_ONLY", "Your access to the admin console is view only")
+		return
+	}
+	c.Next()
+}
+
+func (h *Handler) me(c *gin.Context) {
+	id := fmt.Sprint(c.MustGet("principal_id"))
+	var user acmodels.User
+	if err := h.platform.First(&user, "id = ?", id).Error; err != nil {
+		fail(c, http.StatusUnauthorized, "INVALID_SESSION", "A valid session is required")
+		return
+	}
+	view, edit := h.adminAccess(id)
+	access := "none"
+	if edit {
+		access = fx.ViewEdit
+	} else if view {
+		access = fx.ViewOnly
+	}
+	c.JSON(http.StatusOK, gin.H{"id": user.ID, "username": user.Username, "admin": view, "admin_access": access})
 }
 func (h *Handler) requireView(c *gin.Context) {
 	id := c.Param("id")
@@ -91,19 +132,14 @@ func (h *Handler) requireView(c *gin.Context) {
 	}
 	c.Next()
 }
-func (h *Handler) isAdmin(id string) bool {
-	for _, v := range strings.Split(os.Getenv("PLATFORM_ADMIN_USER_IDS"), ",") {
-		if strings.TrimSpace(v) == id && v != "" {
-			return true
-		}
-	}
-	return false
-}
 
+// policyGrant is one group policy that applies to a user for a database.
 type policyGrant struct {
 	Effect string
 }
 
+// effectivePermission combines the effects a user gets through all of their groups:
+// Blocked in any group denies, ViewEdit allows view and edit, ViewOnly allows view only.
 func effectivePermission(rows []policyGrant, edit bool) bool {
 	effects := make([]string, len(rows))
 	for i, row := range rows {

@@ -1,4 +1,4 @@
-import { logout, getUsername, LOGIN_PAGE } from '../auth/session'
+import { LOGIN_PAGE, logout } from '../auth/session'
 import ToastProvider from '../components/ToastProvider'
 
 const NAV = [
@@ -7,9 +7,7 @@ const NAV = [
   { key: 'policies', href: '/admin/policies.html', label: 'Database access' },
 ]
 
-export default function AdminShell({ active, children }) {
-  const username = getUsername()
-
+export default function AdminShell({ active, username, access, children }) {
   async function signOut() {
     await logout()
     window.location.assign(LOGIN_PAGE)
@@ -34,6 +32,7 @@ export default function AdminShell({ active, children }) {
           </nav>
           <div className="sidebar-foot">
             <span className="who" title={username}>{username}</span>
+            {access === 'ViewOnly' && <span className="access-note">View-only access</span>}
             <button type="button" className="btn btn-small btn-onDark" onClick={signOut}>
               Sign out
             </button>

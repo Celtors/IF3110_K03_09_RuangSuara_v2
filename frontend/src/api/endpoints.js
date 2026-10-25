@@ -15,6 +15,8 @@ export const accessLabel = (effect) =>
 export const api = {
   login: (username, password) => http.post('/session-manager/login', { username, password }),
   logout: () => http.post('/session-manager/logout'),
+  // Who is signed in and whether they may use the admin console ({ username, admin, admin_access }).
+  me: () => http.get('/session-manager/me'),
 
   listUsers: () => http.get(`${CP}/users`),
   createUser: (username, password) => http.post(`${CP}/users`, { username, password }),
@@ -31,6 +33,7 @@ export const api = {
   addMember: (user_id, group_id) => http.post(`${CP}/groups/users`, { user_id, group_id }),
   removeMember: (user_id, group_id) => http.delete(`${CP}/groups/users`, { user_id, group_id }),
 
+  listDatabases: () => http.get(`${CP}/databases`),
   listPolicies: () => http.get(`${CP}/policy`),
   addPolicy: (group_id, database_id, effect) =>
     http.post(`${CP}/policy`, { group_id, database_id, effect }),

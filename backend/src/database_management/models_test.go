@@ -80,3 +80,16 @@ func TestEffectivePermission(t *testing.T) {
 		t.Fatal("a user with no policy must have no access")
 	}
 }
+
+func TestReadOnlyMethods(t *testing.T) {
+	for _, m := range []string{"GET", "HEAD", "OPTIONS"} {
+		if !isReadOnlyMethod(m) {
+			t.Fatalf("%s must be treated as read-only", m)
+		}
+	}
+	for _, m := range []string{"POST", "PATCH", "PUT", "DELETE"} {
+		if isReadOnlyMethod(m) {
+			t.Fatalf("%s changes state and must need ViewEdit", m)
+		}
+	}
+}

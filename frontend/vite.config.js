@@ -19,6 +19,7 @@ export default defineConfig({
       input: {
         index: page('./index.html'),
         login: page('./login.html'),
+        home: page('./home.html'),
         users: page('./admin/users.html'),
         groups: page('./admin/groups.html'),
         policies: page('./admin/policies.html'),
