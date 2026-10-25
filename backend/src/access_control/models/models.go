@@ -20,22 +20,30 @@ func (u User) IsActive() bool {
 	return u.Status == "Active"
 }
 
-func (u User) AuthorizedGroupCount(policy string, db *gorm.DB) int {
-	groups := db.Model(&GroupPolicy{}).Select("group_id").Where("policy = ? AND effect = ?", policy, "Blocked")
+func (u User) AuthorizedGroupCount(database_id uuid.UUID, db *gorm.DB) int {
+	groups := db.Model(&GroupPolicy{}).Select("group_id").Where("database_id = ? AND effect = ?", database_id, "Blocked")
 
 	var userGroup []UserGroup
-	db.Model(&UserGroup{}).Where("user_id = ? AND group_id IN (?)", u.ID, groups).Find(&userGroup)
+	db.Model(&UserGroup{}).Where("user_id = ? AND group_id NOT IN (?)", u.ID, groups).Find(&userGroup)
 
 	return len(userGroup)
 }
 
-func (u User) IsAuthorized(policy string, db *gorm.DB) bool {
-	groups := db.Model(&GroupPolicy{}).Select("group_id").Where("policy = ? AND effect = ?", policy, "Blocked")
+func (u User) GetHighestAuthorization(database_id uuid.UUID, db *gorm.DB) string {
+	effects := [3]string{"Blocked", "ViewEdit", "ViewOnly"}
+	
+	for _ , value := range effects {
+		groups := db.Model(&GroupPolicy{}).Select("group_id").Where("database_id = ? AND effect = ?", database_id, value)
 
-	var userGroup []UserGroup
-	db.Model(&UserGroup{}).Where("user_id = ? AND group_id IN (?)", u.ID, groups).Find(&userGroup)
+		var userGroup []UserGroup
+		db.Model(&UserGroup{}).Where("user_id = ? AND group_id IN (?)", u.ID, groups).Find(&userGroup)
 
-	return (u.AuthorizedGroupCount(policy, db) > 0) && (len(userGroup) == 0)
+		if len(userGroup) > 0 {
+			return value
+		} 
+	}
+
+	return "NotFound"
 }
 
 func (u User) GetLatestActiveSession(db *gorm.DB) *uuid.UUID {
