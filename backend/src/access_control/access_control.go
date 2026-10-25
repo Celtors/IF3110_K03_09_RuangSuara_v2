@@ -78,6 +78,10 @@ func SetupAccessControl(r *gin.Engine) {
 		controlpanel.RemoveUserFromGroup(c, access_control_db)
 	})
 
+	r.GET("admin-control-panel/databases", func(c *gin.Context) {
+		controlpanel.GetAllDatabasesRequest(c, access_control_db)
+	})
+
 	r.POST("admin-control-panel/policy", func(c *gin.Context) {
 		controlpanel.AddGroupPolicyRequest(c, access_control_db)
 	})
