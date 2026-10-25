@@ -1,0 +1,21 @@
+include:
+  - env_file : ./.env
+
+services:
+  access-control-db:
+    image: postgres:16-alpine
+    container_name: access-control-db
+    restart: always
+    shm_size: 128mb
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: access-control-db
+    ports:
+      - "9000:5432"
+    volumes:
+      - access_control_data:/var/lib/postgresql/data
+      - ./database_schema/access-control:/docker-entrypoint-initdb.d:ro
+
+volumes:
+  access_control_data :
