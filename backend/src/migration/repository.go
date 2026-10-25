@@ -134,14 +134,15 @@ func (r *Repository) save(ctx context.Context, db, id, user string, d Draft) (Mi
 	return scanMigration(c.QueryRow(ctx, `UPDATE dmp_migration.definitions SET name=$3,description=$4,sql_script=$5,release_label=$6,state='draft',updated_at=now() WHERE database_id=$1 AND id=$2 RETURNING `+definitionColumns, db, id, d.Name, d.Description, d.SQL, d.ReleaseLabel), false)
 }
 
-func beginAttempt(ctx context.Context, c *pgxpool.Conn, m Migration, user string) (Attempt, error) {
+func beginAttempt(ctx context.Context, c *pgxpool.Conn, m Migration, user, identity string) (Attempt, error) {
 	a := Attempt{ID: newID(), MigrationID: m.ID, DatabaseID: m.DatabaseID, SQL: m.SQL, Executor: user, Status: "running"}
 	tx, err := c.Begin(ctx)
 	if err != nil {
 		return a, err
 	}
 	defer rollback(tx)
-	err = tx.QueryRow(ctx, `INSERT INTO dmp_migration.attempts(id,migration_id,database_id,sql_script_snapshot,executor_user_id,status) VALUES($1,$2,$3,$4,$5,'running') RETURNING started_at`, a.ID, a.MigrationID, a.DatabaseID, a.SQL, user).Scan(&a.Started)
+	a.TargetIdentity = identity
+	err = tx.QueryRow(ctx, `INSERT INTO dmp_migration.attempts(id,migration_id,database_id,sql_script_snapshot,executor_user_id,status,target_identity) VALUES($1,$2,$3,$4,$5,'running',$6) RETURNING started_at`, a.ID, a.MigrationID, a.DatabaseID, a.SQL, user, identity).Scan(&a.Started)
 	if err != nil {
 		return a, err
 	}

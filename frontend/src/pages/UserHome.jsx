@@ -18,6 +18,7 @@ export default function UserHome({ username, admin }) {
             : 'You’re signed in, but your account can’t open the admin console. If you need access, ask a platform admin to add you to a group that has it.'}
         </p>
         <div className="actions home-actions">
+          <a className="btn" href="/migrations/">Open migrations</a>
           {admin && <a className="btn btn-primary" href={ADMIN_PAGE}>Open admin console</a>}
           <button type="button" className="btn" onClick={signOut}>Sign out</button>
         </div>

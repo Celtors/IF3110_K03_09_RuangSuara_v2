@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The desired schema is the complete target. 
+// The desired schema is the complete target.
 // Missing objects may be removed.
 type Schema struct {
 	Name        string   `json:"name"`
@@ -105,10 +105,13 @@ func validateSchema(s Schema) error {
 			}
 		}
 		for _, i := range t.Indexes {
-			if !validName(i.Name) || indexes[i.Name] || len(i.Columns) == 0 {
+			if !validName(i.Name) || indexes[i.Name] || (!i.Unsupported && len(i.Columns) == 0) {
 				return fault("invalid_input", "Indexes require unique schema-wide names and columns")
 			}
 			indexes[i.Name] = true
+			if i.Unsupported {
+				continue
+			}
 			for _, c := range i.Columns {
 				if !columns[c] {
 					return fault("invalid_input", "Index refers to a missing column")

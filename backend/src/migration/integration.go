@@ -1,14 +1,17 @@
 package migration
 
-import "github.com/google/uuid"
+import (
+	fx "backend/access_control/effect"
+	"github.com/google/uuid"
+)
 
-// PermissionFromEffective converts Access Control's final permission into a Migration permission. 
+// PermissionFromEffective converts Access Control's final permission into a Migration permission.
 // Unknown values deny access.
 func PermissionFromEffective(permission string) Permission {
 	switch permission {
-	case "VIEW_ONLY":
+	case fx.ViewOnly:
 		return View
-	case "VIEW_EDIT":
+	case fx.ViewEdit:
 		return Edit
 	default:
 		return NoAccess

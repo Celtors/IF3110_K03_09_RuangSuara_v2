@@ -2,7 +2,9 @@ package migration
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,12 +28,33 @@ func (s *Service) authorize(ctx context.Context, user, db string, want Permissio
 	}
 	permission, err := s.Access.Permission(ctx, user, db)
 	if err != nil {
+		var f *Fault
+		if errors.As(err, &f) && f.Code == "invalid_input" {
+			return f
+		}
 		return fault("authorization_unavailable", "Database authorization is unavailable")
 	}
 	if permission < want || permission > Edit {
 		return fault("forbidden", "You do not have the required database permission")
 	}
+	if s.Repository == nil || s.Repository.Pool == nil {
+		return fault("database_unavailable", "Migration storage is unavailable")
+	}
 	return nil
+}
+
+// This identifies configured endpoints, without persisting credentials. A
+// registration retarget must never make recovery inspect an unrelated XID.
+func targetIdentity(ctx context.Context, conn *pgx.Conn) (string, error) {
+	c := conn.Config()
+	var cluster, database string
+	if err := conn.QueryRow(ctx, `SELECT system_identifier::text, (SELECT oid::text FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()) FROM pg_catalog.pg_control_system()`).Scan(&cluster, &database); err != nil {
+		if postgresCode(err) == "42501" {
+			return "", fault("database_unavailable", "Target identity inspection is not permitted; an administrator must check EXECUTE on pg_catalog.pg_control_system()")
+		}
+		return "", fault("database_unavailable", "Target identity could not be verified")
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s", c.Host, c.Port, c.Database, cluster, database)))), nil
 }
 func (s *Service) connection(ctx context.Context, db string) (*pgxpool.Pool, error) {
 	if s.Connections == nil {
@@ -123,14 +146,15 @@ func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, er
 	if _, err = parseSQL(definition.SQL, false); err != nil {
 		return Attempt{}, err
 	}
-	attempt, err := beginAttempt(ctx, platformConn, definition, user)
+	attempt, err := beginAttempt(ctx, platformConn, definition, user, "")
 	if err != nil {
 		return attempt, err
 	}
-	result := executePostgres(ctx, pool, definition.SQL, func(xid string) error {
-		_, recordErr := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2 WHERE id=$1`, attempt.ID, xid)
+	result := executePostgres(ctx, pool, definition.SQL, func(xid, identity string) error {
+		_, recordErr := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1`, attempt.ID, xid, identity)
 		if recordErr == nil {
 			attempt.XID = &xid
+			attempt.TargetIdentity = identity
 		}
 		return recordErr
 	})
@@ -171,18 +195,34 @@ func (s *Service) Reconcile(ctx context.Context, user, db string) error {
 }
 func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pgxpool.Pool, db string) error {
 	var a Attempt
-	err := c.QueryRow(ctx, `SELECT id,migration_id,database_id,target_xid FROM dmp_migration.attempts WHERE database_id=$1 AND status IN ('running','unknown')`, db).Scan(&a.ID, &a.MigrationID, &a.DatabaseID, &a.XID)
+	err := c.QueryRow(ctx, `SELECT id,migration_id,database_id,target_xid,target_identity FROM dmp_migration.attempts WHERE database_id=$1 AND status IN ('running','unknown')`, db).Scan(&a.ID, &a.MigrationID, &a.DatabaseID, &a.XID, &a.TargetIdentity)
 	if isNoRows(err) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	if a.TargetIdentity == "" {
+		return fault("indeterminate", "The execution has no recorded target identity; operator investigation is required")
+	}
+	probe, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	target, err := pool.Acquire(probe)
+	if err != nil {
+		return fault("database_unavailable", "Target connection unavailable during reconciliation")
+	}
+	defer target.Release()
+	identity, err := targetIdentity(probe, target.Conn())
+	if err != nil {
+		return err
+	}
+	if a.TargetIdentity != identity {
+		return fault("indeterminate", "The target configuration differs from the recorded execution; restore the original target before reconciliation")
+	}
 	if a.XID != nil {
 		var status *string
-		probe, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		e := pool.QueryRow(probe, `SELECT pg_xact_status($1::xid8)`, *a.XID).Scan(&status)
+		// Identity and outcome must come from the same physical connection.
+		e := target.QueryRow(probe, `SELECT pg_catalog.pg_xact_status($1::xid8)`, *a.XID).Scan(&status)
 		if e == nil && status != nil && (*status == "committed" || *status == "aborted") {
 			resolved := "failed"
 			if *status == "committed" {

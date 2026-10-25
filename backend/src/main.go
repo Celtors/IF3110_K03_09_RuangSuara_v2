@@ -11,6 +11,7 @@ import (
 	"time"
 
 	accesscontrol "backend/access_control"
+	databasemanagement "backend/database_management"
 	"backend/internal/app"
 	"backend/migration"
 
@@ -30,7 +31,7 @@ func main() {
 
 func run(ctx context.Context) error {
 	var repository *migration.Repository
-	if dsn := os.Getenv("PLATFORM_DATABASE_URL"); dsn != "" {
+	if dsn := accesscontrol.PlatformDSN(); dsn != "" {
 		pool, err := pgxpool.New(ctx, dsn)
 		if err != nil {
 			return errors.New("invalid platform database configuration")
@@ -56,7 +57,11 @@ func run(ctx context.Context) error {
 	if assets == "" {
 		assets = "../../frontend/dist" // Run Go commands from backend/src.
 	}
-	router := newRouter(service, assets)
+	router, closePlatform, err := newRouter(service, assets)
+	if err != nil {
+		return err
+	}
+	defer closePlatform()
 	registerMigrationSession(router, service)
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
@@ -95,10 +100,25 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-func newRouter(service *migration.Service, assets string) *gin.Engine {
+func newRouter(service *migration.Service, assets string) (*gin.Engine, func(), error) {
 	router := gin.Default()
 	router.Use(cors.Default())
-	accesscontrol.SetupAccessControl(router)
+	platform, err := accesscontrol.SetupAccessControl(router)
+	if err != nil {
+		return nil, nil, err
+	}
+	provider := databasemanagement.NewProvider(platform)
+	if service.Access == nil {
+		service.Access = migration.ApplicationAccess{Platform: platform}
+	}
+	if service.Connections == nil {
+		service.Connections = provider
+	}
 	app.RegisterMigration(router, service, assets)
-	return router
+	return router, func() {
+		provider.Close()
+		if pool, err := platform.DB(); err == nil {
+			_ = pool.Close()
+		}
+	}, nil
 }

@@ -21,7 +21,12 @@ func RegisterRoutes(router gin.IRouter, s *Service) {
 		}
 		user, err := s.Access.Identity(c.Request)
 		if err != nil || user == "" {
-			respond(c, nil, fault("unauthenticated", "A validated session is required"))
+			var f *Fault
+			if errors.As(err, &f) && f.Code == "authorization_unavailable" {
+				respond(c, nil, f)
+			} else {
+				respond(c, nil, fault("unauthenticated", "A validated session is required"))
+			}
 			c.Abort()
 			return
 		}

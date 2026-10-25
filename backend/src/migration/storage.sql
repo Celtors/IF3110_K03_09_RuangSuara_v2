@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS dmp_migration.attempts (
 CREATE UNIQUE INDEX IF NOT EXISTS one_unresolved_per_database
 ON dmp_migration.attempts(database_id) WHERE status IN ('running','unknown');
 
+-- Existing unresolved attempts have no trustworthy target identity. They remain
+-- blocked for operator review rather than being reconciled on a guessed target.
+ALTER TABLE dmp_migration.attempts ADD COLUMN IF NOT EXISTS target_identity text NOT NULL DEFAULT '';
+
 CREATE UNIQUE INDEX IF NOT EXISTS one_success_per_migration
 ON dmp_migration.attempts(migration_id) WHERE status = 'succeeded';
 

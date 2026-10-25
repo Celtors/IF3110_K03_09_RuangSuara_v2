@@ -1,8 +1,8 @@
 package migration
 
 import (
+	databasemanagement "backend/database_management"
 	"context"
-	"errors"
 	"net/http"
 	"time"
 
@@ -42,7 +42,7 @@ type Fault struct {
 func (e *Fault) Error() string         { return e.Message }
 func fault(code, message string) error { return &Fault{code, message} }
 
-var ErrDatabaseNotFound = errors.New("managed database not found")
+var ErrDatabaseNotFound = databasemanagement.ErrDatabaseNotFound
 
 type Draft struct {
 	Name         string `json:"name"`
@@ -64,16 +64,17 @@ type Migration struct {
 	LastExecuted *time.Time `json:"last_executed_at"`
 }
 type Attempt struct {
-	ID          string     `json:"id"`
-	MigrationID string     `json:"migration_id"`
-	DatabaseID  string     `json:"database_id"`
-	SQL         string     `json:"sql_script_snapshot"`
-	Executor    string     `json:"executor_user_id"`
-	Started     time.Time  `json:"started_at"`
-	Completed   *time.Time `json:"completed_at"`
-	Status      string     `json:"status"`
-	Version     *int64     `json:"version"`
-	XID         *string    `json:"target_transaction_id,omitempty"`
-	ErrorCode   string     `json:"postgres_error_code,omitempty"`
-	Error       string     `json:"error,omitempty"`
+	ID             string     `json:"id"`
+	MigrationID    string     `json:"migration_id"`
+	DatabaseID     string     `json:"database_id"`
+	SQL            string     `json:"sql_script_snapshot"`
+	Executor       string     `json:"executor_user_id"`
+	Started        time.Time  `json:"started_at"`
+	Completed      *time.Time `json:"completed_at"`
+	Status         string     `json:"status"`
+	Version        *int64     `json:"version"`
+	XID            *string    `json:"target_transaction_id,omitempty"`
+	TargetIdentity string     `json:"-"`
+	ErrorCode      string     `json:"postgres_error_code,omitempty"`
+	Error          string     `json:"error,omitempty"`
 }

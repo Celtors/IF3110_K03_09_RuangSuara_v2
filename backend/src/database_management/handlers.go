@@ -2,6 +2,7 @@ package databasemanagement
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,7 +12,7 @@ import (
 
 	fx "backend/access_control/effect"
 	acmodels "backend/access_control/models"
-	"backend/access_control/utility"
+	sessionmanager "backend/access_control/session_manager"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -51,18 +52,12 @@ func fail(c *gin.Context, status int, code, message string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"code": code, "message": message}})
 }
 func (h *Handler) requireSession(c *gin.Context) {
-	token, err := c.Cookie("ssid")
-	if err != nil || token == "" {
-		fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "A valid session is required")
-		return
-	}
-	var session acmodels.SSOSession
-	if err := h.platform.Where("session_token_hash = ? AND status = ?", utility.HashToken(token), "Active").First(&session).Error; err != nil || !session.IsValid() {
-		fail(c, http.StatusUnauthorized, "INVALID_SESSION", "A valid session is required")
-		return
-	}
-	var user acmodels.User
-	if err := h.platform.Where("id = ? AND status = ?", session.UserId, "Active").First(&user).Error; err != nil {
+	user, err := sessionmanager.CurrentUser(c.Request.Context(), c.Request, h.platform)
+	if err != nil {
+		if errors.Is(err, sessionmanager.ErrNoSession) {
+			fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "A valid session is required")
+			return
+		}
 		fail(c, http.StatusUnauthorized, "INVALID_SESSION", "A valid session is required")
 		return
 	}
@@ -117,7 +112,8 @@ func (h *Handler) me(c *gin.Context) {
 	} else if view {
 		access = fx.ViewOnly
 	}
-	c.JSON(http.StatusOK, gin.H{"id": user.ID, "username": user.Username, "admin": view, "admin_access": access})
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{"id": user.ID, "username": user.Username, "admin": view, "admin_access": access, "csrf_token": sessionmanager.CSRFToken(c.Request)})
 }
 func (h *Handler) requireView(c *gin.Context) {
 	id := c.Param("id")
@@ -149,12 +145,11 @@ func effectivePermission(rows []policyGrant, edit bool) bool {
 }
 
 func (h *Handler) hasPermission(userID, databaseID string, edit bool) bool {
-	var rows []policyGrant
-	err := h.platform.Table("group_policies gp").Select("gp.effect").Joins("JOIN user_groups ug ON ug.group_id = gp.group_id").Where("ug.user_id = ? AND gp.database_id = ?", userID, databaseID).Scan(&rows).Error
+	permission, err := acmodels.EffectiveAuthorization(context.Background(), h.platform, userID, databaseID)
 	if err != nil {
 		return false
 	}
-	return effectivePermission(rows, edit)
+	return permission == fx.ViewEdit || (!edit && permission == fx.ViewOnly)
 }
 func (h *Handler) createDatabase(c *gin.Context) {
 	var req CreateDatabaseRequest

@@ -1,7 +1,7 @@
 package accesscontrol
 
 import (
-	"fmt"
+	"errors"
 	"os"
 	"time"
 
@@ -15,18 +15,26 @@ import (
 	"gorm.io/gorm"
 )
 
-func SetupAccessControl(r *gin.Engine) {
+// PlatformDSN supplies one platform database configuration to every module.
+func PlatformDSN() string {
 	dsn := os.Getenv("PLATFORM_DATABASE_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("PLATFORM_DATABASE_URL")
+	}
 	if dsn == "" {
 		dsn = "host=localhost user=myuser password=mypassword dbname=access-control-db port=9000 sslmode=disable TimeZone=Asia/Jakarta"
 	}
+	return dsn
+}
+
+func SetupAccessControl(r *gin.Engine) (*gorm.DB, error) {
+	dsn := PlatformDSN()
 	access_control_db, db_err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if db_err != nil {
-		fmt.Println(db_err)
-		return
+		return nil, errors.New("could not open platform database")
 	}
 	if access_control_db == nil {
-		return
+		return nil, errors.New("platform database is unavailable")
 	}
 	if sqlDB, err := access_control_db.DB(); err == nil {
 		sqlDB.SetMaxOpenConns(10)
@@ -119,4 +127,5 @@ func SetupAccessControl(r *gin.Engine) {
 	r.POST("session-manager/logout", func(c *gin.Context) {
 		sessionmanager.LogoutRequest(c, access_control_db)
 	})
+	return access_control_db, nil
 }

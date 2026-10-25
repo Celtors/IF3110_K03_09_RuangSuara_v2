@@ -19,6 +19,7 @@ export default function AdminShell({ active, username, access, children }) {
         <aside className="sidebar">
           <span className="brand-mark">RuangSuara</span>
           <nav aria-label="Admin sections">
+            <a className="nav-link" href="/migrations/">Migrations</a>
             {NAV.map((n) => (
               <a
                 key={n.key}

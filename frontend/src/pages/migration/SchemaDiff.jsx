@@ -74,7 +74,6 @@ export function SchemaDiff({ canEdit }) {
           Desired schema JSON
         </label>
         <textarea
-          className="input"
           id="schema-json"
           className="input code-editor"
           value={text}

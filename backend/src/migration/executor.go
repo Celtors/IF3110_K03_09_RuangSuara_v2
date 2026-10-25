@@ -13,7 +13,7 @@ import (
 type executionResult struct{ Status, Code, Message, FaultCode string }
 
 // Record the transaction ID so interrupted commits can be checked later.
-func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql string, recordXID func(string) error) executionResult {
+func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql string, recordXID func(string, string) error) executionResult {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return executionResult{Status: "failed", Message: "Target connection unavailable before SQL execution", FaultCode: "database_unavailable"}
@@ -22,11 +22,17 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql string, record
 	if _, err = tx.Exec(ctx, `SET LOCAL statement_timeout = '30s'; SET LOCAL lock_timeout = '5s'; SET LOCAL idle_in_transaction_session_timeout = '40s'`); err != nil {
 		return executionResult{Status: "failed", Message: "Could not configure target transaction"}
 	}
+	// Inspect the connection that will actually execute SQL, not another pool
+	// member that might belong to a different server behind the same endpoint.
+	identity, err := targetIdentity(ctx, tx.Conn())
+	if err != nil {
+		return executionResult{Status: "failed", Message: err.Error(), FaultCode: "database_unavailable"}
+	}
 	var xid string
-	if err = tx.QueryRow(ctx, `SELECT pg_current_xact_id()::text`).Scan(&xid); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT pg_catalog.pg_current_xact_id()::text`).Scan(&xid); err != nil {
 		return executionResult{Status: "failed", Message: "Could not identify target transaction"}
 	}
-	if err = recordXID(xid); err != nil {
+	if err = recordXID(xid, identity); err != nil {
 		return executionResult{Status: "failed", Message: "Could not persist transaction identity; SQL was not submitted"}
 	}
 	// Run the entire SQL script and check for errors.

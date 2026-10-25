@@ -1,10 +1,12 @@
+import { fetchMe } from "../auth/session.js";
+
 let token = "";
 export async function session() {
-  const response = await fetch("/api/session", { credentials: "same-origin" });
-  if (response.ok) {
-    const value = await response.json();
-    token = value.csrf_token ?? "";
-  }
+  token = "";
+  const value = await fetchMe();
+  if (!value) throw new APIError("A validated session is required", "unauthenticated");
+  token = value.csrf_token ?? "";
+  return value;
 }
 export class APIError extends Error {
   constructor(message, code) {
