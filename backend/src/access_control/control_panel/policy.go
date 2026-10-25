@@ -1,6 +1,7 @@
 package controlpanel
 
 import (
+	fx "backend/access_control/effect"
 	"backend/access_control/models"
 	"net/http"
 	"time"
@@ -33,10 +34,14 @@ type DatabaseFromGroupPolicy struct {
 }
 
 func (payload GroupPolicyPayload) GetDBStructCreate() models.GroupPolicy {
+	effect := payload.Effect
+	if effect == "" {
+		effect = fx.ViewOnly
+	}
 	return models.GroupPolicy{
 		GroupId:    payload.GroupId,
 		DatabaseId: payload.DatabaseId,
-		Effect:     "ViewOnly",
+		Effect:     effect,
 	}
 }
 
@@ -48,6 +53,11 @@ func AddGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 			"status":  "error",
 			"message": "Failed to add policy: " + err.Error(),
 		})
+		return
+	}
+
+	if appGroupPayload.Effect != "" && !fx.IsValid(appGroupPayload.Effect) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid policy effect: must be ViewOnly, ViewEdit or Blocked"})
 		return
 	}
 
@@ -97,9 +107,19 @@ func UpdateGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	db.Model(&models.GroupPolicy{}).
-		Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).
-		Update("effect", policyPayload.Effect)
+	if !fx.IsValid(policyPayload.Effect) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid policy effect: must be ViewOnly, ViewEdit or Blocked"})
+		return
+	}
+	result := db.Model(&models.GroupPolicy{}).Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).Update("effect", policyPayload.Effect)
+	if result.Error != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Failed to update policy"})
+		return
+	}
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Policy not found"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
@@ -107,10 +127,8 @@ func UpdateGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 	})
 }
 
-
-
 func GetPoliciesRequest(c *gin.Context, db *gorm.DB) {
-	group_id := c.DefaultQuery("groupId", "") 
+	group_id := c.DefaultQuery("groupId", "")
 	database_id := c.DefaultQuery("databaseId", "")
 
 	if group_id != "" && database_id != "" {
