@@ -10,7 +10,7 @@ import (
 type User struct {
 	ID           uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	Username     string    `json:"username"`
-	PasswordHash string    `json:"password_hash"`
+	PasswordHash string    `json:"-"`
 	Status       string    `json:"status"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`

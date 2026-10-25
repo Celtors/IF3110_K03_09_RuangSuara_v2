@@ -51,6 +51,7 @@ func AddGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
+
 	policyModel := appGroupPayload.GetDBStructCreate()
 
 	if err := db.Create(&policyModel).Error; err != nil {
@@ -97,9 +98,26 @@ func UpdateGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	db.Model(&models.GroupPolicy{}).
-		Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).
-		Update("effect", policyPayload.Effect)
+	effect := policyPayload.Effect
+	if effect == "Blocked" {
+		effect = "DENY"
+	}
+	if effect == "Allow" {
+		effect = "ALLOW"
+	}
+	if effect != "ALLOW" && effect != "DENY" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid policy effect"})
+		return
+	}
+	result := db.Model(&models.GroupPolicy{}).Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).Update("effect", effect)
+	if result.Error != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Failed to update policy"})
+		return
+	}
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Policy not found"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
@@ -107,10 +125,8 @@ func UpdateGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 	})
 }
 
-
-
 func GetPoliciesRequest(c *gin.Context, db *gorm.DB) {
-	group_id := c.DefaultQuery("groupId", "") 
+	group_id := c.DefaultQuery("groupId", "")
 	database_id := c.DefaultQuery("databaseId", "")
 
 	if group_id != "" && database_id != "" {
