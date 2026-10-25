@@ -1,7 +1,8 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
+import { fileURLToPath } from 'node:url'
 
-const page = (file) => new URL(file, import.meta.url).pathname
+const page = (file) => fileURLToPath(new URL(file, import.meta.url))
 
 // Multi-page app: every HTML file below is its own page with its own entry script.
 // Navigation between pages is a normal link / full page load.
@@ -22,11 +23,18 @@ export default defineConfig({
         users: page('./admin/users.html'),
         groups: page('./admin/groups.html'),
         policies: page('./admin/policies.html'),
+        migrationHome: page('./migrations/index.html'),
+        migrationHistory: page('./migrations/history.html'),
+        migrationEditor: page('./migrations/editor.html'),
+        migrationDetails: page('./migrations/details.html'),
+        migrationSchemaDiff: page('./migrations/schema-diff.html'),
+        migrationQueryPlan: page('./migrations/query-plan.html'),
       },
     },
   },
   server: {
     proxy: {
+      '/api': { target: backend },
       '/session-manager': { target: backend },
       '/admin-control-panel': { target: backend },
     },
