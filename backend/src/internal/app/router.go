@@ -31,7 +31,7 @@ func RegisterMigration(router *gin.Engine, service *migration.Service, assets st
 	r.GET("/migrations/", func(c *gin.Context) { c.File(filepath.Join(assets, "migrations", "index.html")) })
 	r.GET("/", func(c *gin.Context) { c.File(filepath.Join(assets, "index.html")) })
 	r.GET("/index.html", func(c *gin.Context) { c.File(filepath.Join(assets, "index.html")) })
-	for _, page := range []string{"login.html", "home.html", "admin/users.html", "admin/groups.html", "admin/policies.html"} {
+	for _, page := range []string{"login.html", "home.html", "admin/users.html", "admin/groups.html", "admin/databases.html", "admin/policies.html"} {
 		r.GET("/"+page, func(c *gin.Context) { c.File(filepath.Join(assets, page)) })
 	}
 	if _, err := os.Stat(filepath.Join(assets, "assets")); err == nil {

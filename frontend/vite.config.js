@@ -23,6 +23,7 @@ export default defineConfig({
         home: page('./home.html'),
         users: page('./admin/users.html'),
         groups: page('./admin/groups.html'),
+        databases: page('./admin/databases.html'),
         policies: page('./admin/policies.html'),
         migrationHome: page('./migrations/index.html'),
         migrationHistory: page('./migrations/history.html'),

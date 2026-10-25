@@ -1,0 +1,23 @@
+include:
+  - env_file: ./.env
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: access-control-db
+    ports:
+      - "9000:5432"
+    volumes:
+      - ./database_schema/access-control:/docker-entrypoint-initdb.d:ro
+
+  mariadb:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpassword
+      MARIADB_DATABASE: test_mariadb
+      MARIADB_USER: testuser
+      MARIADB_PASSWORD: testpassword
+    ports:
+      - "3306:3306"

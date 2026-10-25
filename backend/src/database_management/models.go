@@ -10,9 +10,9 @@ import (
 	"github.com/google/uuid"
 )
 
-
 type Database struct {
 	ID                 uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	DBMS               string    `json:"dbms" gorm:"column:dbms;not null;default:postgres;size:16"`
 	Name               string    `json:"name" gorm:"not null;size:100"`
 	Host               string    `json:"host" gorm:"not null;size:253"`
 	Port               int       `json:"port" gorm:"not null"`
@@ -37,6 +37,7 @@ type GroupPolicy struct {
 func (GroupPolicy) TableName() string { return "group_policies" }
 
 type CreateDatabaseRequest struct {
+	DBMS         string `json:"dbms"`
 	Name         string `json:"name" binding:"required"`
 	Host         string `json:"host" binding:"required"`
 	Port         int    `json:"port" binding:"required"`
@@ -46,6 +47,7 @@ type CreateDatabaseRequest struct {
 	SSLMode      string `json:"ssl_mode"`
 }
 type UpdateDatabaseRequest struct {
+	DBMS         string `json:"dbms"`
 	Name         string `json:"name"`
 	Host         string `json:"host"`
 	Port         int    `json:"port"`
@@ -60,6 +62,12 @@ type PolicyRequest struct {
 }
 
 func (r CreateDatabaseRequest) Validate() error {
+	if !validDBMS(r.DBMS) {
+		return fmt.Errorf("dbms must be postgres or mariadb")
+	}
+	if validateDBMSSSLMode(normalizeDBMS(r.DBMS), normalizeSSLModeForDBMS(r.DBMS, r.SSLMode)) == "" {
+		return fmt.Errorf("unsupported ssl_mode for dbms")
+	}
 	if strings.TrimSpace(r.Name) == "" || len(r.Name) > 100 {
 		return fmt.Errorf("name is required and must be at most 100 characters")
 	}
@@ -125,4 +133,35 @@ func validateSSLMode(mode string) string {
 }
 func validateIdentifier(s string) bool {
 	return s != "" && len(s) <= 63 && !strings.ContainsRune(s, 0)
+}
+
+const (
+	DBMSPostgres = "postgres"
+	DBMSMariaDB  = "mariadb"
+)
+
+func normalizeDBMS(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return DBMSPostgres
+	}
+	return strings.ToLower(strings.TrimSpace(v))
+}
+func validDBMS(v string) bool { v = normalizeDBMS(v); return v == DBMSPostgres || v == DBMSMariaDB }
+func normalizeSSLModeForDBMS(engine, mode string) string {
+	if strings.TrimSpace(mode) != "" {
+		return strings.TrimSpace(mode)
+	}
+	if normalizeDBMS(engine) == DBMSMariaDB {
+		return "disable"
+	}
+	return "verify-full"
+}
+func validateDBMSSSLMode(engine, mode string) string {
+	if normalizeDBMS(engine) == DBMSMariaDB {
+		if mode == "disable" || mode == "require" {
+			return mode
+		}
+		return ""
+	}
+	return validateSSLMode(mode)
 }
