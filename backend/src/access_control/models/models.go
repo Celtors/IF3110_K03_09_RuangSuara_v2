@@ -100,6 +100,8 @@ type SSOSession struct {
 	UserAgent        string
 }
 
+const session_idle_timeout = 24 * time.Hour
+
 func (SSOSession) TableName() string {
 	return "sso_sessions"
 }
@@ -116,6 +118,13 @@ func (session SSOSession) UpdateStatus(db *gorm.DB) {
 
 func (session SSOSession) MarkActivity(db *gorm.DB) {
 	t := time.Now()
+	if session.LastActivityAt != nil {
+		if session.LastActivityAt.Add(session_idle_timeout).Before(time.Now()) {
+			db.Model(&SSOSession{}).Where("id = ?", session.ID).Updates(SSOSession{Status: "Expired"})
+			return
+		}
+	}
+
 	db.Model(&SSOSession{}).Where("id = ?", session.ID).Updates(SSOSession{LastActivityAt: &t})
 }
 

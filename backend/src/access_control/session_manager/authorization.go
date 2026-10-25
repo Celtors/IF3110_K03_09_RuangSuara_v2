@@ -27,6 +27,7 @@ func CurrentUser(ctx context.Context, request *http.Request, db *gorm.DB) (model
 	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && !session.IsValid()) {
 		return user, ErrUnauthenticated
 	}
+	session.MarkActivity(db)
 	if err != nil {
 		return user, err
 	}
