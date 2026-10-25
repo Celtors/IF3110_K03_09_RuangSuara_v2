@@ -1,18 +1,104 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
 	accesscontrol "backend/access_control"
+	"backend/internal/app"
+	"backend/migration"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
-	r := gin.Default()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx); err != nil {
+		log.Print(err)
+		os.Exit(1)
+	}
+}
 
-	r.Use(cors.Default())
+func run(ctx context.Context) error {
+	var repository *migration.Repository
+	if dsn := os.Getenv("PLATFORM_DATABASE_URL"); dsn != "" {
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			return errors.New("invalid platform database configuration")
+		}
+		defer pool.Close()
+		repository = &migration.Repository{Pool: pool}
+		initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err = repository.Initialize(initCtx)
+		cancel()
+		if err != nil {
+			return errors.New("could not initialize Migration platform storage")
+		}
+	} else {
+		log.Print("PLATFORM_DATABASE_URL is unset; Migration storage is unavailable")
+	}
 
-	accesscontrol.SetupAccessControl(r)
+	service, closeDependencies, err := migrationService(ctx, repository)
+	if err != nil {
+		return err
+	}
+	defer closeDependencies()
+	assets := os.Getenv("FRONTEND_DIST")
+	if assets == "" {
+		assets = "../../frontend/dist" // Run Go commands from backend/src.
+	}
+	router := newRouter(service, assets)
+	registerMigrationSession(router, service)
+	addr := os.Getenv("HTTP_ADDR")
+	if addr == "" {
+		addr = ":8080" // Preserve the shared backend's default listener.
+	}
+	if err = validateListenAddress(addr); err != nil {
+		return err
+	}
+	server := &http.Server{
+		Addr: addr, Handler: router,
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
+		WriteTimeout: 50 * time.Second, IdleTimeout: 60 * time.Second,
+	}
+	shutdownDone := make(chan struct{})
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		select {
+		case <-ctx.Done():
+			clean, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := server.Shutdown(clean); err != nil {
+				_ = server.Close()
+			}
+		case <-serverDone:
+		}
+	}()
+	log.Printf("Shared backend listening at %s", addr)
+	err = server.ListenAndServe()
+	close(serverDone)
+	// Shutdown drains active requests before the deferred pool closures run.
+	<-shutdownDone
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return errors.New("shared HTTP server stopped unexpectedly")
+	}
+	return nil
+}
 
-	r.Run(":8080")
+func newRouter(service *migration.Service, assets string) *gin.Engine {
+	router := gin.Default()
+	router.Use(cors.Default())
+	accesscontrol.SetupAccessControl(router)
+	app.RegisterMigration(router, service, assets)
+	return router
 }
