@@ -4,6 +4,7 @@ import ToastProvider from '../components/ToastProvider'
 const NAV = [
   { key: 'users', href: '/admin/users.html', label: 'Users' },
   { key: 'groups', href: '/admin/groups.html', label: 'Groups' },
+  { key: 'databases', href: '/admin/databases.html', label: 'Database connections' },
   { key: 'policies', href: '/admin/policies.html', label: 'Database access' },
 ]
 
