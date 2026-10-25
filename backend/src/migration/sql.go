@@ -8,9 +8,8 @@ import (
 	pgquery "github.com/wasilibs/go-pgquery"
 )
 
-// libpg_query parses PostgreSQL grammar, including comments, strings and dollar quotes. 
-// A closed statement allowlist prevents transaction control, CALL/DO,
-// session changes, COPY PROGRAM, and administrative commands at the grammar level.
+// Parse SQL and reject unsupported or unsafe statements.
+// Migration must control its own transactions and database settings.
 func parseSQL(sql string, plan bool) ([]map[string]any, error) {
 	if len(sql) > 256*1024 || strings.TrimSpace(sql) == "" {
 		return nil, fault("invalid_sql", "SQL must contain 1 to 262144 bytes")

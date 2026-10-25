@@ -82,8 +82,7 @@ func (r *Repository) Attempts(ctx context.Context, db, id string) ([]Attempt, er
 	return out, rows.Err()
 }
 
-// Keep this database locked while a migration is being executed and recorded.
-// This prevents another migration from starting before the first one finishes.
+// Lock this database so migration edits and executions cannot overlap.
 func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func(), error) {
 	c, err := r.Pool.Acquire(ctx)
 	if err != nil {
@@ -92,8 +91,7 @@ func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func()
 	var ok bool
 	err = c.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtextextended($1,781349))`, db).Scan(&ok)
 	if err != nil || !ok {
-		// A lost response could hide a successfully acquired session lock. 
-		// Never return that session to the pool without discarding it.
+		// If locking may have succeeded, close the connection to avoid leaving a lock.
 		if err != nil {
 			clean, cancel := cleanupContext()
 			_ = c.Conn().Close(clean)

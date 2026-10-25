@@ -106,7 +106,7 @@ func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, er
 		return Attempt{}, err
 	}
 	defer release()
-	// Reconcile earlier process interruptions before allocating another version.
+	// Resolve unfinished executions before assigning another migration version.
 	if err = s.reconcileLocked(ctx, platformConn, pool, db); err != nil {
 		return Attempt{}, err
 	}
@@ -151,8 +151,8 @@ func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, er
 	return attempt, nil
 }
 
-// Reconcile may be called at startup or by an authorized explicit API request.
-// The platform lock prevents any concurrent attempt while consulting target XIDs.
+// Reconcile checks the outcome of interrupted migrations.
+// Only one recovery operation can run per database at a time.
 func (s *Service) Reconcile(ctx context.Context, user, db string) error {
 	db = canonicalDatabaseID(db)
 	if err := s.authorize(ctx, user, db, Edit); err != nil {
@@ -191,8 +191,7 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
 			return finishAttempt(ctx, c, &a, resolved, "", "Outcome recovered from PostgreSQL transaction status")
 		}
 	}
-	// Never retry automatically when the result is unknown.
-	// The previous attempt might have already changed the database.
+	// Do not retry automatically because the previous execution may have succeeded.
 	if err = finishAttempt(ctx, c, &a, "unknown", "", "Target outcome remains unresolved; operator investigation required"); err != nil {
 		return err
 	}

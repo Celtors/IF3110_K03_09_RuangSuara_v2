@@ -17,24 +17,19 @@ const (
 	Edit
 )
 
-// Access Control/Database Management provide validated identity and the final
-// database-specific permission. The adapter owns ALLOW/DENY precedence; Migration
-// never queries memberships. PermissionFromEffective translates its resolved value.
-// Requests that change data must also pass session-bound CSRF protection.
+// Access provides the current user's identity and database permissions.
+// Access Control handles group permission rules. Migration uses the result.
+// Requests that modify data must also pass CSRF validation.
 type Access interface {
 	Identity(*http.Request) (string, error)
 	Permission(context.Context, string, string) (Permission, error)
 	CSRF(*http.Request) error
 }
 
-// Connections is supplied by Database Management. Pools remain provider-owned.
-// Database IDs are canonical registered UUID strings (opaque IDs may be used by
-// isolated test providers). Registration, credentials and decryption stay there.
-// The provider creates/reuses pgx pools and closes them only after active users
-// drain; Migration closes its transactions, never the borrowed pool. GORM's
-// per-request *gorm.DB is not this pool and must not be cast or closed here.
-// An ID must retain the same database/cluster lineage for XID recovery. Coordinate
-// registry retargeting and pool replacement with unresolved attempts first.
+// Connections provides PostgreSQL connections for managed databases.
+// Database Management owns the connection pools and credentials.
+// Migration uses these pools without closing them.
+// Database connections must remain consistent during migration recovery.
 type Connections interface {
 	PostgreSQL(context.Context, string) (*pgxpool.Pool, error)
 }

@@ -15,8 +15,7 @@ func CompareSchemas(current, desired Schema) (Diff, error) {
 		return out, fault("invalid_input", "Current and desired schemas must have the same name")
 	}
 	qualified := func(t string) string { return quote(desired.Name) + "." + quote(t) }
-	// Foreign keys depend on keys/indexes in OTHER tables. 
-	// Remove them first and recreate them last, independently of the order of tables in either snapshot.
+	// Remove foreign keys before changing tables, then restore them afterward.
 	const (
 		dropForeignKeys = iota
 		dropConstraintsAndIndexes

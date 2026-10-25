@@ -8,8 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The desired schema describes everything that should exist.
-// Missing tables or columns may be removed, so these changes need a warning.
+// The desired schema is the complete target. 
+// Missing objects may be removed.
 type Schema struct {
 	Name        string   `json:"name"`
 	Tables      []Table  `json:"tables"`
@@ -119,8 +119,7 @@ func validateSchema(s Schema) error {
 	return nil
 }
 
-// Parse in table-constraint position rather than inspecting SQL keywords.
-// This handles comments/whitespace and also rejects extra injected table elements.
+// Parse the SQL to ensure it defines exactly one table constraint.
 func parseConstraint(c Constraint) (map[string]any, error) {
 	parsed, err := parseSQL("CREATE TABLE __dmp_validation ("+quote("__placeholder")+" integer, CONSTRAINT "+quote(c.Name)+" "+c.Definition+")", false)
 	if err != nil || len(parsed) != 1 || parsed[0]["CreateStmt"] == nil {

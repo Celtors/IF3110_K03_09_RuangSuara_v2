@@ -31,8 +31,7 @@ func explainPostgres(ctx context.Context, pool *pgxpool.Pool, sql string) (Plan,
 	if _, err = tx.Exec(ctx, `SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public`); err != nil {
 		return out, err
 	}
-	// The parser has proved a single supported statement. Extended protocol also
-	// rejects multiple statements. ANALYZE options never originate from input.
+	// Use EXPLAIN without ANALYZE to preview the plan without executing the query.
 	err = tx.QueryRow(ctx, "EXPLAIN (FORMAT JSON) "+sql, pgx.QueryExecModeExec).Scan(&out.Raw)
 	if err != nil {
 		return out, fault("invalid_sql", "PostgreSQL could not plan this statement")

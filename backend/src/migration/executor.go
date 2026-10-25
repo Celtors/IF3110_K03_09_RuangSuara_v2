@@ -12,8 +12,7 @@ import (
 
 type executionResult struct{ Status, Code, Message, FaultCode string }
 
-// Save the PostgreSQL transaction ID before running the migration.
-// If the connection breaks, we can use it to check whether the changes committed.
+// Record the transaction ID so interrupted commits can be checked later.
 func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql string, recordXID func(string) error) executionResult {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -30,8 +29,7 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql string, record
 	if err = recordXID(xid); err != nil {
 		return executionResult{Status: "failed", Message: "Could not persist transaction identity; SQL was not submitted"}
 	}
-	// Send the SQL script as a whole, including multiple statements.
-	// Check all results for errors without keeping the returned rows.
+	// Run the entire SQL script and check for errors.
 	err = tx.Conn().PgConn().Exec(ctx, sql).Close()
 	if err != nil {
 		return executionResult{Status: "failed", Code: postgresCode(err), Message: "PostgreSQL rejected the migration; transaction rolled back"}
@@ -40,8 +38,7 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql string, record
 	if err == nil {
 		return executionResult{Status: "succeeded"}
 	}
-	// A reported PostgreSQL error confirms failure.
-	// If the connection breaks during COMMIT, the changes may already be saved.
+	// A connection failure during COMMIT may leave the result uncertain.
 	var pgerr *pgconn.PgError
 	if errors.As(err, &pgerr) || errors.Is(err, pgx.ErrTxCommitRollback) {
 		return executionResult{Status: "failed", Code: postgresCode(err), Message: "PostgreSQL rejected COMMIT; transaction rolled back"}
