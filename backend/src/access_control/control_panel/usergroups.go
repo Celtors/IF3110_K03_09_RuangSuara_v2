@@ -86,12 +86,12 @@ func RemoveUserFromGroup(c *gin.Context, db *gorm.DB) {
 func GetUsersFromGroupRequest(c *gin.Context, db *gorm.DB) {
 	var usersFromGroup []UserFromGroupPayload
 
-	var groupPKey PKeyPayload
+	group_id, exists := c.GetQuery("id")
 
-	if err := c.ShouldBindJSON(&groupPKey); err != nil {
+	if !exists {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  "error",
-			"message": "Failed to remove user from group: " + err.Error(),
+			"message": "Failed to get users from group",
 		})
 		return
 	}
@@ -99,7 +99,7 @@ func GetUsersFromGroupRequest(c *gin.Context, db *gorm.DB) {
 	db.Model(&models.UserGroup{}).
 		Select("user_groups.user_id, users.username, users.status, user_groups.created_at AS placed_at").
 		Joins("LEFT JOIN users ON users.id = user_groups.user_id").
-		Where("group_id = ?", groupPKey.Id).
+		Where("group_id = ?", group_id).
 		Find(&usersFromGroup)
 
 	c.JSON(http.StatusOK, usersFromGroup)
@@ -108,12 +108,12 @@ func GetUsersFromGroupRequest(c *gin.Context, db *gorm.DB) {
 func GetGroupsFromUserRequest(c *gin.Context, db *gorm.DB) {
 	var groupFromUsers []GroupFromUserPayload
 
-	var userPKey PKeyPayload
+	user_id, exists := c.GetQuery("id")
 
-	if err := c.ShouldBindJSON(&userPKey); err != nil {
+	if !exists {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  "error",
-			"message": "Failed to remove user from group: " + err.Error(),
+			"message": "Failed to get groups from user",
 		})
 		return
 	}
@@ -121,7 +121,7 @@ func GetGroupsFromUserRequest(c *gin.Context, db *gorm.DB) {
 	db.Model(&models.UserGroup{}).
 		Select("user_groups.group_id, groups_.name, groups_.description, user_groups.created_at AS placed_at").
 		Joins("LEFT JOIN groups_ ON user_groups.group_id = groups_.id").
-		Where("user_groups.user_id = ?", userPKey.Id).
+		Where("user_groups.user_id = ?", user_id).
 		Find(&groupFromUsers)
 
 	c.JSON(http.StatusOK, groupFromUsers)
