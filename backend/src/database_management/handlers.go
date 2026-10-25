@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	fx "backend/access_control/effect"
 	acmodels "backend/access_control/models"
 	"backend/access_control/utility"
 
@@ -100,27 +101,20 @@ func (h *Handler) isAdmin(id string) bool {
 }
 
 type policyGrant struct {
-	Effect     string
-	Permission string
+	Effect string
 }
 
 func effectivePermission(rows []policyGrant, edit bool) bool {
-	allowed := false
-	for _, row := range rows {
-		effect := strings.ToUpper(row.Effect)
-		if effect == "DENY" || effect == "BLOCKED" {
-			return false
-		}
-		if effect == "ALLOW" && (row.Permission == PermissionViewEdit || (!edit && row.Permission == PermissionViewOnly)) {
-			allowed = true
-		}
+	effects := make([]string, len(rows))
+	for i, row := range rows {
+		effects[i] = row.Effect
 	}
-	return allowed
+	return fx.Grants(effects, edit)
 }
 
 func (h *Handler) hasPermission(userID, databaseID string, edit bool) bool {
 	var rows []policyGrant
-	err := h.platform.Table("group_policies gp").Select("gp.effect, gp.permission").Joins("JOIN user_groups ug ON ug.group_id = gp.group_id").Where("ug.user_id = ? AND gp.database_id = ?", userID, databaseID).Scan(&rows).Error
+	err := h.platform.Table("group_policies gp").Select("gp.effect").Joins("JOIN user_groups ug ON ug.group_id = gp.group_id").Where("ug.user_id = ? AND gp.database_id = ?", userID, databaseID).Scan(&rows).Error
 	if err != nil {
 		return false
 	}
@@ -259,19 +253,15 @@ func (h *Handler) setPolicy(c *gin.Context) {
 		return
 	}
 	var req PolicyRequest
-	if err := c.ShouldBindJSON(&req); err != nil || req.GroupID != groupID || (req.Permission != PermissionViewOnly && req.Permission != PermissionViewEdit) {
-		fail(c, 400, "INVALID_POLICY", "A valid group ID and permission are required")
+	if err := c.ShouldBindJSON(&req); err != nil || req.GroupID != groupID {
+		fail(c, 400, "INVALID_POLICY", "A valid group ID and effect are required")
 		return
 	}
-	effect := strings.ToUpper(req.Effect)
-	if effect == "" {
-		effect = EffectAllow
-	}
-	if effect != EffectAllow && effect != EffectDeny {
-		fail(c, 400, "INVALID_POLICY", "Effect must be ALLOW or DENY")
+	if !fx.IsValid(req.Effect) {
+		fail(c, 400, "INVALID_POLICY", "Effect must be ViewOnly, ViewEdit or Blocked")
 		return
 	}
-	policy := GroupPolicy{GroupID: groupID, DatabaseID: databaseID, Permission: req.Permission, Effect: effect}
+	policy := GroupPolicy{GroupID: groupID, DatabaseID: databaseID, Effect: req.Effect}
 	err = h.platform.Where("group_id = ? AND database_id = ?", groupID, databaseID).Assign(policy).FirstOrCreate(&policy).Error
 	if err != nil {
 		fail(c, 400, "POLICY_UPDATE_FAILED", "Could not save group policy")

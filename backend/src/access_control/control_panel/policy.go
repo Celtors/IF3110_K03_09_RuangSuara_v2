@@ -1,6 +1,7 @@
 package controlpanel
 
 import (
+	fx "backend/access_control/effect"
 	"backend/access_control/models"
 	"net/http"
 	"time"
@@ -33,10 +34,14 @@ type DatabaseFromGroupPolicy struct {
 }
 
 func (payload GroupPolicyPayload) GetDBStructCreate() models.GroupPolicy {
+	effect := payload.Effect
+	if effect == "" {
+		effect = fx.ViewOnly
+	}
 	return models.GroupPolicy{
 		GroupId:    payload.GroupId,
 		DatabaseId: payload.DatabaseId,
-		Effect:     "ViewOnly",
+		Effect:     effect,
 	}
 }
 
@@ -51,6 +56,10 @@ func AddGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
+	if appGroupPayload.Effect != "" && !fx.IsValid(appGroupPayload.Effect) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid policy effect: must be ViewOnly, ViewEdit or Blocked"})
+		return
+	}
 
 	policyModel := appGroupPayload.GetDBStructCreate()
 
@@ -98,18 +107,11 @@ func UpdateGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	effect := policyPayload.Effect
-	if effect == "Blocked" {
-		effect = "DENY"
-	}
-	if effect == "Allow" {
-		effect = "ALLOW"
-	}
-	if effect != "ALLOW" && effect != "DENY" {
-		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid policy effect"})
+	if !fx.IsValid(policyPayload.Effect) {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid policy effect: must be ViewOnly, ViewEdit or Blocked"})
 		return
 	}
-	result := db.Model(&models.GroupPolicy{}).Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).Update("effect", effect)
+	result := db.Model(&models.GroupPolicy{}).Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).Update("effect", policyPayload.Effect)
 	if result.Error != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Failed to update policy"})
 		return

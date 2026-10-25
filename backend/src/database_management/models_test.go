@@ -1,6 +1,10 @@
 package databasemanagement
 
-import "testing"
+import (
+	"testing"
+
+	fx "backend/access_control/effect"
+)
 
 func TestCreateDatabaseValidation(t *testing.T) {
 	valid := CreateDatabaseRequest{Name: "test", Host: "db.example.test", Port: 5432, DatabaseName: "app", Username: "reader", Password: "secret"}
@@ -31,12 +35,16 @@ func TestHostAllowlistAndLocalhost(t *testing.T) {
 		t.Fatal("unlisted hostname must be rejected")
 	}
 }
-func TestPermissionConstants(t *testing.T) {
-	if PermissionViewOnly == PermissionViewEdit {
-		t.Fatal("permissions must be distinct")
+func TestPolicyRequestUsesSchemaEffects(t *testing.T) {
+	for _, e := range []string{fx.ViewOnly, fx.ViewEdit, fx.Blocked} {
+		if !fx.IsValid(e) {
+			t.Fatalf("%q must be accepted", e)
+		}
 	}
-	if EffectAllow == EffectDeny {
-		t.Fatal("effects must be distinct")
+	for _, e := range []string{"", "ALLOW", "DENY", "VIEW_ONLY", "VIEW_EDIT"} {
+		if fx.IsValid(e) {
+			t.Fatalf("legacy or empty effect %q must be rejected", e)
+		}
 	}
 }
 
@@ -56,13 +64,19 @@ func TestIdentifierValidation(t *testing.T) {
 }
 
 func TestEffectivePermission(t *testing.T) {
-	if !effectivePermission([]policyGrant{{Effect: "ALLOW", Permission: PermissionViewOnly}, {Effect: "ALLOW", Permission: PermissionViewEdit}}, true) {
-		t.Fatal("VIEW_EDIT allow should grant edit")
+	if !effectivePermission([]policyGrant{{Effect: fx.ViewOnly}, {Effect: fx.ViewEdit}}, true) {
+		t.Fatal("ViewEdit in any group should grant edit")
 	}
-	if effectivePermission([]policyGrant{{Effect: "ALLOW", Permission: PermissionViewEdit}, {Effect: "DENY", Permission: PermissionViewOnly}}, false) {
-		t.Fatal("explicit deny must override allow")
+	if effectivePermission([]policyGrant{{Effect: fx.ViewEdit}, {Effect: fx.Blocked}}, false) {
+		t.Fatal("Blocked in any group must override ViewEdit")
 	}
-	if effectivePermission([]policyGrant{{Effect: "ALLOW", Permission: PermissionViewOnly}}, true) {
-		t.Fatal("VIEW_ONLY must not grant edit")
+	if effectivePermission([]policyGrant{{Effect: fx.ViewOnly}}, true) {
+		t.Fatal("ViewOnly must not grant edit")
+	}
+	if !effectivePermission([]policyGrant{{Effect: fx.ViewOnly}}, false) {
+		t.Fatal("ViewOnly should grant view")
+	}
+	if effectivePermission(nil, false) {
+		t.Fatal("a user with no policy must have no access")
 	}
 }

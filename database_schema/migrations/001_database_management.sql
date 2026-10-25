@@ -21,12 +21,30 @@ DO $$ BEGIN
     ALTER TABLE group_policies ALTER COLUMN group_id TYPE UUID USING group_id::uuid;
   END IF;
 END $$;
-ALTER TABLE group_policies ADD COLUMN IF NOT EXISTS permission VARCHAR(20) NOT NULL DEFAULT 'VIEW_ONLY';
-UPDATE group_policies SET effect = CASE WHEN upper(effect) IN ('BLOCKED','DENY') THEN 'DENY' ELSE 'ALLOW' END;
+-- group_policies.effect is the single access level: 'ViewOnly', 'ViewEdit' or 'Blocked'.
+-- Normalize legacy rows to those values, including rows written by an earlier version of
+-- this migration that used a separate permission column with ALLOW/DENY. Unknown legacy
+-- values fall back to the least-privileged level, ViewOnly.
+ALTER TABLE group_policies DROP CONSTRAINT IF EXISTS chk_group_policies_effect;
+ALTER TABLE group_policies DROP CONSTRAINT IF EXISTS chk_group_policies_permission;
+ALTER TABLE group_policies DROP CONSTRAINT IF EXISTS group_policies_effect_check;
 ALTER TABLE group_policies ALTER COLUMN effect TYPE VARCHAR(10);
-ALTER TABLE group_policies ALTER COLUMN effect SET DEFAULT 'ALLOW';
-ALTER TABLE group_policies ADD CONSTRAINT chk_group_policies_permission CHECK (permission IN ('VIEW_ONLY','VIEW_EDIT'));
-ALTER TABLE group_policies ADD CONSTRAINT chk_group_policies_effect CHECK (effect IN ('ALLOW','DENY'));
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name='group_policies' AND column_name='permission') THEN
+    UPDATE group_policies SET effect = CASE
+      WHEN upper(effect) IN ('BLOCKED','DENY') THEN 'Blocked'
+      WHEN upper(permission) IN ('VIEW_EDIT','VIEWEDIT') THEN 'ViewEdit'
+      ELSE 'ViewOnly' END;
+    ALTER TABLE group_policies DROP COLUMN permission;
+  ELSE
+    UPDATE group_policies SET effect = CASE
+      WHEN upper(effect) IN ('BLOCKED','DENY') THEN 'Blocked'
+      WHEN upper(effect) IN ('VIEWEDIT','VIEW_EDIT') THEN 'ViewEdit'
+      ELSE 'ViewOnly' END;
+  END IF;
+END $$;
+ALTER TABLE group_policies ALTER COLUMN effect SET DEFAULT 'ViewOnly';
+ALTER TABLE group_policies ADD CONSTRAINT chk_group_policies_effect CHECK (effect IN ('ViewEdit','ViewOnly','Blocked'));
 ALTER TABLE group_policies ADD CONSTRAINT fk_gp_group FOREIGN KEY (group_id) REFERENCES groups_(id) ON DELETE CASCADE;
 ALTER TABLE group_policies ADD CONSTRAINT fk_gp_db FOREIGN KEY (database_id) REFERENCES databases(id) ON DELETE CASCADE;
 ALTER TABLE group_policies ADD CONSTRAINT uq_group_database_policy UNIQUE (group_id, database_id);

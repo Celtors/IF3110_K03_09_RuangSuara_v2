@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS group_policies (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     group_id UUID NOT NULL REFERENCES groups_(id) ON DELETE CASCADE,
     database_id UUID NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
-    effect VARCHAR(10) NOT NULL DEFAULT 'ALLOW' CHECK (effect IN ('ViewEdit','ViewOnly', 'Blocked')),
+    effect VARCHAR(10) NOT NULL DEFAULT 'ViewOnly' CHECK (effect IN ('ViewEdit','ViewOnly','Blocked')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_group_database_policy UNIQUE (group_id, database_id)
 );
@@ -111,10 +111,14 @@ INSERT INTO user_groups (user_id, group_id) VALUES
     ('11111111-1111-4111-8111-000000000004', '22222222-2222-4222-8222-000000000004'), -- carol  -> auditors
     ('11111111-1111-4111-8111-000000000005', '22222222-2222-4222-8222-000000000005'); -- dave   -> interns
 
-INSERT INTO databases (id, name) VALUES
-    ('33333333-3333-4333-8333-000000000001', 'orders_db'),
-    ('33333333-3333-4333-8333-000000000002', 'analytics_db'),
-    ('33333333-3333-4333-8333-000000000003', 'users_db');
+-- Connection details are placeholders so the rows satisfy the NOT NULL columns.
+-- password_ciphertext is NOT a real encrypted credential: set a real host and password
+-- through PATCH /api/admin/databases/:id (which encrypts it) before using "test connection"
+-- or the database viewer on these rows.
+INSERT INTO databases (id, name, host, port, database_name, username, password_ciphertext) VALUES
+    ('33333333-3333-4333-8333-000000000001', 'orders_db',    'db.example.test', 5432, 'orders',    'reader', 'seed-placeholder'),
+    ('33333333-3333-4333-8333-000000000002', 'analytics_db', 'db.example.test', 5432, 'analytics', 'reader', 'seed-placeholder'),
+    ('33333333-3333-4333-8333-000000000003', 'users_db',     'db.example.test', 5432, 'users',     'reader', 'seed-placeholder');
 
 
 INSERT INTO group_policies (group_id, database_id, effect) VALUES

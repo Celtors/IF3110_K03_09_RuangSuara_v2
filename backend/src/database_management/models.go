@@ -10,14 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	PermissionViewOnly = "VIEW_ONLY"
-	PermissionViewEdit = "VIEW_EDIT"
-	EffectAllow        = "ALLOW"
-	EffectDeny         = "DENY"
-)
 
-// Database stores target metadata. PasswordCiphertext is deliberately excluded from JSON.
 type Database struct {
 	ID                 uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	Name               string    `json:"name" gorm:"not null;size:100"`
@@ -37,8 +30,7 @@ type GroupPolicy struct {
 	ID         uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	GroupID    uuid.UUID `json:"group_id" gorm:"column:group_id;type:uuid;not null;uniqueIndex:idx_group_database_policy"`
 	DatabaseID uuid.UUID `json:"database_id" gorm:"column:database_id;type:uuid;not null;uniqueIndex:idx_group_database_policy"`
-	Permission string    `json:"permission" gorm:"not null;size:20"`
-	Effect     string    `json:"effect" gorm:"not null;size:10;default:ALLOW"`
+	Effect     string    `json:"effect" gorm:"not null;size:10;default:ViewOnly"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
@@ -63,9 +55,8 @@ type UpdateDatabaseRequest struct {
 	SSLMode      string `json:"ssl_mode"`
 }
 type PolicyRequest struct {
-	GroupID    uuid.UUID `json:"group_id" binding:"required"`
-	Permission string    `json:"permission" binding:"required"`
-	Effect     string    `json:"effect"`
+	GroupID uuid.UUID `json:"group_id" binding:"required"`
+	Effect  string    `json:"effect" binding:"required"`
 }
 
 func (r CreateDatabaseRequest) Validate() error {

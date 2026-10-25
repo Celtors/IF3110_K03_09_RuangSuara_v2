@@ -60,7 +60,7 @@ export default function Policies() {
         <div>
           <h1>Database access</h1>
           <p className="muted">
-            Groups get View only or View + edit on each database. Users inherit access from their groups.
+            Groups get View only, View + edit or Blocked on each database. Users inherit access from their groups, and Blocked in any group overrides the rest.
           </p>
         </div>
       </header>
