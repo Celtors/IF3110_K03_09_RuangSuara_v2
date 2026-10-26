@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS user_groups (
 );
 CREATE TABLE IF NOT EXISTS databases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    dbms VARCHAR(100) NOT NULL,
     name VARCHAR(100) NOT NULL,
     host VARCHAR(253) NOT NULL,
     port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
@@ -115,10 +116,10 @@ INSERT INTO user_groups (user_id, group_id) VALUES
 -- password_ciphertext is NOT a real encrypted credential: set a real host and password
 -- through PATCH /api/admin/databases/:id (which encrypts it) before using "test connection"
 -- or the database viewer on these rows.
-INSERT INTO databases (id, name, host, port, database_name, username, password_ciphertext) VALUES
-    ('33333333-3333-4333-8333-000000000001', 'orders_db',    'db.example.test', 5432, 'orders',    'reader', 'seed-placeholder'),
-    ('33333333-3333-4333-8333-000000000002', 'analytics_db', 'db.example.test', 5432, 'analytics', 'reader', 'seed-placeholder'),
-    ('33333333-3333-4333-8333-000000000003', 'users_db',     'db.example.test', 5432, 'users',     'reader', 'seed-placeholder');
+INSERT INTO databases (id, dbms, name, host, port, database_name, username, password_ciphertext) VALUES
+    ('33333333-3333-4333-8333-000000000001', 'postgres', 'orders_db',    'db.example.test', 5432, 'orders',    'reader', 'seed-placeholder'),
+    ('33333333-3333-4333-8333-000000000002', 'postgres', 'analytics_db', 'db.example.test', 5432, 'analytics', 'reader', 'seed-placeholder'),
+    ('33333333-3333-4333-8333-000000000003', 'postgres', 'users_db',     'db.example.test', 5432, 'users',     'reader', 'seed-placeholder');
 
 
 INSERT INTO group_policies (group_id, database_id, effect) VALUES
