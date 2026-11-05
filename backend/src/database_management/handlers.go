@@ -52,7 +52,7 @@ func fail(c *gin.Context, status int, code, message string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"code": code, "message": message}})
 }
 func (h *Handler) requireSession(c *gin.Context) {
-	user, err := sessionmanager.CurrentUser(c.Request.Context(), c.Request, h.platform)
+	user, err := sessionmanager.CurrentUser(c, h.platform)
 	if err != nil {
 		if errors.Is(err, sessionmanager.ErrNoSession) {
 			fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "A valid session is required")

@@ -7,14 +7,16 @@ import (
 
 	"backend/access_control/models"
 	sessionmanager "backend/access_control/session_manager"
+
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 type ApplicationAccess struct{ Platform *gorm.DB }
 
-func (a ApplicationAccess) Identity(request *http.Request) (string, error) {
-	user, err := sessionmanager.CurrentUser(request.Context(), request, a.Platform)
+func (a ApplicationAccess) Identity(c *gin.Context) (string, error) {
+	user, err := sessionmanager.CurrentUser(c, a.Platform)
 	if err != nil {
 		if !errors.Is(err, sessionmanager.ErrUnauthenticated) && !errors.Is(err, sessionmanager.ErrNoSession) {
 			return "", fault("authorization_unavailable", "Session validation is unavailable")

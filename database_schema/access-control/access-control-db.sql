@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS sso_sessions (
     ip_address VARCHAR(50),
     user_agent TEXT
 );
+
+CREATE TABLE IF NOT EXISTS session_rotations(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES sso_sessions(id) ON DELETE CASCADE,
+    old_session_token_hash VARCHAR(64) NOT NULL UNIQUE,
+    new_session_token_hash VARCHAR(64) NOT NULL UNIQUE,
+    status VARCHAR(10) NOT NULL,
+    rotated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS access_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     event_type VARCHAR(50) NOT NULL,

@@ -86,6 +86,17 @@ func (u User) GetGroupsUUID(db *gorm.DB) *[]uuid.UUID {
 	return &groupsUUID
 }
 
+type SessionRotation struct {
+	ID uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	SessionId uuid.UUID
+	OldSessionTokenHash string
+	NewSessionTokenHash string
+	Status           string
+	RotatedAt time.Time
+}
+
+
+
 type SSOSession struct {
 	ID               uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	UserId           uuid.UUID
@@ -116,6 +127,17 @@ func (session SSOSession) UpdateStatus(db *gorm.DB) {
 	}
 }
 
+func (session SSOSession) LatestRotation(db * gorm.DB) *SessionRotation {
+	var rotations []SessionRotation
+	db.Model(&SessionRotation{}).Where("session_id = ?", session.ID).Order("rotated_at DESC").Find(&rotations)
+
+	if len(rotations) <= 0 {
+		return nil
+	}
+
+	return &(rotations[0])
+}
+
 func (session SSOSession) MarkActivity(db *gorm.DB) {
 	t := time.Now()
 	if session.LastActivityAt != nil {
@@ -124,6 +146,8 @@ func (session SSOSession) MarkActivity(db *gorm.DB) {
 			return
 		}
 	}
+
+	
 
 	db.Model(&SSOSession{}).Where("id = ?", session.ID).Updates(SSOSession{LastActivityAt: &t})
 }

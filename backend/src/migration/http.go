@@ -19,7 +19,7 @@ func RegisterRoutes(router gin.IRouter, s *Service) {
 			c.Abort()
 			return
 		}
-		user, err := s.Access.Identity(c.Request)
+		user, err := s.Access.Identity(c)
 		if err != nil || user == "" {
 			var f *Fault
 			if errors.As(err, &f) && f.Code == "authorization_unavailable" {

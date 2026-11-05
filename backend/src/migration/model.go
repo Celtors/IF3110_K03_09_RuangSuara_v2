@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,7 +22,7 @@ const (
 // Access Control handles group permission rules. Migration uses the result.
 // Requests that modify data must also pass CSRF validation.
 type Access interface {
-	Identity(*http.Request) (string, error)
+	Identity(*gin.Context) (string, error)
 	Permission(context.Context, string, string) (Permission, error)
 	CSRF(*http.Request) error
 }
