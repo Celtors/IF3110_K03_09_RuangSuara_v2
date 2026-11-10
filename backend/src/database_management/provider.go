@@ -11,9 +11,7 @@ import (
 	"sync"
 	"time"
 
-	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgxpool"
-	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -33,7 +31,7 @@ type poolKey struct {
 var ErrDatabaseNotFound = errors.New("managed database not found")
 
 func NewProvider(platform *gorm.DB) *Provider {
-	return &Provider{platform: platform, timeout: 5 * time.Second, pools: make(map[poolKey]*pgxpool.Pool)}
+	return &Provider{timeout: 5 * time.Second, pools: make(map[poolKey]*pgxpool.Pool)}
 }
 func (p *Provider) targetConfiguration(ctx context.Context, id string) (Database, string, error) {
 	var d Database
@@ -43,12 +41,12 @@ func (p *Provider) targetConfiguration(ctx context.Context, id string) (Database
 	if err := validateHost(d.Host); err != nil {
 		return d, "", fmt.Errorf("target host rejected by security policy")
 	}
-	if !validDBMS(d.DBMS) {
-		return d, "", errors.New("unsupported target database engine")
-	}
-	if validateDBMSSSLMode(normalizeDBMS(d.DBMS), d.SSLMode) == "" {
-		return d, "", errors.New("invalid target TLS configuration")
-	}
+	// if !validDBMS(d.DBMS) {
+	// 	return d, "", errors.New("unsupported target database engine")
+	// }
+	// if validateDBMSSSLMode(normalizeDBMS(d.DBMS), d.SSLMode) == "" {
+	// 	return d, "", errors.New("invalid target TLS configuration")
+	// }
 	password, err := decryptPassword(d.PasswordCiphertext)
 	return d, password, err
 }
@@ -59,33 +57,33 @@ func postgresDSN(d Database, password string) string {
 	u.RawQuery = q.Encode()
 	return u.String()
 }
-func mariaDSN(d Database, password string) (string, error) {
-	cfg := mysqldriver.NewConfig()
-	cfg.User = d.Username
-	cfg.Passwd = password
-	cfg.Net = "tcp"
-	cfg.Addr = net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
-	cfg.DBName = d.DatabaseName
-	cfg.ParseTime = true
-	cfg.Timeout = 5 * time.Second
-	cfg.ReadTimeout = 5 * time.Second
-	cfg.WriteTimeout = 5 * time.Second
-	// TLS must never silently downgrade: require the driver to verify the server.
-	if d.SSLMode == "require" {
-		cfg.TLSConfig = "true"
-	} else if d.SSLMode != "disable" {
-		return "", errors.New("invalid MariaDB TLS mode")
-	}
-	return cfg.FormatDSN(), nil
-}
+// func mariaDSN(d Database, password string) (string, error) {
+// 	cfg := mysqldriver.NewConfig()
+// 	cfg.User = d.Username
+// 	cfg.Passwd = password
+// 	cfg.Net = "tcp"
+// 	cfg.Addr = net.JoinHostPort(d.Host, strconv.Itoa(d.Port))
+// 	cfg.DBName = d.DatabaseName
+// 	cfg.ParseTime = true
+// 	cfg.Timeout = 5 * time.Second
+// 	cfg.ReadTimeout = 5 * time.Second
+// 	cfg.WriteTimeout = 5 * time.Second
+// 	// TLS must never silently downgrade: require the driver to verify the server.
+// 	if d.SSLMode == "require" {
+// 		cfg.TLSConfig = "true"
+// 	} else if d.SSLMode != "disable" {
+// 		return "", errors.New("invalid MariaDB TLS mode")
+// 	}
+// 	return cfg.FormatDSN(), nil
+// }
 func (p *Provider) targetDSN(ctx context.Context, id string) (string, error) {
 	d, password, err := p.targetConfiguration(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	if normalizeDBMS(d.DBMS) != DBMSPostgres {
-		return "", errors.New("target is not PostgreSQL")
-	}
+	// if normalizeDBMS(d.DBMS) != DBMSPostgres {
+	// 	return "", errors.New("target is not PostgreSQL")
+	// }
 	return postgresDSN(d, password), nil
 }
 func (p *Provider) Target(ctx context.Context, id string) (*gorm.DB, error) {
@@ -94,15 +92,17 @@ func (p *Provider) Target(ctx context.Context, id string) (*gorm.DB, error) {
 		return nil, err
 	}
 	var db *gorm.DB
-	if normalizeDBMS(d.DBMS) == DBMSMariaDB {
-		dsn, e := mariaDSN(d, password)
-		if e != nil {
-			return nil, e
-		}
-		db, err = gorm.Open(gormmysql.Open(dsn), &gorm.Config{DisableAutomaticPing: true})
-	} else {
-		db, err = gorm.Open(postgres.Open(postgresDSN(d, password)), &gorm.Config{DisableAutomaticPing: true})
-	}
+	// if normalizeDBMS(d.DBMS) == DBMSMariaDB {
+	// 	dsn, e := mariaDSN(d, password)
+	// 	if e != nil {
+	// 		return nil, e
+	// 	}
+	// 	db, err = gorm.Open(gormmysql.Open(dsn), &gorm.Config{DisableAutomaticPing: true})
+	// } else {
+	// 	db, err = gorm.Open(postgres.Open(postgresDSN(d, password)), &gorm.Config{DisableAutomaticPing: true})
+	// }
+
+	db, err = gorm.Open(postgres.Open(postgresDSN(d, password)), &gorm.Config{DisableAutomaticPing: true})
 	if err != nil {
 		return nil, errors.New("target database connection failed")
 	}
