@@ -27,26 +27,6 @@ func TestDBMSAndTLSMatrix(t *testing.T) {
 	}
 }
 
-// func TestMariaDSNEncodingAndTLS(t *testing.T) {
-// 	d := Database{Host: "localhost", Port: 3306, DatabaseName: "sample", Username: "u", SSLMode: "disable"}
-// 	dsn, err := mariaDSN(d, "p@ss:word")
-// 	if err != nil {
-// 		t.Fatal(err)
-// 	}
-// 	if !strings.Contains(dsn, "tcp(localhost:3306)") || !strings.Contains(dsn, "parseTime=true") {
-// 		t.Fatalf("unexpected driver DSN: %s", strings.ReplaceAll(dsn, "p@ss:word", "[REDACTED]"))
-// 	}
-// 	d.SSLMode = "require"
-// 	secure, err := mariaDSN(d, "secret")
-// 	if err != nil || !strings.Contains(secure, "tls=true") {
-// 		t.Fatalf("TLS required: %v", err)
-// 	}
-// 	d.SSLMode = "verify-ca"
-// 	if _, err := mariaDSN(d, "secret"); err == nil {
-// 		t.Fatal("unsupported TLS mode must fail closed")
-// 	}
-// }
-
 func TestPostgresDSNEscapesCredentials(t *testing.T) {
 	d := Database{Host: "db.example.test", Port: 5432, DatabaseName: "hello", Username: "test user", SSLMode: "require"}
 	raw := postgresDSN(d, "secret@/?")
