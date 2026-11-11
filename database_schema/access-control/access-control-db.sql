@@ -24,7 +24,6 @@ CREATE TABLE IF NOT EXISTS user_groups (
 );
 CREATE TABLE IF NOT EXISTS databases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    dbms VARCHAR(100) NOT NULL,
     name VARCHAR(100) NOT NULL,
     host VARCHAR(253) NOT NULL,
     port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
