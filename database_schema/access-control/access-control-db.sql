@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS access_logs (
         ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS group_leaders(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    leader_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    group_id UUID NOT NULL UNIQUE REFERENCES groups_(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+
 CREATE INDEX IF NOT EXISTS idx_user_groups_user ON user_groups(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_groups_group ON user_groups(group_id);
 CREATE INDEX IF NOT EXISTS idx_group_policies_database ON group_policies(database_id);

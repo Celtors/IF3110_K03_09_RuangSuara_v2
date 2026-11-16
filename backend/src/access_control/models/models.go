@@ -180,3 +180,10 @@ type AccessLog struct {
 	Result     string
 	CreatedAt  time.Time
 }
+
+type GroupLeader struct {
+	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	LeaderId    uuid.UUID `json:"leader_id"`
+	GroupId   uuid.UUID `json:"group_id"`
+	CreatedAt time.Time `json:"created_at"`
+}

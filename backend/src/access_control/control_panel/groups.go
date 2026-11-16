@@ -1,8 +1,9 @@
 package controlpanel
 
 import (
-	"net/http"
 	"backend/access_control/models"
+	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -24,6 +25,15 @@ type UpdateGroupPayload struct {
 type GroupCompact struct {
 	Id          uuid.UUID `json:"id"`
 	Name        string            `json:"name"`
+}
+
+type GroupViewPayload struct {
+	Id          uuid.UUID `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	LeaderName  string            `json:"leader_name"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func (payload CreateGroupPayload) GetDBStruct() (models.Group) {
@@ -75,7 +85,14 @@ func CreateGroupRequest(c *gin.Context, db *gorm.DB) {
 }
 
 func GetAllGroupsRequest(c *gin.Context, db *gorm.DB) {
-	var groups []models.Group
+	var groups []GroupViewPayload
+
+	db.Model(&models.Group{}).
+		Select("groups.id, groups.name, groups.description, users.username AS leader_name, groups.created_at, groups.updated_at").
+		Joins("LEFT JOIN group_leaders ON group.id = group_leaders.group_id").
+		Joins("LEFT JOIN users ON users.id = group_leaders.leaders_id").
+		Find(&groups)
+
 
 	if err := db.Find(&groups).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{

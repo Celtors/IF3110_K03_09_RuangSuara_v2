@@ -1,8 +1,9 @@
 package controlpanel
 
 import (
-	"net/http"
 	"backend/access_control/models"
+	"errors"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -29,9 +30,21 @@ type GroupFromUserPayload struct {
 	PlacedAt    time.Time         `json:"placed_at"`
 }
 
+type GroupLeaderPayload struct {
+	UserId   uuid.UUID `json:"user_id"`
+	Username     string        `json:"username"`
+}
+
 func (payload UserGroupPayload) GetDBStructCreate() (models.UserGroup) {
 	return models.UserGroup{
 		UserId:  payload.UserId,
+		GroupId: payload.GroupId,
+	}
+}
+
+func (payload UserGroupPayload) GetLeaderStruct() (models.GroupLeader) {
+	return models.GroupLeader{
+		LeaderId:  payload.UserId,
 		GroupId: payload.GroupId,
 	}
 }
@@ -125,4 +138,82 @@ func GetGroupsFromUserRequest(c *gin.Context, db *gorm.DB) {
 		Find(&groupFromUsers)
 
 	c.JSON(http.StatusOK, groupFromUsers)
+}
+
+func SetGroupLeader(c *gin.Context, db *gorm.DB) {
+	var userGroupPayload UserGroupPayload
+
+	if err := c.ShouldBindJSON(&userGroupPayload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status":  "error",
+			"message": "Failed to set leader to group: " + err.Error(),
+		})
+		return
+	}
+
+	groupLeaderModel := userGroupPayload.GetLeaderStruct()
+
+	var leader models.GroupLeader
+	err := db.Where("group_id = ?", groupLeaderModel.GroupId).Take(&leader).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if err := db.Create(&groupLeaderModel).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"status":  "error",
+				"message": "Failed to set leader to group: " + err.Error(),
+			})
+			return
+		}
+	} else if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status":  "error",
+			"message": "Failed to set leader to group: " + err.Error(),
+		})
+		return
+	} else {
+		err2 := db.Model(models.GroupLeader{}).
+				Where("group_id = ?", groupLeaderModel.GroupId).
+				Update("leader_id", groupLeaderModel.LeaderId).Error
+		if err2 != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+			"status":  "error",
+			"message": "Failed to set leader to group: " + err2.Error(),
+		})
+		return
+		}
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"status":  "success",
+		"message": "Successfully set user to be leader of group",
+	})
+}
+
+
+func GetGroupLeader(c *gin.Context, db *gorm.DB) {
+	var groupLeader []GroupLeaderPayload
+
+	group_id, exists := c.GetQuery("id")
+
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status":  "error",
+			"message": "Failed to get leader from group",
+		})
+		return
+	}
+
+	db.Model(&models.GroupLeader{}).
+		Select("group_leaders.user_id, users.username").
+		Joins("LEFT JOIN users ON users.id = group_leaders.leader_id").
+		Where("group_id = ?", group_id).
+		Find(&groupLeader)
+	
+	if len(groupLeader) < 1 {
+		c.JSON(http.StatusNotFound, gin.H{
+			"status":  "Not Found",
+			"message": "Leader not found",
+		})
+	}
+
+	c.JSON(http.StatusOK, groupLeader[0])
 }
