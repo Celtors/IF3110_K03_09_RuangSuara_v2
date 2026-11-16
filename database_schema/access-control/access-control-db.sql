@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS group_leaders(
     leader_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     group_id UUID NOT NULL UNIQUE REFERENCES groups_(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-)
+);
 
 CREATE INDEX IF NOT EXISTS idx_user_groups_user ON user_groups(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_groups_group ON user_groups(group_id);
