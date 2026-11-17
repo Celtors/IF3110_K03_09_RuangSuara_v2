@@ -1,55 +1,58 @@
-import { href } from "../../migration/api.js";
-import { database } from "../../migration/navigation.js";
-export function Home() {
+import { href, workspaceHref } from "../../migration/api.js";
+import { DatabaseSelector } from "./DatabaseSelector.jsx";
+import { permissionLabel } from "../../migration/permission.js";
+
+const CARDS = [
+  ["migration", "01", "Review every change", "Browse applied versions, drafts, and execution outcomes."],
+  ["console", "02", "Run ad-hoc SQL", "Query the selected database and inspect results. Nothing is recorded as a migration."],
+  ["schema-diff", "03", "Design the next schema", "Compare a desired schema and generate candidate SQL."],
+  ["plan", "04", "Inspect before execution", "See scan types, indexes, joins, and estimated costs."],
+];
+
+// Overview tab. databaseId / onDatabaseChange come from MigrationApp.
+export function Home({ databaseId, onDatabaseChange, databases, selected, onOpenTab }) {
+  const usable = Boolean(databaseId && selected);
   return (
     <>
-      <form
-        className="panel database-form"
-        action="/migrations/history.html"
-        method="get"
-      >
-        <label htmlFor="database">Managed database ID</label>
-        <div>
-          <input
-            className="input"
-            id="database"
-            name="database"
-            defaultValue={database}
-            required
-            maxLength={200}
-          />
-          <button className="btn btn-primary">Open migrations →</button>
-        </div>
-        <small>Use the identifier supplied by Database Management.</small>
-      </form>
+      <DatabaseSelector
+        databases={databases.items}
+        loading={databases.loading}
+        error={databases.error}
+        onRetry={databases.reload}
+        value={databaseId}
+        onChange={onDatabaseChange}
+      />
+      {selected && (
+        <p className="overview-summary">
+          Access level <b>{permissionLabel(selected.permission)}</b> on <b>{selected.name}</b>
+        </p>
+      )}
       <div className="card-grid">
-        {[
-          [
-            "history",
-            "01",
-            "Review every change",
-            "Browse applied versions, drafts, and execution outcomes.",
-          ],
-          [
-            "schema-diff",
-            "02",
-            "Design the next schema",
-            "Compare a desired schema and generate candidate SQL.",
-          ],
-          [
-            "query-plan",
-            "03",
-            "Inspect before execution",
-            "See scan types, indexes, joins, and estimated costs.",
-          ],
-        ].map(([p, n, t, d]) => (
-          <a className="panel feature-card" href={href(p, database)} key={p}>
-            <span className="card-number">{n}</span>
-            <h2>{t}</h2>
-            <p>{d}</p>
-            <span className="arrow">↗</span>
-          </a>
-        ))}
+        {CARDS.map(([target, n, t, d]) => {
+          const link =
+            target === "schema-diff"
+              ? { href: usable ? href("schema-diff", databaseId) : undefined }
+              : {
+                  href: workspaceHref(target, databaseId),
+                  onClick: (e) => {
+                    e.preventDefault();
+                    if (usable) onOpenTab(target);
+                  },
+                };
+          return (
+            <a
+              className={usable ? "panel feature-card" : "panel feature-card disabled"}
+              aria-disabled={!usable}
+              key={target}
+              {...link}
+            >
+              <span className="card-number">{n}</span>
+              <h2>{t}</h2>
+              <p>{d}</p>
+              <span className="arrow">↗</span>
+            </a>
+          );
+        })}
       </div>
     </>
   );
