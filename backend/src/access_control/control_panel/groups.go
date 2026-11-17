@@ -85,25 +85,32 @@ func CreateGroupRequest(c *gin.Context, db *gorm.DB) {
 }
 
 func GetAllGroupsRequest(c *gin.Context, db *gorm.DB) {
-	var groups []GroupViewPayload
+    var groups []GroupViewPayload
 
-	db.Model(&models.Group{}).
-		Select("groups.id, groups.name, groups.description, users.username AS leader_name, groups.created_at, groups.updated_at").
-		Joins("LEFT JOIN group_leaders ON group.id = group_leaders.group_id").
-		Joins("LEFT JOIN users ON users.id = group_leaders.leaders_id").
-		Find(&groups)
+    err := db.Table("groups_ AS g").
+        Select(`
+            g.id,
+            g.name,
+            g.description,
+            COALESCE(u.username, '') AS leader_name,
+            g.created_at,
+            g.updated_at
+        `).
+        Joins("LEFT JOIN group_leaders gl ON g.id = gl.group_id").
+        Joins("LEFT JOIN users u ON u.id = gl.leader_id").
+        Scan(&groups).Error
 
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{
+            "status":  "error",
+            "message": "Failed to get group data: " + err.Error(),
+        })
+        return
+    }
 
-	if err := db.Find(&groups).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status":  "error",
-			"message": "Failed to get group data: " + err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, groups)
+    c.JSON(http.StatusOK, groups)
 }
+
 
 
 func UpdateGroupRequest(c *gin.Context, db *gorm.DB) {
