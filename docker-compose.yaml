@@ -14,8 +14,23 @@ services:
     ports:
       - "9000:5432"
     volumes:
-      - access_control_data:/var/lib/postgresql/data
       - ./database_schema/access-control:/docker-entrypoint-initdb.d:ro
+      - access_control_data:/var/lib/postgresql/data
+
+  target-postgres:
+    image: postgres:16-alpine
+    container_name: target-postgres
+    environment:
+      POSTGRES_USER: target_user
+      POSTGRES_PASSWORD: target_password
+      POSTGRES_DB: target-test-db
+    ports:
+      - "9001:5432"
+    volumes:
+      - ./database_schema/target-database:/docker-entrypoint-initdb.d:ro
+      - target_postgres_data:/var/lib/postgresql/data
+
 
 volumes:
-  access_control_data :
+  access_control_data   :
+  target_postgres_data  :
