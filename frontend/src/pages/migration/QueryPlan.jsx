@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { api } from "../../migration/api.js";
-import { base } from "../../migration/navigation.js";
+import { api, databaseBase } from "../../migration/api.js";
 import { Badge, ErrorBox, SQL } from "../../migration/components.jsx";
-export function QueryPlan() {
+export function QueryPlan({ databaseId }) {
+  const base = databaseBase(databaseId);
   const [sql, setSQL] = useState("SELECT 1;");
   const [result, setResult] = useState();
   const [busy, setBusy] = useState(false);
