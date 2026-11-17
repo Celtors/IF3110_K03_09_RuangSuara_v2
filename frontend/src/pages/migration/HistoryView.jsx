@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { api, href, date } from "../../migration/api.js";
-import { database, base } from "../../migration/navigation.js";
 import { Badge, ErrorBox } from "../../migration/components.jsx";
-export function HistoryView({ history, reload }) {
+import { api, href, date, databaseBase } from "../../migration/api.js";
+export function HistoryView({ history, reload, databaseId }) {
+  const base = databaseBase(databaseId);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   async function reconcile() {
@@ -55,7 +55,7 @@ export function HistoryView({ history, reload }) {
                 <button className="btn" onClick={reconcile} disabled={busy}>
                   {busy ? "Reconciling…" : "Reconcile outcomes"}
                 </button>
-                <a className="btn btn-primary" href={href("editor", database)}>
+                <a className="btn btn-primary" href={href("editor", databaseId)}>
                   + New migration
                 </a>
               </>
@@ -100,7 +100,7 @@ export function HistoryView({ history, reload }) {
                     <td>
                       <a
                         className="text-link"
-                        href={href("details", database, m.id)}
+                        href={href("details", databaseId, m.id)}
                       >
                         View →
                       </a>
