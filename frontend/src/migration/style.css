@@ -1,5 +1,5 @@
-/* Shared tokens and controls come from index.css. Keep every Migration-specific
-   rule inside this wrapper so Admin and Login retain their existing styles. */
+/* shared tokens and controls come from index.css. keep every migration-specific
+   rule inside this wrapper so admin and login retain their existing styles. */
 .migration-app .workspace {
   min-width: 0;
   display: flex;
@@ -110,7 +110,8 @@
   display: block;
   font-size: 0.88rem;
   font-weight: 500;
-  margin-bottom: 0.35rem;
+  margin: 0;
+  padding: 10.4px 12.667px;
 }
 .migration-app small {
   font-size: 0.82rem;
@@ -196,8 +197,8 @@
 }
 .migration-app .stats strong {
   font:
-    700 1.9rem/1.2 "Bricolage Grotesque",
-    "Figtree",
+    700 1.9rem/1.2 "bricolage grotesque",
+    "figtree",
     sans-serif;
 }
 .migration-app .count {
@@ -249,13 +250,30 @@
   color: var(--muted);
   background: var(--off-bg);
 }
+
 .migration-app .text-link {
+  appearance: none;
+  -webkit-appearance: none;
+
+  background: var(--surface);
   color: var(--accent);
+
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+
+  box-shadow: none;
+  text-shadow: none;
+
+  padding: 0.5rem 1rem;
+
   font-weight: 600;
-  text-decoration: none;
+  cursor: pointer;
 }
 .migration-app .text-link:hover {
-  text-decoration: underline;
+  text-decoration: none;
+  background-color: color-mix(in srgb, var(--accent) 20%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--surface));
+  filter: brightness(1.1);
 }
 .migration-app .empty {
   border: 0;
@@ -270,7 +288,7 @@
 .migration-app .empty h3 {
   color: var(--ink);
   margin: 0 0 0.5rem;
-  font-family: "Bricolage Grotesque", "Figtree", sans-serif;
+  font-family: "bricolage grotesque", "figtree", sans-serif;
 }
 .migration-app .card-grid {
   display: grid;
@@ -331,8 +349,8 @@
   padding: 1.5rem;
   font:
     0.86rem/1.8 ui-monospace,
-    "SFMono-Regular",
-    Menlo,
+    "sfmono-regular",
+    menlo,
     monospace;
   tab-size: 2;
   white-space: pre;
@@ -517,3 +535,59 @@
     justify-content: flex-start;
   }
 }
+
+/* ---- Workspace tabs, selector, SQL console (keep OUTSIDE any @media) ---- */
+.migration-app .workspace-tabs {
+    display: flex; gap: 0.25rem; border-bottom: 1px solid var(--line); margin-bottom: 1.25rem; overflow-x: auto;
+  }
+.migration-app .tab {
+    padding: 0.65rem 1.1rem; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+.migration-app .tab:hover {
+    color: var(--ink);
+  }
+.migration-app .tab.active {
+    color: var(--accent); border-bottom-color: var(--accent);
+  }
+.migration-app .tab:focus-visible {
+    outline-offset: -2px;
+  }
+.migration-app .database-selector {
+    display: grid; gap: 0.6rem; margin-bottom: 1.25rem; max-width: 36rem;
+  }
+.migration-app .database-context {
+    display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1rem; color: var(--muted);
+  }
+.migration-app .console-bar {
+    display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;
+  }
+.migration-app .console-status {
+    color: var(--muted); font-size: 0.85rem;
+  }
+.migration-app .sql-meta {
+    display: flex; gap: 1rem; flex-wrap: wrap; padding: 0 1.5rem 0.75rem; color: var(--muted); font-size: 0.85rem;
+  }
+.migration-app .sql-result {
+    margin-top: 1.25rem;
+  }
+.migration-app .sql-result .notice {
+    margin: 0 1.5rem 1rem;
+  }
+.migration-app .sql-table th small {
+    display: block; font-weight: 400; color: var(--muted);
+  }
+.migration-app .sql-table th.num, .migration-app .sql-table td.num {
+    text-align: right;
+  }
+.migration-app .sql-null {
+    color: var(--muted); font-style: italic;
+  }
+.migration-app .sql-empty {
+    padding: 1rem 1.5rem; color: var(--muted);
+  }
+.migration-app .overview-summary {
+    margin: -0.5rem 0 1.25rem; color: var(--muted);
+  }
+.migration-app .feature-card.disabled {
+    opacity: 0.55; cursor: not-allowed;
+  }

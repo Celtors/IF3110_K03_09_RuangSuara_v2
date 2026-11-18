@@ -100,6 +100,14 @@ func SetupAccessControl(r *gin.Engine) (*gorm.DB, error) {
 		controlpanel.RemoveUserFromGroup(c, access_control_db)
 	})
 
+	admin.GET("/groups/leader", func(c *gin.Context) {
+		controlpanel.GetGroupLeader(c, access_control_db)
+	})
+
+	admin.POST("/groups/leader", func(c *gin.Context) {
+		controlpanel.SetGroupLeader(c, access_control_db)
+	})
+
 	admin.GET("/databases", func(c *gin.Context) {
 		controlpanel.GetAllDatabasesRequest(c, access_control_db)
 	})

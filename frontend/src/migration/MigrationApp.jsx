@@ -1,51 +1,118 @@
-import { useEffect, useState } from "react";
-import { api, session, href } from "./api.js";
-import { database, id, page, base, detailPath, titles } from "./navigation.js";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, session, href, workspaceHref, databaseBase } from "./api.js";
+import { database, id, page, titles } from "./navigation.js";
 import { ErrorBox } from "./components.jsx";
-import { Home } from "../pages/migration/Home.jsx";
-import { HistoryView } from "../pages/migration/HistoryView.jsx";
+import { useAccessibleDatabases } from "./useAccessibleDatabases.js"
 import { Editor } from "../pages/migration/Editor.jsx";
 import { Details } from "../pages/migration/Details.jsx";
 import { SchemaDiff } from "../pages/migration/SchemaDiff.jsx";
-import { QueryPlan } from "../pages/migration/QueryPlan.jsx";
+import { Workspace } from "../pages/migration/Workspace.jsx";
+
+const WORKSPACE_PAGES = ["index", "history", "query-plan"];
+const TABS = ["overview", "migration", "console", "plan"];
+const PAGE_TAB = { index: "overview", history: "migration", "query-plan": "plan" };
+const EMPTY = { migrations: [], can_edit: false };
+const tabTitles = {
+  overview: titles.index,
+  migration: titles.history,
+  console: [
+    "SQL console",
+    "Run ad-hoc SQL on the selected database. Nothing here is recorded as a migration.",
+  ],
+  plan: titles["query-plan"],
+};
+const NAV = [
+  ["overview", "⌂", "Overview"],
+  ["migration", "◷", "Migrations"],
+  ["console", "▤", "SQL console"],
+  ["schema-diff", "⇄", "Schema comparison"],
+  ["plan", "⌘", "Query plans"],
+];
+
+function initialTab() {
+  const t = new URLSearchParams(location.search).get("tab");
+  return TABS.includes(t) ? t : (PAGE_TAB[page] ?? "overview");
+}
+// The URL stays authoritative so a refresh restores database and tab.
+function syncLocation(databaseId, tab) {
+  const q = new URLSearchParams(location.search);
+  if (databaseId) q.set("database", databaseId);
+  else q.delete("database");
+  q.set("tab", tab);
+  window.history.replaceState(null, "", `${location.pathname}?${q}`);
+}
+
 export function MigrationApp() {
-  const [ready, setReady] = useState(!database);
-  const [error, setError] = useState("");
-  const [history, setHistory] = useState({
-    migrations: [],
-    can_edit: false,
+  const workspace = WORKSPACE_PAGES.includes(page);
+  // The one and only selected-database state. Only Overview changes it.
+  const [databaseId, setDatabaseId] = useState(database);
+  const [tab, setTab] = useState(initialTab);
+  const [loaded, setLoaded] = useState({
+    databaseId: "",
+    history: EMPTY,
+    current: undefined,
+    error: "",
   });
-  const [current, setCurrent] = useState();
   const [refresh, setRefresh] = useState(0);
+  const sessionPromise = useRef(null);
+  const ensureSession = useCallback(() => {
+    if (!sessionPromise.current) {
+      sessionPromise.current = session().catch((e) => {
+        sessionPromise.current = null;
+        throw e;
+      });
+    }
+    return sessionPromise.current;
+  }, []);
+  const databases = useAccessibleDatabases(workspace, ensureSession);
+
   useEffect(() => {
-    if (!database) return;
+    if (!databaseId) return;
     let active = true;
     (async () => {
       try {
-        await session();
+        await ensureSession();
+        const base = databaseBase(databaseId);
         const h = await api(`${base}/migrations`);
-        if (!active) return;
-        setHistory(h);
-        if (id) {
-          const m = await api(detailPath);
-          if (active) setCurrent(m);
-        }
-        if (active) {
-          setError("");
-          setReady(true);
-        }
+        let current;
+        if (id) current = await api(`${base}/migrations/${encodeURIComponent(id)}`);
+        if (active) setLoaded({ databaseId, history: h, current, error: "" });
       } catch (e) {
-        if (active) {
-          setError(e.message);
-          setReady(true);
-        }
+        if (active)
+          setLoaded({ databaseId, history: EMPTY, current: undefined, error: e.message });
       }
     })();
     return () => {
       active = false;
     };
-  }, [refresh]);
-  const [title, subtitle] = titles[page] ?? titles.index;
+  }, [databaseId, refresh, ensureSession]);
+
+
+  const ready = !databaseId || loaded.databaseId === databaseId;
+  const current = ready ? loaded.current : undefined;
+  const historyData = ready && databaseId ? loaded.history : EMPTY;
+  const error = ready && databaseId ? loaded.error : "";
+  const selected = databases.items.find((d) => d.id === databaseId);
+  const reload = () => setRefresh((v) => v + 1);
+
+  const changeDatabase = (next) => {
+    setDatabaseId(next);
+    syncLocation(next, tab);
+  };
+  const changeTab = (next) => {
+    setTab(next);
+    syncLocation(databaseId, next);
+  };
+  const navigateTab = (event, key) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    event.preventDefault(); // in-place switch; modified clicks keep normal link behaviour
+    changeTab(key);
+  };
+
+  const [title, subtitle] = workspace ? tabTitles[tab] : (titles[page] ?? titles.index);
+  const activeNav = workspace ? tab : page === "schema-diff" ? "schema-diff" : "migration";
+  const shownName = selected?.name ?? (databaseId || "Not selected");
+
   return (
     <div className="shell migration-app">
       <aside className="sidebar">
@@ -60,27 +127,21 @@ export function MigrationApp() {
           </nav>
           <div className="nav-label">MIGRATION</div>
           <nav aria-label="Migration navigation">
-            {[
-              ["index", "⌂", "Overview"],
-              ["history", "◷", "Migrations"],
-              ["schema-diff", "⇄", "Schema comparison"],
-              ["query-plan", "⌘", "Query plans"],
-            ].map(([p, icon, text]) => (
-              <a
-                aria-current={page === p ? "page" : undefined}
-                className={
-                  page === p ||
-                  (p === "history" && ["editor", "details"].includes(page))
-                    ? "nav-link active"
-                    : "nav-link"
-                }
-                href={href(p, database)}
-                key={p}
-              >
-                <span aria-hidden="true">{icon}</span>
-                {text}
-              </a>
-            ))}
+            {NAV.map(([key, icon, text]) => {
+              const isTab = TABS.includes(key);
+              return (
+                <a
+                  aria-current={activeNav === key ? "page" : undefined}
+                  className={activeNav === key ? "nav-link active" : "nav-link"}
+                  href={isTab ? workspaceHref(key, databaseId) : href(key, databaseId)}
+                  onClick={isTab && workspace ? (e) => navigateTab(e, key) : undefined}
+                  key={key}
+                >
+                  <span aria-hidden="true">{icon}</span>
+                  {text}
+                </a>
+              );
+            })}
           </nav>
         </div>
         <div className="sidebar-foot">
@@ -93,70 +154,80 @@ export function MigrationApp() {
           <nav aria-label="Breadcrumb">
             <a href="/index.html">RuangSuara</a>
             <span aria-hidden="true">/</span>
-            <a href={href("index", database)}>Migration</a>
+            <a href={workspaceHref("overview", databaseId)}>Migration</a>
           </nav>
           <span className="header-db">
-            Database <b>{database || "Not selected"}</b>
+            Database <b>{shownName}</b>
           </span>
         </header>
         <main className="content">
-          <div className="eyebrow">DATABASE / {database || "Not selected"}</div>
+          <div className="eyebrow">DATABASE / {databaseId || "Not selected"}</div>
           <div className="page-head page-heading">
             <div>
               <h1>{title}</h1>
               <p>{subtitle}</p>
             </div>
             <span className="badge access-label">
-              {!database
+              {!databaseId
                 ? "Select a database"
-                : ready
-                  ? error
+                : !ready
+                  ? "Connecting…"
+                  : error
                     ? "Unavailable"
-                    : history.can_edit
+                    : historyData.can_edit
                       ? "View + Edit"
-                      : "View Only"
-                  : "Connecting…"}
+                      : "View Only"}
             </span>
           </div>
-          <ErrorBox error={error} />
-          {!database ? (
-            <Home />
-          ) : !ready ? (
-            <div className="panel" role="status">
-              Loading workspace…
-            </div>
-          ) : error && page !== "index" ? (
-            <button
-              className="btn btn-primary"
-              onClick={() => setRefresh((v) => v + 1)}
-            >
-              Try again
-            </button>
+          {workspace ? (
+            <Workspace
+              databaseId={databaseId}
+              onDatabaseChange={changeDatabase}
+              tab={tab}
+              onTabChange={changeTab}
+              databases={databases}
+              selected={selected}
+              ready={ready}
+              error={error}
+              history={historyData}
+              reload={reload}
+            />
           ) : (
             <>
-              {page === "index" && <Home />}
-              {page === "history" && (
-                <HistoryView
-                  history={history}
-                  reload={() => setRefresh((v) => v + 1)}
-                />
+              <ErrorBox error={error} />
+              {!databaseId ? (
+                <div className="panel empty">
+                  <h3>No database selected</h3>
+                  <p>Choose a database in the Overview tab first.</p>
+                  <a className="btn btn-primary" href={workspaceHref("overview", "")}>
+                    Go to Overview
+                  </a>
+                </div>
+              ) : !ready ? (
+                <div className="panel" role="status">
+                  Loading workspace…
+                </div>
+              ) : error ? (
+                <button className="btn btn-primary" onClick={reload}>
+                  Try again
+                </button>
+              ) : (
+                <>
+                  {page === "editor" &&
+                    (id && !current ? (
+                      <ErrorBox error="Migration not found" />
+                    ) : (
+                      <Editor current={current} canEdit={historyData.can_edit} />
+                    ))}
+                  {page === "details" &&
+                    (current ? (
+                      <Details current={current} canEdit={historyData.can_edit} />
+                    ) : (
+                      <ErrorBox error="Select a migration from history." />
+                    ))}
+                  {page === "schema-diff" && <SchemaDiff canEdit={historyData.can_edit} />}
+                </>
               )}
-              {page === "editor" &&
-                (id && !current ? (
-                  <ErrorBox error="Migration not found" />
-                ) : (
-                  <Editor current={current} canEdit={history.can_edit} />
-                ))}
-              {page === "details" &&
-                (current ? (
-                  <Details current={current} canEdit={history.can_edit} />
-                ) : (
-                  <ErrorBox error="Select a migration from history." />
-                ))}
-              {page === "schema-diff" && (
-                <SchemaDiff canEdit={history.can_edit} />
-              )}
-              {page === "query-plan" && <QueryPlan />}
             </>
           )}
         </main>

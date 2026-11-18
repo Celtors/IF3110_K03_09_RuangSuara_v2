@@ -41,4 +41,9 @@ export default defineConfig({
       '/admin-control-panel': { target: backend },
     },
   },
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.js',
+    include: ['src/**/*.test.{js,jsx}'],
+  },
 })

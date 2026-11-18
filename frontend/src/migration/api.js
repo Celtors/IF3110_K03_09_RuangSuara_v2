@@ -9,9 +9,10 @@ export async function session() {
   return value;
 }
 export class APIError extends Error {
-  constructor(message, code) {
+  constructor(message, code, details) {
     super(message);
     this.code = code;
+    this.details = details; // e.g. { execution_time_ms, postgres_code, position }
   }
 }
 export async function api(path, method = "GET", body) {
@@ -29,14 +30,34 @@ export async function api(path, method = "GET", body) {
     throw new APIError(
       data.error?.message ?? `Request failed (${response.status})`,
       data.error?.code ?? "request_failed",
+      data.data ?? undefined,
     );
   return data;
+}
+export const databaseBase = (id) => `/api/databases/${encodeURIComponent(id)}`;
+export async function apiWithSessionRetry(path, method, body) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api(path, method, body);
+    } catch (e) {
+      if (e.code !== "csrf_failed" || attempt >= 2) throw e;
+      await session();
+    }
+  }
 }
 export function href(page, database, id) {
   const q = new URLSearchParams({ database });
   if (id) q.set("id", id);
   return `/migrations/${page}.html?${q}`;
 }
+
+// URL of a workspace tab: index.html hosts the whole workspace; ?tab= selects it.
+export function workspaceHref(tab, database) {
+  const q = new URLSearchParams({ tab });
+  if (database) q.set("database", database);
+  return `/migrations/index.html?${q}`;
+}
+
 export function date(value) {
   return value ? new Date(value).toLocaleString() : "—";
 }

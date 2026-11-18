@@ -1,8 +1,9 @@
 package controlpanel
 
 import (
-	"net/http"
 	"backend/access_control/models"
+	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -24,6 +25,15 @@ type UpdateGroupPayload struct {
 type GroupCompact struct {
 	Id          uuid.UUID `json:"id"`
 	Name        string            `json:"name"`
+}
+
+type GroupViewPayload struct {
+	Id          uuid.UUID `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	LeaderName  string            `json:"leader_name"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func (payload CreateGroupPayload) GetDBStruct() (models.Group) {
@@ -75,18 +85,32 @@ func CreateGroupRequest(c *gin.Context, db *gorm.DB) {
 }
 
 func GetAllGroupsRequest(c *gin.Context, db *gorm.DB) {
-	var groups []models.Group
+    var groups []GroupViewPayload
 
-	if err := db.Find(&groups).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status":  "error",
-			"message": "Failed to get group data: " + err.Error(),
-		})
-		return
-	}
+    err := db.Table("groups_ AS g").
+        Select(`
+            g.id,
+            g.name,
+            g.description,
+            COALESCE(u.username, '') AS leader_name,
+            g.created_at,
+            g.updated_at
+        `).
+        Joins("LEFT JOIN group_leaders gl ON g.id = gl.group_id").
+        Joins("LEFT JOIN users u ON u.id = gl.leader_id").
+        Scan(&groups).Error
 
-	c.JSON(http.StatusOK, groups)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{
+            "status":  "error",
+            "message": "Failed to get group data: " + err.Error(),
+        })
+        return
+    }
+
+    c.JSON(http.StatusOK, groups)
 }
+
 
 
 func UpdateGroupRequest(c *gin.Context, db *gorm.DB) {

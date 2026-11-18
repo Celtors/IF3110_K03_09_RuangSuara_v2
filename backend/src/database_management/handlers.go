@@ -40,6 +40,7 @@ func RegisterRoutes(r gin.IRouter, platform *gorm.DB) {
 	admin.POST("/:id/test", h.testConnection)
 	admin.PUT("/:id/groups/:groupID/policy", h.setPolicy)
 	r.GET("/session-manager/me", h.requireSession, h.me)
+	r.GET("/api/accessible-databases", h.requireSession, h.accessibleDatabases)
 	viewer := r.Group("/api/databases/:id", h.requireSession, h.requireView)
 	viewer.GET("/schemas", h.schemas)
 	viewer.GET("/schemas/:schema/tables", h.tables)

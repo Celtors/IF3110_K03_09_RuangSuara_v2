@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS access_logs (
         ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS group_leaders(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    leader_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    group_id UUID NOT NULL UNIQUE REFERENCES groups_(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_user_groups_user ON user_groups(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_groups_group ON user_groups(group_id);
 CREATE INDEX IF NOT EXISTS idx_group_policies_database ON group_policies(database_id);
@@ -125,14 +132,16 @@ INSERT INTO user_groups (user_id, group_id) VALUES
 -- password_ciphertext is NOT a real encrypted credential: set a real host and password
 -- through PATCH /api/admin/databases/:id (which encrypts it) before using "test connection"
 -- or the database viewer on these rows.
-INSERT INTO databases (id, name, host, port, database_name, username, password_ciphertext) VALUES
-    ('33333333-3333-4333-8333-000000000001', 'orders_db',    'db.example.test', 5432, 'orders',    'reader', 'seed-placeholder'),
-    ('33333333-3333-4333-8333-000000000002', 'analytics_db', 'db.example.test', 5432, 'analytics', 'reader', 'seed-placeholder'),
-    ('33333333-3333-4333-8333-000000000003', 'users_db',     'db.example.test', 5432, 'users',     'reader', 'seed-placeholder');
+INSERT INTO databases (id, name, host, port, database_name, username, password_ciphertext, ssl_mode) VALUES
+    ('db79e270-f70a-421f-a390-46dc1039b580' , 'academic_db'  , 'localhost', 9001 , 'ruangsuara_academic'  , 'academic_user'  , 'mEmzOcoPnF8pZIGMXap6SSfOpq6MuVV/0LMWLAzkTRVYJrDH/kCfWzOATrMS', 'disable'), -- db: ruangsuara_academic, pw= academic_password
+    ('4f5cb1cc-890a-4c17-96e4-97e3562eae62' , 'sales_db'     , 'localhost', 9003 , 'ruangsuara_sales', 'sales_user', 'g1a5wScpmOSFOY2le/W66yRs1A+tTAI7T5AC2hTXYeiSVncfsjuOT5Lv', 'disable'),-- db: ruangsuara_sales, pw= sales_password
+    ('803d05dd-7f6f-4f1d-a710-79caa7fc2d11' , 'inventory_db' , 'localhost', 9002 , 'ruangsuara_inventory', 'inventory_user' , 'o43fb0+pj0oHsHM2k2OvRI9oih9WBZJ7Z+MeX+DwaDdFbBxtgAgsf9EbrxzXkg==', 'disable'),-- db: ruangsuara_inventory, pw= inventory_password
+    ('33333333-3333-4333-8333-000000000003', 'users_db',     'db.example.test', 5432, 'users', 'reader', 'seed-placeholder', 'verify-full');
 
 
 INSERT INTO group_policies (group_id, database_id, effect) VALUES
     ('22222222-2222-4222-8222-000000000001', '33333333-3333-4333-8333-000000000003', 'ViewEdit'), -- platform-admins -> users_db
-    ('22222222-2222-4222-8222-000000000002', '33333333-3333-4333-8333-000000000001', 'ViewEdit'), -- data-engineers  -> orders_db
-    ('22222222-2222-4222-8222-000000000003', '33333333-3333-4333-8333-000000000002', 'ViewOnly'), -- analysts        -> analytics_db
-    ('22222222-2222-4222-8222-000000000004', '33333333-3333-4333-8333-000000000001', 'ViewOnly'); -- auditors        -> orders_db
+    ('22222222-2222-4222-8222-000000000002', '4f5cb1cc-890a-4c17-96e4-97e3562eae62', 'ViewEdit'), -- data-engineers  -> orders_db
+    ('22222222-2222-4222-8222-000000000003', '803d05dd-7f6f-4f1d-a710-79caa7fc2d11', 'ViewOnly'), -- analysts        -> analytics_db
+    ('22222222-2222-4222-8222-000000000004', 'db79e270-f70a-421f-a390-46dc1039b580', 'ViewOnly'); -- auditors        -> orders_db
+

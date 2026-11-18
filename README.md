@@ -16,7 +16,7 @@ RuangSuara is a web application for managing database access, registering databa
 
 ### Database Management
 - Register, list, edit, remove, and test managed database connections.
-- Target engines: **PostgreSQL** (`postgres`) and **MariaDB** (`mariadb`).
+- Target engines: **PostgreSQL** (`postgres`).
 - Browse schemas, tables, columns, constraints, indexes, and table rows.
 - Encrypt stored target-database credentials using a configured 32-byte key.
 - Managed database IDs are UUIDs issued by the platform, not database names.
