@@ -17,20 +17,67 @@ services:
       - ./database_schema/access-control:/docker-entrypoint-initdb.d:ro
       - access_control_data:/var/lib/postgresql/data
 
-  target-postgres:
+  target-academic-db:
     image: postgres:16-alpine
-    container_name: target-postgres
+    container_name: ruangsuara-academic-db
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: target_user
-      POSTGRES_PASSWORD: target_password
-      POSTGRES_DB: target-test-db
+      POSTGRES_DB: ruangsuara_academic
+      POSTGRES_USER: academic_user
+      POSTGRES_PASSWORD: academic_password
     ports:
       - "9001:5432"
     volumes:
-      - ./database_schema/target-database:/docker-entrypoint-initdb.d:ro
-      - target_postgres_data:/var/lib/postgresql/data
+      - ./database_schema/target-databases/univ-db:/docker-entrypoint-initdb.d:ro
+      - academic_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U academic_user -d ruangsuara_academic"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  target-inventory-db:
+    image: postgres:16-alpine
+    container_name: ruangsuara-inventory-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ruangsuara_inventory
+      POSTGRES_USER: inventory_user
+      POSTGRES_PASSWORD: inventory_password
+    ports:
+      - "9002:5432"
+    volumes:
+      - ./database_schema/target-databases/inventory-db:/docker-entrypoint-initdb.d:ro
+      - inventory_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventory_user -d ruangsuara_inventory"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  target-sales-db:
+    image: postgres:16-alpine
+    container_name: ruangsuara-sales-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ruangsuara_sales
+      POSTGRES_USER: sales_user
+      POSTGRES_PASSWORD: sales_password
+    ports:
+      - "9003:5432"
+    volumes:
+      - ./database_schema/target-databases/sales-db:/docker-entrypoint-initdb.d:ro
+      - sales_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sales_user -d ruangsuara_sales"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 
 volumes:
   access_control_data   :
-  target_postgres_data  :
+  academic_data:
+  inventory_data:
+  sales_data:
