@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,7 +14,7 @@ import (
 type executionResult struct{ Status, Code, Message, FaultCode string }
 
 // Record the transaction ID so interrupted commits can be checked later.
-func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql string, recordXID func(string, string) error) executionResult {
+func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarget string, recordXID func(string, string) error) executionResult {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return executionResult{Status: "failed", Message: "Target connection unavailable before SQL execution", FaultCode: "database_unavailable"}
@@ -28,6 +29,9 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql string, record
 	if err != nil {
 		return executionResult{Status: "failed", Message: err.Error(), FaultCode: "database_unavailable"}
 	}
+	if expectedTarget != "" && identity != expectedTarget {
+		return executionResult{Status: "failed", Message: "The target differs from the original migration target", FaultCode: "conflict"}
+	}
 	var xid string
 	if err = tx.QueryRow(ctx, `SELECT pg_catalog.pg_current_xact_id()::text`).Scan(&xid); err != nil {
 		return executionResult{Status: "failed", Message: "Could not identify target transaction"}
@@ -40,16 +44,25 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql string, record
 	if err != nil {
 		return executionResult{Status: "failed", Code: postgresCode(err), Message: "PostgreSQL rejected the migration; transaction rolled back"}
 	}
-	err = tx.Commit(ctx)
+	return commitResult(tx.Commit(ctx))
+}
+
+func commitResult(err error) executionResult {
 	if err == nil {
 		return executionResult{Status: "succeeded"}
 	}
-	// A connection failure during COMMIT may leave the result uncertain.
-	var pgerr *pgconn.PgError
-	if errors.As(err, &pgerr) || errors.Is(err, pgx.ErrTxCommitRollback) {
-		return executionResult{Status: "failed", Code: postgresCode(err), Message: "PostgreSQL rejected COMMIT; transaction rolled back"}
+
+	if errors.Is(err, pgx.ErrTxCommitRollback) {
+		return executionResult{Status: "failed", Message: "PostgreSQL rejected COMMIT; transaction rolled back"}
 	}
-	return executionResult{Status: "unknown", Message: "COMMIT acknowledgement was lost; reconciliation is required"}
+
+	// A server error can also report an unknown outcome or a lost connection.
+	var pgerr *pgconn.PgError
+	if errors.As(err, &pgerr) && pgerr.SeverityUnlocalized != "FATAL" && pgerr.SeverityUnlocalized != "PANIC" &&
+		!strings.HasPrefix(pgerr.Code, "08") && pgerr.Code != "40003" {
+		return executionResult{Status: "failed", Code: pgerr.Code, Message: "PostgreSQL rejected COMMIT; transaction rolled back"}
+	}
+	return executionResult{Status: "unknown", Code: postgresCode(err), Message: "COMMIT outcome could not be confirmed; reconciliation is required"}
 }
 func postgresCode(err error) string {
 	var pgerr *pgconn.PgError
