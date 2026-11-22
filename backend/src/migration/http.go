@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 )
@@ -39,6 +40,19 @@ func RegisterRoutes(router gin.IRouter, s *Service) {
 		}
 		c.Set("migration_user", user)
 		c.Next()
+	})
+	g.GET("/migration-history", func(c *gin.Context) {
+		hideRollback := false
+		if value, present := c.GetQuery("hide_rollback"); present {
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				respond(c, nil, fault("invalid_input", "hide_rollback must be a boolean"))
+				return
+			}
+			hideRollback = parsed
+		}
+		history, err := s.ExecutionHistory(c.Request.Context(), c.GetString("migration_user"), c.Param("id"), hideRollback)
+		respond(c, gin.H{"attempts": history}, err)
 	})
 	g.GET("/migrations", func(c *gin.Context) {
 		ms, p, e := s.History(c.Request.Context(), c.GetString("migration_user"), c.Param("id"))
@@ -136,7 +150,7 @@ func respond(c *gin.Context, data any, err error) {
 	if !errors.As(err, &f) {
 		f = &Fault{"internal_error", "The migration operation could not be completed"}
 	}
-	statuses := map[string]int{"unauthenticated": 401, "forbidden": 403, "csrf_failed": 403, "not_found": 404, "invalid_input": 400, "invalid_sql": 422, "unsupported_sql": 422, "conflict": 409, "already_applied": 409, "indeterminate": 409, "execution_failed": 422, "database_unavailable": 503, "authorization_unavailable": 503, "query_failed": 422, "query_timeout": 504}
+	statuses := map[string]int{"unauthenticated": 401, "forbidden": 403, "csrf_failed": 403, "not_found": 404, "invalid_input": 400, "invalid_sql": 422, "unsupported_sql": 422, "conflict": 409, "already_applied": 409, "migration_order_conflict": 409, "indeterminate": 409, "execution_failed": 422, "database_unavailable": 503, "authorization_unavailable": 503, "query_failed": 422, "query_timeout": 504}
 	status, ok := statuses[f.Code]
 	if !ok {
 		status = 500
