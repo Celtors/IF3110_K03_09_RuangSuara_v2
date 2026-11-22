@@ -84,6 +84,51 @@ func (s *Service) History(ctx context.Context, user, db string) ([]Migration, Pe
 	ms, err := s.Repository.List(ctx, db)
 	return ms, p, err
 }
+
+func (s *Service) ExecutionHistory(ctx context.Context, user, db string, hideRollback bool) ([]ExecutionHistoryEntry, error) {
+	db = canonicalDatabaseID(db)
+	if err := s.authorize(ctx, user, db, View); err != nil {
+		return nil, err
+	}
+
+	history, err := s.Repository.ExecutionHistory(ctx, db)
+	if err != nil || !hideRollback {
+		return history, err
+	}
+	return hideRolledBackExecutions(history), nil
+}
+
+func hideRolledBackExecutions(history []ExecutionHistoryEntry) []ExecutionHistoryEntry {
+	successfulByID := make(map[string]string)
+	for _, entry := range history {
+		if entry.Status == "succeeded" && (entry.Operation == OperationApply || entry.Operation == OperationForward) {
+			successfulByID[entry.ExecutionID] = entry.MigrationID
+		}
+	}
+
+	hidden := make(map[string]struct{})
+	for _, entry := range history {
+		if entry.Operation != OperationRollback || entry.Status != "succeeded" || entry.ReversesExecutionID == nil {
+			continue
+		}
+		reversedID := *entry.ReversesExecutionID
+		migrationID, exists := successfulByID[reversedID]
+		if !exists || migrationID != entry.MigrationID {
+			continue
+		}
+		hidden[entry.ExecutionID] = struct{}{}
+		hidden[reversedID] = struct{}{}
+	}
+
+	visible := make([]ExecutionHistoryEntry, 0, len(history)-len(hidden))
+	for _, entry := range history {
+		if _, hide := hidden[entry.ExecutionID]; !hide {
+			visible = append(visible, entry)
+		}
+	}
+	return visible
+}
+
 func (s *Service) Details(ctx context.Context, user, db, id string) (Migration, error) {
 	db = canonicalDatabaseID(db)
 	if err := s.authorize(ctx, user, db, View); err != nil {
@@ -101,23 +146,79 @@ func (s *Service) Save(ctx context.Context, user, db, id string, d Draft) (Migra
 	if err := s.authorize(ctx, user, db, Edit); err != nil {
 		return Migration{}, err
 	}
+
 	d.Name = strings.TrimSpace(d.Name)
-	if len(d.Name) < 1 || len(d.Name) > 200 || len(d.Description) > 4000 || len(d.ReleaseLabel) > 100 {
-		return Migration{}, fault("invalid_input", "Name is required (maximum 200 bytes); description maximum 4000 and release label maximum 100")
-	}
-	if _, err := parseSQL(d.SQL, false); err != nil {
+	d.IrreversibleReason = strings.TrimSpace(d.IrreversibleReason)
+	if err := d.validate(false); err != nil {
 		return Migration{}, err
 	}
+
 	if _, err := s.connection(ctx, db); err != nil {
 		return Migration{}, err
 	}
 	return s.Repository.save(ctx, db, id, user, d)
 }
+
+// ValidateForReview checks the definition that Approval intends to submit.
+func (d Draft) ValidateForReview() error {
+	return d.validate(true)
+}
+
+func (d Draft) validate(forReview bool) error {
+	name := strings.TrimSpace(d.Name)
+	if name == "" {
+		return fault("invalid_input", "A migration name is required")
+	}
+	if len(name) > 200 || len(d.Description) > 4000 || len(d.ReleaseLabel) > 100 {
+		return fault("invalid_input", "The name, description, and release label can be at most 200, 4000, and 100 bytes respectively")
+	}
+	if _, err := parseSQL(d.SQLUp, false); err != nil {
+		return err
+	}
+
+	hasDown := strings.TrimSpace(d.SQLDown) != ""
+	hasReason := strings.TrimSpace(d.IrreversibleReason) != ""
+	if d.Irreversible && hasDown {
+		return fault("invalid_input", "An irreversible migration cannot include SQL down")
+	}
+	if !d.Irreversible && hasReason {
+		return fault("invalid_input", "Mark the migration irreversible to supply an irreversible reason")
+	}
+
+	if hasDown {
+		if _, err := parseSQL(d.SQLDown, false); err != nil {
+			var validation *Fault
+			if errors.As(err, &validation) {
+				return fault(validation.Code, "SQL down failed validation. "+validation.Message)
+			}
+			return err
+		}
+	}
+
+	if forReview {
+		if d.Irreversible && !hasReason {
+			return fault("invalid_input", "An irreversible migration needs a reason before review")
+		}
+		if !d.Irreversible && !hasDown {
+			return fault("invalid_input", "Supply SQL down or designate the migration irreversible before review")
+		}
+	}
+
+	return nil
+}
+
 func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, error) {
+	return s.ExecuteOperation(ctx, user, db, id, OperationApply)
+}
+
+// ExecuteOperation runs an operation with the caller's context, including from a worker.
+// Approval and job delivery checks belong to the caller's integration.
+func (s *Service) ExecuteOperation(ctx context.Context, user, db, id string, operation Operation) (Attempt, error) {
 	db = canonicalDatabaseID(db)
 	if err := s.authorize(ctx, user, db, Edit); err != nil {
 		return Attempt{}, err
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 	pool, err := s.connection(ctx, db)
@@ -129,6 +230,7 @@ func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, er
 		return Attempt{}, err
 	}
 	defer release()
+
 	// Resolve unfinished executions before assigning another migration version.
 	if err = s.reconcileLocked(ctx, platformConn, pool, db); err != nil {
 		return Attempt{}, err
@@ -137,20 +239,30 @@ func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, er
 	if err != nil {
 		return Attempt{}, err
 	}
-	if definition.State == "applied" {
-		return Attempt{}, fault("already_applied", "This migration has already been applied")
-	}
-	if definition.State != "draft" && definition.State != "failed" {
-		return Attempt{}, fault("conflict", "This migration has an unresolved execution")
-	}
-	if _, err = parseSQL(definition.SQL, false); err != nil {
+	sql, reversesExecutionID, err := prepareExecution(ctx, platformConn, definition, operation)
+	if err != nil {
 		return Attempt{}, err
 	}
-	attempt, err := beginAttempt(ctx, platformConn, definition, user, "")
+
+	var expectedTarget string
+	if operation != OperationApply {
+		err = platformConn.QueryRow(ctx, `
+ SELECT target_identity FROM dmp_migration.attempts
+ WHERE database_id=$1 AND migration_id=$2 AND status='succeeded'
+ ORDER BY version DESC LIMIT 1`, db, id).Scan(&expectedTarget)
+		if err != nil && !isNoRows(err) {
+			return Attempt{}, err
+		}
+		if expectedTarget == "" {
+			return Attempt{}, fault("conflict", "The original target for this migration cannot be verified")
+		}
+	}
+
+	attempt, err := beginAttempt(ctx, platformConn, definition, user, operation, sql, reversesExecutionID)
 	if err != nil {
 		return attempt, err
 	}
-	result := executePostgres(ctx, pool, definition.SQL, func(xid, identity string) error {
+	result := executePostgres(ctx, pool, attempt.SQL, expectedTarget, func(xid, identity string) error {
 		_, recordErr := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1`, attempt.ID, xid, identity)
 		if recordErr == nil {
 			attempt.XID = &xid
@@ -158,6 +270,7 @@ func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, er
 		}
 		return recordErr
 	})
+
 	clean, done := cleanupContext()
 	defer done()
 	if err = finishAttempt(clean, platformConn, &attempt, result.Status, result.Code, result.Message); err != nil {
@@ -195,7 +308,10 @@ func (s *Service) Reconcile(ctx context.Context, user, db string) error {
 }
 func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pgxpool.Pool, db string) error {
 	var a Attempt
-	err := c.QueryRow(ctx, `SELECT id,migration_id,database_id,target_xid,target_identity FROM dmp_migration.attempts WHERE database_id=$1 AND status IN ('running','unknown')`, db).Scan(&a.ID, &a.MigrationID, &a.DatabaseID, &a.XID, &a.TargetIdentity)
+	err := c.QueryRow(ctx, `
+ SELECT id,migration_id,database_id,operation,reverses_execution_id,target_xid,target_identity
+ FROM dmp_migration.attempts WHERE database_id=$1 AND status IN ('running','unknown')`, db).
+		Scan(&a.ID, &a.MigrationID, &a.DatabaseID, &a.Operation, &a.ReversesExecutionID, &a.XID, &a.TargetIdentity)
 	if isNoRows(err) {
 		return nil
 	}

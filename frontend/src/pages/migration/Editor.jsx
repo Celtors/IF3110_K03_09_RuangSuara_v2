@@ -33,10 +33,19 @@ export function Editor({ current, canEdit }) {
     setBusy(true);
     setError("");
     try {
+      // Preserve definition fields the M1 form does not edit.
+      const payload = saved
+        ? {
+            ...draft,
+            sql_down: saved.sql_down,
+            irreversible: saved.irreversible,
+            irreversible_reason: saved.irreversible_reason,
+          }
+        : draft;
       const m = await api(
         saved ? `${base}/migrations/${saved.id}` : `${base}/migrations`,
         saved ? "PATCH" : "POST",
-        draft,
+        payload,
       );
       setSaved(m);
       // Keep the editable form in sync with server normalization (e.g. a
