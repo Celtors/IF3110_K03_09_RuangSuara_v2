@@ -73,12 +73,20 @@ func adminDatabaseName() string {
 	return "users_db"
 }
 
+
+
 func (h *Handler) adminAccess(userID string) (view, edit bool) {
 	var ids []string
-	if err := h.platform.Table("databases").Where("name = ?", adminDatabaseName()).Pluck("id", &ids).Error; err != nil || len(ids) != 1 {
+	var group_ids []string
+
+	if err := h.platform.Table("groups_").Where("name = ?", "platform-admins").Pluck("id", &group_ids).Error; err != nil || len(group_ids) != 1 {
 		return false, false
 	}
-	return h.hasPermission(userID, ids[0], false), h.hasPermission(userID, ids[0], true)
+
+	if err := h.platform.Table("user_groups").Where("group_id = ? AND user_id = ?", group_ids[0], userID).Pluck("id", &ids).Error; err != nil || len(ids) != 1 {
+		return false, false
+	}
+	return true, true
 }
 
 func isReadOnlyMethod(method string) bool {
