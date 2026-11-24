@@ -1,0 +1,288 @@
+package migration
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+)
+
+// Review adds the approval workflow and the execution queue on top of Service.
+//
+//	Draft -> Pending Review -> Approved -> Pending (Queue) -> Running -> Success / Failed
+//
+// The queue lives in the platform database next to the migration storage, so state
+// changes, constraints and the per-database lock share one transactional boundary.
+type Review struct {
+	Service   *Service
+	Approvers Approvers
+	// ForbidSelfApproval stops a leader from deciding on a request they submitted.
+	// Off by default because a single-team database whose leader submits a change
+	// would otherwise never be approvable. Set MIGRATION_FORBID_SELF_APPROVAL=true to enable.
+	ForbidSelfApproval bool
+
+	wake     chan struct{}
+	inflight sync.Map // request id -> struct{}, requests this process is running
+}
+
+func NewReview(s *Service) *Review {
+	r := &Review{
+		Service:            s,
+		wake:               make(chan struct{}, 1),
+		ForbidSelfApproval: os.Getenv("MIGRATION_FORBID_SELF_APPROVAL") == "true",
+	}
+	if s != nil && s.Repository != nil && s.Repository.Pool != nil {
+		r.Approvers = PlatformApprovers{Pool: s.Repository.Pool}
+	}
+	return r
+}
+
+// notify wakes the worker without blocking.
+func (r *Review) notify() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Review) repo() *Repository { return r.Service.Repository }
+
+func validOperation(op Operation) bool {
+	return op == OperationApply || op == OperationRollback || op == OperationForward
+}
+
+func sqlHash(sql string) string {
+	sum := sha256.Sum256([]byte(sql))
+	return hex.EncodeToString(sum[:])
+}
+
+// rawSQL is the SQL an operation runs, without validating the migration.
+func rawSQL(m Migration, op Operation) string {
+	if op == OperationRollback {
+		return m.SQLDown
+	}
+	return m.SQLUp
+}
+
+// requestSQL checks that op can be requested for m in its current state and returns the
+// SQL it would run. Ordering rules (latest-first rollback, apply order) are enforced
+// again when the request runs, because other migrations can change before then.
+func requestSQL(m Migration, op Operation) (string, error) {
+	switch op {
+	case OperationApply:
+		if m.State == "applied" {
+			return "", fault("already_applied", "This migration has already been applied")
+		}
+		if m.State != "draft" && m.State != "failed" {
+			return "", fault("conflict", "Only draft or failed migrations can be applied")
+		}
+		if err := m.Draft.ValidateForReview(); err != nil {
+			return "", err
+		}
+	case OperationRollback:
+		if m.State != "applied" {
+			return "", fault("conflict", "Only an applied migration can be rolled back")
+		}
+		if m.Irreversible || strings.TrimSpace(m.SQLDown) == "" {
+			return "", fault("conflict", "This migration has no reversible SQL down")
+		}
+	case OperationForward:
+		if m.State != "rolled_back" {
+			return "", fault("conflict", "Only a successfully rolled-back migration can be forwarded")
+		}
+	default:
+		return "", fault("invalid_input", "Operation must be apply, rollback or forward")
+	}
+	sql := rawSQL(m, op)
+	if _, err := parseSQL(sql, false); err != nil {
+		return "", err
+	}
+	return sql, nil
+}
+
+// checkApprovers refuses a submission nobody could approve.
+func checkApprovers(approvers []RequiredApprover) error {
+	if len(approvers) == 0 {
+		return fault("conflict", "No group has access to this database, so nobody can approve a change to it")
+	}
+	for _, a := range approvers {
+		if a.LeaderID == "" {
+			return fault("conflict", fmt.Sprintf("Group %q has no leader assigned. Ask an administrator to assign one", a.GroupName))
+		}
+		if !a.LeaderActive {
+			return fault("conflict", fmt.Sprintf("The leader of group %q (%s) is inactive. Ask an administrator to assign a new leader", a.GroupName, a.LeaderUsername))
+		}
+	}
+	return nil
+}
+
+func faultInfo(err error) (code, message string) {
+	var f *Fault
+	if errors.As(err, &f) {
+		return f.Code, f.Message
+	}
+	return "internal_error", "The migration operation could not be completed"
+}
+
+// Submit creates a change request and asks the leader of every group with access to approve it.
+// It needs Edit permission, like running the migration directly did.
+func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) (ChangeRequest, error) {
+	db = canonicalDatabaseID(db)
+	if err := r.Service.authorize(ctx, user, db, Edit); err != nil {
+		return ChangeRequest{}, err
+	}
+	if !validOperation(in.Operation) {
+		return ChangeRequest{}, fault("invalid_input", "Operation must be apply, rollback or forward")
+	}
+	if id := strings.TrimSpace(in.MigrationID); id == "" || len(id) > 200 {
+		return ChangeRequest{}, fault("invalid_input", "A migration ID is required")
+	}
+	if r.Approvers == nil {
+		return ChangeRequest{}, fault("database_unavailable", "Approver lookup is unavailable")
+	}
+	if _, err := r.Service.connection(ctx, db); err != nil {
+		return ChangeRequest{}, err
+	}
+
+	m, err := r.repo().Get(ctx, db, strings.TrimSpace(in.MigrationID))
+	if err != nil {
+		return ChangeRequest{}, err
+	}
+	sql, err := requestSQL(m, in.Operation)
+	if err != nil {
+		return ChangeRequest{}, err
+	}
+	approvers, err := r.Approvers.RequiredApprovers(ctx, db)
+	if err != nil {
+		return ChangeRequest{}, err
+	}
+	if err = checkApprovers(approvers); err != nil {
+		return ChangeRequest{}, err
+	}
+
+	return r.repo().insertRequest(ctx, ChangeRequest{
+		ID: newID(), DatabaseID: db, MigrationID: m.ID, Operation: in.Operation,
+		SQLHash: sqlHash(sql), RequestedBy: user,
+	}, approvers)
+}
+
+// Decide records the caller's approval or rejection. The caller must be a required
+// leader of the request. When the last required leader approves, the request is queued.
+func (r *Review) Decide(ctx context.Context, user, db, id string, approve bool, comment string) (ChangeRequest, error) {
+	db = canonicalDatabaseID(db)
+	// A leader blocked from the database (for example through another group) cannot decide.
+	if err := r.Service.authorize(ctx, user, db, View); err != nil {
+		return ChangeRequest{}, err
+	}
+	comment = strings.TrimSpace(comment)
+	if len(comment) > 2000 {
+		return ChangeRequest{}, fault("invalid_input", "A comment can be at most 2000 bytes")
+	}
+	if !approve && comment == "" {
+		return ChangeRequest{}, fault("invalid_input", "A reason is required to reject a change request")
+	}
+
+	if approve {
+		// Never approve SQL that no longer matches what was submitted.
+		q, err := r.repo().GetRequest(ctx, db, id)
+		if err != nil {
+			return ChangeRequest{}, err
+		}
+		m, err := r.repo().Get(ctx, db, q.MigrationID)
+		if err != nil {
+			return ChangeRequest{}, err
+		}
+		if sqlHash(rawSQL(m, q.Operation)) != q.SQLHash {
+			return ChangeRequest{}, fault("conflict", "The migration SQL changed after this request was submitted. Cancel it and submit a new request")
+		}
+	}
+
+	queued, err := r.repo().decide(ctx, db, id, user, approve, comment, r.ForbidSelfApproval)
+	if err != nil {
+		return ChangeRequest{}, err
+	}
+	if queued {
+		r.notify()
+	}
+	return r.repo().GetRequest(ctx, db, id)
+}
+
+// Cancel withdraws a request before it starts running. Only its submitter can cancel it.
+func (r *Review) Cancel(ctx context.Context, user, db, id, reason string) (ChangeRequest, error) {
+	db = canonicalDatabaseID(db)
+	if err := r.Service.authorize(ctx, user, db, View); err != nil {
+		return ChangeRequest{}, err
+	}
+	reason = strings.TrimSpace(reason)
+	if len(reason) > 2000 {
+		return ChangeRequest{}, fault("invalid_input", "A comment can be at most 2000 bytes")
+	}
+	if err := r.repo().cancel(ctx, db, id, user, reason); err != nil {
+		return ChangeRequest{}, err
+	}
+	return r.repo().GetRequest(ctx, db, id)
+}
+
+// Get returns one request with approvals and audit events.
+func (r *Review) Get(ctx context.Context, user, db, id string) (ChangeRequest, error) {
+	db = canonicalDatabaseID(db)
+	if err := r.Service.authorize(ctx, user, db, View); err != nil {
+		return ChangeRequest{}, err
+	}
+	return r.repo().GetRequest(ctx, db, id)
+}
+
+// List returns a database's requests, newest first, optionally filtered.
+func (r *Review) List(ctx context.Context, user, db, migrationID, status string, limit int) ([]ChangeRequest, error) {
+	db = canonicalDatabaseID(db)
+	if err := r.Service.authorize(ctx, user, db, View); err != nil {
+		return nil, err
+	}
+	if status != "" && !allRequestStatuses[RequestStatus(status)] {
+		return nil, fault("invalid_input", "Unknown change request status")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	return r.repo().queryRequests(ctx, `WHERE r.database_id=$1 AND ($2::text='' OR r.migration_id=$2::text)
+ AND ($3::text='' OR r.status=$3::text) ORDER BY r.created_at DESC,r.seq DESC LIMIT $4`, db, migrationID, status, limit)
+}
+
+// PendingApprovals lists the requests, across all databases, that are waiting for this
+// user's decision and that they may still see.
+func (r *Review) PendingApprovals(ctx context.Context, user string) ([]ChangeRequest, error) {
+	if user == "" || r.Service.Access == nil {
+		return nil, fault("unauthenticated", "A validated session is required")
+	}
+	if r.Service.Repository == nil || r.Service.Repository.Pool == nil {
+		return nil, fault("database_unavailable", "Migration storage is unavailable")
+	}
+	all, err := r.repo().queryRequests(ctx, `WHERE r.status='pending_review' AND EXISTS (
+ SELECT 1 FROM dmp_migration.change_request_approvals a
+ WHERE a.request_id=r.id AND a.required_leader_id=$1 AND a.decision='pending')
+ ORDER BY r.created_at LIMIT 200`, user)
+	if err != nil {
+		return nil, err
+	}
+	allowed := map[string]bool{}
+	out := []ChangeRequest{}
+	for _, q := range all {
+		ok, seen := allowed[q.DatabaseID]
+		if !seen {
+			p, e := r.Service.Access.Permission(ctx, user, q.DatabaseID)
+			if e != nil {
+				return nil, fault("authorization_unavailable", "Database authorization is unavailable")
+			}
+			ok = p >= View && p <= Edit
+			allowed[q.DatabaseID] = ok
+		}
+		if ok {
+			out = append(out, q)
+		}
+	}
+	return out, nil
+}

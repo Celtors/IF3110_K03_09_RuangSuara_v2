@@ -15,10 +15,17 @@ import (
 //go:embed storage.sql
 var storageSQL string
 
+//go:embed review.sql
+var reviewSQL string
+
 type Repository struct{ Pool *pgxpool.Pool }
 
+// Initialize creates the migration tables, then the change request workflow tables that depend on them.
 func (r *Repository) Initialize(ctx context.Context) error {
-	_, err := r.Pool.Exec(ctx, storageSQL)
+	if _, err := r.Pool.Exec(ctx, storageSQL); err != nil {
+		return err
+	}
+	_, err := r.Pool.Exec(ctx, reviewSQL)
 	return err
 }
 func newID() string {
@@ -184,6 +191,17 @@ func (r *Repository) save(ctx context.Context, db, id, user string, d Draft) (Mi
 	}
 	if hasAttempt {
 		return m, fault("conflict", "A migration that has been attempted cannot be edited. Create a new migration to change its SQL")
+	}
+
+	// Approval covers an exact SQL hash, so the SQL is frozen while a change request is open.
+	var hasOpenRequest bool
+	err = c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests
+ WHERE migration_id=$1 AND status IN ('pending_review','approved','queued','running','unknown'))`, id).Scan(&hasOpenRequest)
+	if err != nil {
+		return m, err
+	}
+	if hasOpenRequest {
+		return m, fault("conflict", "This migration has an open change request. Cancel it before editing the migration")
 	}
 
 	row := c.QueryRow(ctx, `UPDATE dmp_migration.definitions

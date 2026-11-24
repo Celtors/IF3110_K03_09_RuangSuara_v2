@@ -214,6 +214,13 @@ func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, er
 // ExecuteOperation runs an operation with the caller's context, including from a worker.
 // Approval and job delivery checks belong to the caller's integration.
 func (s *Service) ExecuteOperation(ctx context.Context, user, db, id string, operation Operation) (Attempt, error) {
+	return s.executeOperation(ctx, user, db, id, operation, nil)
+}
+
+// executeOperation is ExecuteOperation with a hook. onBegin runs once the attempt has been
+// stored and before any SQL reaches the target, so the queue worker can link the attempt to
+// its change request even if the process dies mid-execution.
+func (s *Service) executeOperation(ctx context.Context, user, db, id string, operation Operation, onBegin func(Attempt)) (Attempt, error) {
 	db = canonicalDatabaseID(db)
 	if err := s.authorize(ctx, user, db, Edit); err != nil {
 		return Attempt{}, err
@@ -261,6 +268,9 @@ func (s *Service) ExecuteOperation(ctx context.Context, user, db, id string, ope
 	attempt, err := beginAttempt(ctx, platformConn, definition, user, operation, sql, reversesExecutionID)
 	if err != nil {
 		return attempt, err
+	}
+	if onBegin != nil {
+		onBegin(attempt)
 	}
 	result := executePostgres(ctx, pool, attempt.SQL, expectedTarget, func(xid, identity string) error {
 		_, recordErr := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1`, attempt.ID, xid, identity)

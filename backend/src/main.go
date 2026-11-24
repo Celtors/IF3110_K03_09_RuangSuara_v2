@@ -63,6 +63,17 @@ func run(ctx context.Context) error {
 	}
 	defer closePlatform()
 	migration.RegisterMigrationSession(router, service)
+
+	// Approval workflow: routes, then the queue worker. On shutdown the worker is stopped and
+	// drained first, before the deferred pool closures above run.
+	review := migration.NewReview(service)
+	migration.RegisterReviewRoutes(router, review)
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerDone := review.StartWorker(workerCtx, migration.DefaultWorkerConfig())
+	defer func() {
+		stopWorker()
+		<-workerDone
+	}()
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
 		addr = ":8080" // Preserve the shared backend's default listener.

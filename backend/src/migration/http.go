@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -81,6 +82,12 @@ func RegisterRoutes(router gin.IRouter, s *Service) {
 	g.POST("/migrations", save)
 	g.PATCH("/migrations/:migrationId", save)
 	g.POST("/migrations/:migrationId/execute", func(c *gin.Context) {
+		// Every execution needs approval from the leader of each group with access, so direct
+		// execution is closed. MIGRATION_ALLOW_DIRECT_EXECUTE=true restores it for local development only.
+		if os.Getenv("MIGRATION_ALLOW_DIRECT_EXECUTE") != "true" {
+			respond(c, nil, fault("approval_required", "Submit a change request; it runs after every required group leader approves"))
+			return
+		}
 		a, e := s.Execute(c.Request.Context(), c.GetString("migration_user"), c.Param("id"), c.Param("migrationId"))
 		respond(c, gin.H{"attempt": a}, e)
 	})
@@ -150,7 +157,7 @@ func respond(c *gin.Context, data any, err error) {
 	if !errors.As(err, &f) {
 		f = &Fault{"internal_error", "The migration operation could not be completed"}
 	}
-	statuses := map[string]int{"unauthenticated": 401, "forbidden": 403, "csrf_failed": 403, "not_found": 404, "invalid_input": 400, "invalid_sql": 422, "unsupported_sql": 422, "conflict": 409, "already_applied": 409, "migration_order_conflict": 409, "indeterminate": 409, "execution_failed": 422, "database_unavailable": 503, "authorization_unavailable": 503, "query_failed": 422, "query_timeout": 504}
+	statuses := map[string]int{"unauthenticated": 401, "forbidden": 403, "csrf_failed": 403, "not_found": 404, "invalid_input": 400, "invalid_sql": 422, "unsupported_sql": 422, "conflict": 409, "approval_required": 409, "already_applied": 409, "migration_order_conflict": 409, "indeterminate": 409, "execution_failed": 422, "database_unavailable": 503, "authorization_unavailable": 503, "query_failed": 422, "query_timeout": 504}
 	status, ok := statuses[f.Code]
 	if !ok {
 		status = 500
