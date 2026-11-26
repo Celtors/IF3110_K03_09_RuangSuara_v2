@@ -11,7 +11,7 @@ export default function AdminScreen({ active, me }) {
   const Page = PAGES[active]
   return (
     <AdminShell active={active} username={me.username} access={me.admin_access}>
-      <Page />
+      <Page canEdit={me.admin_access === 'ViewEdit'} />
     </AdminShell>
   )
 }

@@ -6,7 +6,8 @@ import { useToast } from '../components/toast-context'
 import { formatDate } from '../components/format'
 
 // mode "group": manage the users in a group. mode "user": manage the groups of a user.
-export default function MembershipDialog({ mode, entity, options, onClose }) {
+// leaderName (group mode): the username to mark as the group's leader in the member list.
+export default function MembershipDialog({ mode, entity, options, onClose, leaderName = '' }) {
   const toast = useToast()
   const isGroup = mode === 'group'
   const fetcher = useCallback(
@@ -20,7 +21,7 @@ export default function MembershipDialog({ mode, entity, options, onClose }) {
 
   const members = (data ?? []).map((m) =>
     isGroup
-      ? { id: m.user_id, label: m.username || m.user_id, sub: m.status, at: m.placed_at }
+      ? { id: m.user_id, label: m.username || m.user_id, sub: m.status, at: m.placed_at, leader: Boolean(leaderName) && m.username === leaderName }
       : { id: m.group_id, label: m.name || m.group_id, sub: m.description, at: m.placed_at },
   )
   const memberIds = new Set(members.map((m) => m.id))
@@ -81,6 +82,7 @@ export default function MembershipDialog({ mode, entity, options, onClose }) {
               <li key={m.id}>
                 <div>
                   <strong>{m.label}</strong>
+                  {m.leader && <span className="badge badge-ok">Leader</span>}{' '}
                   <span className="muted small">
                     {m.sub ? `${m.sub} · ` : ''}added {formatDate(m.at)}
                   </span>
