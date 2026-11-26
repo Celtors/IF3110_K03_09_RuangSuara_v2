@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { Badge, ErrorBox } from "../../migration/components.jsx";
 import { api, href, date, databaseBase } from "../../migration/api.js";
+import { useChangeRequestList } from "../../migration/useChangeRequests.js";
+import { ChangeRequestList } from "./ChangeRequestList.jsx";
 export function HistoryView({ history, reload, databaseId }) {
   const base = databaseBase(databaseId);
+  const requests = useChangeRequestList(databaseId);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   async function reconcile() {
@@ -122,6 +125,8 @@ export function HistoryView({ history, reload, databaseId }) {
           </div>
         )}
       </section>
+      {/* A request that reaches a final status changes the history above, so refresh it. */}
+      <ChangeRequestList list={requests} databaseId={databaseId} title="Change requests" onSettled={reload} />
     </>
   );
 }

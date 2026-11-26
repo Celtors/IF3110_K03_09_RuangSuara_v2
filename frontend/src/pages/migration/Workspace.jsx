@@ -4,6 +4,7 @@ import { HistoryView } from "./HistoryView.jsx";
 import { QueryPlan } from "./QueryPlan.jsx";
 import { SqlConsole } from "./SqlConsole.jsx";
 import { ErrorBox } from "../../migration/components.jsx";
+import { ApprovalInbox } from "./ApprovalInbox.jsx";
 
 // Read-only reminder; NOT a selector. Selection happens only in Overview.
 function DatabaseContext({ selected, onChangeRequest }) {
@@ -32,7 +33,7 @@ function NeedDatabase({ onChangeRequest }) {
 }
 
 export function Workspace({
-  databaseId, onDatabaseChange, tab, onTabChange, databases, selected, ready, error, history, reload,
+  databaseId, onDatabaseChange, tab, onTabChange, databases, selected, ready, error, history, reload, approvals,
 }) {
   const usable = Boolean(databaseId && selected); // a valid, accessible selection
   const toOverview = () => onTabChange("overview");
@@ -74,6 +75,10 @@ export function Workspace({
         )}
       </div>
 
+      <div {...panel("approvals")}>
+        <ApprovalInbox approvals={approvals} databases={databases.items} />
+      </div>
+
       <div {...panel("console")}>
         {usable ? (
           <>
@@ -97,4 +102,4 @@ export function Workspace({
       </div>
     </>
   );
-}
+}

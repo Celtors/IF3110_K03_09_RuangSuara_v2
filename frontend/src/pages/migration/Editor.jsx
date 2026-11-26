@@ -1,8 +1,11 @@
 import { useState } from "react";
-import { api, href, draftKey } from "../../migration/api.js";
+import { api, href, draftKey, requestHref } from "../../migration/api.js";
 import { database, base } from "../../migration/navigation.js";
-import { ErrorBox, SQL } from "../../migration/components.jsx";
-import Modal from "../../components/Modal.jsx";
+import { ErrorBox } from "../../migration/components.jsx";
+import { isOpen } from "../../migration/changeRequests.js";
+import { replaceUrl } from "../../migration/router.js";
+import { useChangeRequestList } from "../../migration/useChangeRequests.js";
+import { SubmitRequestDialog } from "./SubmitRequestDialog.jsx";
 export function Editor({ current, canEdit }) {
   const [draft, setDraft] = useState(() => ({
     name: current?.name ?? "",
@@ -16,8 +19,13 @@ export function Editor({ current, canEdit }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  // The SQL is frozen while a change request for it is open: approval covers exactly that SQL.
+  const requests = useChangeRequestList(saved ? database : "", saved?.id ?? "");
+  const openRequest = requests.items.find((r) => isOpen(r.status));
   const editable =
-    canEdit && (!saved || ["draft", "failed"].includes(saved.state));
+    canEdit &&
+    !openRequest &&
+    (!saved || ["draft", "failed"].includes(saved.state));
   const dirty =
     !saved ||
     ["name", "description", "release_label", "sql_script"].some(
@@ -57,29 +65,10 @@ export function Editor({ current, canEdit }) {
         sql_script: m.sql_script,
       });
       sessionStorage.removeItem(draftKey(database));
-      setMessage("Draft saved. Review the SQL before executing.");
-      window.history.replaceState(null, "", href("editor", database, m.id));
+      setMessage("Draft saved. Review the SQL, then submit it for approval.");
+      replaceUrl(href("editor", database, m.id));
     } catch (e) {
       setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function execute() {
-    if (!saved) return;
-    setBusy(true);
-    setError("");
-    try {
-      await api(`${base}/migrations/${saved.id}/execute`, "POST");
-      location.assign(href("details", database, saved.id));
-    } catch (e) {
-      setError(e.message);
-      setConfirm(false);
-      try {
-        setSaved(await api(`${base}/migrations/${saved.id}`));
-      } catch {
-        /* keep execution error visible */
-      }
     } finally {
       setBusy(false);
     }
@@ -92,7 +81,15 @@ export function Editor({ current, canEdit }) {
           {message}
         </div>
       )}
-      {!editable && (
+      {openRequest && (
+        <div className="alert notice">
+          This migration has an open change request, so it is locked until the request finishes or is cancelled.{" "}
+          <a className="cr-link" href={requestHref(database, openRequest.id)}>
+            View request →
+          </a>
+        </div>
+      )}
+      {!editable && !openRequest && (
         <div className="alert notice">
           {canEdit
             ? "This migration is locked because it has been applied or its outcome is unresolved."
@@ -160,8 +157,10 @@ export function Editor({ current, canEdit }) {
               placeholder="October release"
             />
             <div className="alert notice">
-              Execution applies this SQL to <strong>{database}</strong>. Failed
-              transactions roll back. Uncertain outcomes require reconciliation.
+              Submitting asks the leader of every group with access to{" "}
+              <strong>{database}</strong> to approve this SQL. Once approved it
+              runs from the queue. Failed transactions roll back. Uncertain
+              outcomes require reconciliation.
             </div>
             {editable && (
               <>
@@ -178,7 +177,7 @@ export function Editor({ current, canEdit }) {
                   disabled={busy || dirty || !saved}
                   onClick={() => setConfirm(true)}
                 >
-                  Review & execute
+                  Submit for approval
                 </button>
               </>
             )}
@@ -193,34 +192,13 @@ export function Editor({ current, canEdit }) {
           </section>
         </div>
       </form>
-      {confirm && (
-        <Modal
-          title={`Execute “${saved?.name}”?`}
+      {confirm && saved && (
+        <SubmitRequestDialog
+          databaseId={database}
+          migration={saved}
+          operation="apply"
           onClose={() => setConfirm(false)}
-          wide
-        >
-          <p>
-            This changes database <strong>{database}</strong>. Confirm the exact
-            saved script below.
-          </p>
-          <SQL value={saved?.sql_script ?? ""} />
-          <div className="actions">
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() => setConfirm(false)}
-            >
-              Cancel
-            </button>
-            <button
-              className="btn btn-primary"
-              disabled={busy}
-              onClick={execute}
-            >
-              {busy ? "Executing…" : "Execute migration"}
-            </button>
-          </div>
-        </Modal>
+        />
       )}
     </>
   );

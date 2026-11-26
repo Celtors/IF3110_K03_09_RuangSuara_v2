@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, href, draftKey } from "../../migration/api.js";
 import { database, base } from "../../migration/navigation.js";
 import { ErrorBox, SQL } from "../../migration/components.jsx";
+import { navigate } from "../../migration/router.js";
 export function SchemaDiff({ canEdit }) {
   const [text, setText] = useState('{\n  "name": "public",\n  "tables": []\n}');
   const [schemaName, setSchemaName] = useState("public");
@@ -42,7 +43,7 @@ export function SchemaDiff({ canEdit }) {
   function useSQL() {
     if (!result?.sql_script) return;
     sessionStorage.setItem(draftKey(database), result.sql_script);
-    location.assign(href("editor", database));
+    navigate(href("editor", database));
   }
   return (
     <>

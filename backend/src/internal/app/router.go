@@ -23,9 +23,9 @@ func RegisterMigration(router *gin.Engine, service *migration.Service, assets st
 		c.Next()
 	})
 	migration.RegisterRoutes(r, service)
-	pages := []string{"index.html", "history.html", "editor.html", "details.html", "schema-diff.html", "query-plan.html"}
+	pages := []string{"index.html", "history.html", "editor.html", "details.html", "schema-diff.html", "query-plan.html", "change-request.html"}
 	for _, page := range pages {
-		r.GET("/migrations/"+page, func(c *gin.Context) { c.File(filepath.Join(assets, "migrations", page)) })
+		r.GET("/migrations/"+page, func(c *gin.Context) { c.File(filepath.Join(assets, "migrations", "index.html")) })
 	}
 	// Serve the page directly to avoid an index.html redirect loop.
 	r.GET("/migrations/", func(c *gin.Context) { c.File(filepath.Join(assets, "migrations", "index.html")) })

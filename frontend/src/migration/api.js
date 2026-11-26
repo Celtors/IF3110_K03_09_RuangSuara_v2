@@ -1,13 +1,18 @@
 import { fetchMe } from "../auth/session.js";
 
 let token = "";
+let me = null;
 export async function session() {
   token = "";
   const value = await fetchMe();
   if (!value) throw new APIError("A validated session is required", "unauthenticated");
   token = value.csrf_token ?? "";
+  me = value;
   return value;
 }
+// Id of the signed-in user, known once session() has resolved. Used to show which
+// approvals and actions belong to them; the server still enforces every rule.
+export const viewerId = () => me?.id ?? "";
 export class APIError extends Error {
   constructor(message, code, details) {
     super(message);
@@ -51,6 +56,11 @@ export function href(page, database, id) {
   return `/migrations/${page}.html?${q}`;
 }
 
+// URL of a change request page. It uses ?request= because ?id= is a migration id.
+export function requestHref(database, request) {
+  return `/migrations/change-request.html?${new URLSearchParams({ database, request })}`;
+}
+
 // URL of a workspace tab: index.html hosts the whole workspace; ?tab= selects it.
 export function workspaceHref(tab, database) {
   const q = new URLSearchParams({ tab });
@@ -61,4 +71,4 @@ export function workspaceHref(tab, database) {
 export function date(value) {
   return value ? new Date(value).toLocaleString() : "—";
 }
-export const draftKey = (database) => `dmp-generated-sql:${database}`;
+export const draftKey = (database) => `dmp-generated-sql:${database}`;

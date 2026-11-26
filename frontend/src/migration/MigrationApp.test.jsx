@@ -17,6 +17,7 @@ vi.mock("./api.js", async (importOriginal) => ({
   apiWithSessionRetry: mocks.api,
 }));
 import { MigrationApp } from "./MigrationApp.jsx";
+import { navigate } from "./router.js";
 
 const DBS = [
   { id: "db-1", name: "Dev DB", permission: "ViewEdit" },
@@ -26,7 +27,7 @@ const migration = { id: "m1", name: "Add students", description: "", state: "app
 const queryResult = (value) => ({ columns: ["v"], column_types: ["text"], rows: [[value]], row_count: 1, has_result_set: true, truncated: false, execution_time_ms: 1 });
 
 function setup({ url = "?database=db-1", databases = DBS, listError } = {}) {
-  window.history.replaceState(null, "", `/migrations/index.html${url}`);
+  navigate(`/migrations/index.html${url}`, { replace: true });
   nav.database = new URLSearchParams(url).get("database") ?? "";
   mocks.session.mockResolvedValue({ csrf_token: "t" });
   mocks.api.mockImplementation(async (path, method = "GET") => {
@@ -34,6 +35,8 @@ function setup({ url = "?database=db-1", databases = DBS, listError } = {}) {
       if (listError) throw new Error(listError);
       return { databases };
     }
+    if (path === "/api/change-requests/pending-approval") return { change_requests: [] };
+    if (path.includes("/change-requests")) return { change_requests: [] };
     if (path.endsWith("/migrations")) return { migrations: [migration], can_edit: path.includes("db-1") };
     if (path.endsWith("/query")) return queryResult(`from ${path.split("/")[3]}`);
     if (path.endsWith("/query-plan")) return { plan: [], nodes: [{ depth: 0, node_type: `Plan ${path.split("/")[3]}`, total_cost: 1, estimated_rows: 1 }] };
@@ -183,4 +186,4 @@ describe("Migration tab (existing functionality)", () => {
     await screen.findByText("Add students");
     expect(screen.queryByRole("link", { name: "+ New migration" })).not.toBeInTheDocument();
   });
-});
+});
