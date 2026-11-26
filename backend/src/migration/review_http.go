@@ -24,6 +24,7 @@ import (
 // Authentication, CSRF and authorization fail closed, like the Migration routes.
 func RegisterReviewRoutes(router gin.IRouter, r *Review) {
 	s := r.Service
+	RegisterJobRoutes(router, r)
 
 	g := router.Group("/api/databases/:id/change-requests")
 	g.Use(reviewSecurityHeaders(), requireSession(s))
@@ -35,7 +36,7 @@ func RegisterReviewRoutes(router gin.IRouter, r *Review) {
 		}
 		q, err := r.Submit(c.Request.Context(), c.GetString("migration_user"), c.Param("id"), in)
 		if err == nil {
-			c.JSON(http.StatusCreated, gin.H{"change_request": q})
+			c.JSON(http.StatusCreated, gin.H{"change_request": q, "job_id": q.ID})
 			return
 		}
 		respond(c, nil, err)
