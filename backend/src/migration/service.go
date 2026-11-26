@@ -5,8 +5,11 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
+
+	"backend/internal/telemetry"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,7 +22,8 @@ type Service struct {
 }
 
 func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
-func (s *Service) authorize(ctx context.Context, user, db string, want Permission) error {
+func (s *Service) authorize(ctx context.Context, user, db string, want Permission) (resultErr error) {
+	defer func() { authorizationOutcome(ctx, want, resultErr) }()
 	if user == "" || s.Access == nil {
 		return fault("unauthenticated", "A validated session is required")
 	}
@@ -143,6 +147,7 @@ func (s *Service) Details(ctx context.Context, user, db, id string) (Migration, 
 }
 func (s *Service) Save(ctx context.Context, user, db, id string, d Draft) (Migration, error) {
 	db = canonicalDatabaseID(db)
+	ctx = migrationContext(ctx, user, db, id)
 	if err := s.authorize(ctx, user, db, Edit); err != nil {
 		return Migration{}, err
 	}
@@ -156,7 +161,16 @@ func (s *Service) Save(ctx context.Context, user, db, id string, d Draft) (Migra
 	if _, err := s.connection(ctx, db); err != nil {
 		return Migration{}, err
 	}
-	return s.Repository.save(ctx, db, id, user, d)
+	m, err := s.Repository.save(ctx, db, id, user, d)
+	if err == nil {
+		action := "updated"
+		if id == "" {
+			action = "created"
+		}
+		ctx = telemetry.With(ctx, telemetry.ID("migration_id", m.ID))
+		slog.InfoContext(ctx, "migration.definition_saved", "status", "succeeded", "action", action)
+	}
+	return m, err
 }
 
 // ValidateForReview checks the definition that Approval intends to submit.
@@ -220,8 +234,24 @@ func (s *Service) ExecuteOperation(ctx context.Context, user, db, id string, ope
 // executeOperation is ExecuteOperation with a hook. onBegin runs once the attempt has been
 // stored and before any SQL reaches the target, so the queue worker can link the attempt to
 // its change request even if the process dies mid-execution.
-func (s *Service) executeOperation(ctx context.Context, user, db, id string, operation Operation, onBegin func(Attempt)) (Attempt, error) {
+func (s *Service) executeOperation(ctx context.Context, user, db, id string, operation Operation, onBegin func(context.Context, Attempt)) (_ Attempt, resultErr error) {
 	db = canonicalDatabaseID(db)
+	ctx = migrationContext(ctx, user, db, id)
+	if validOperation(operation) {
+		ctx = telemetry.With(ctx, slog.String("operation", string(operation)))
+	}
+	defer func() {
+		if resultErr == nil {
+			slog.InfoContext(ctx, "migration.execution", "status", "succeeded")
+			return
+		}
+		code, _ := faultInfo(resultErr)
+		status := "failed"
+		if code == "indeterminate" {
+			status = "unknown"
+		}
+		slog.WarnContext(ctx, "migration.execution", "status", status, "reason", code)
+	}()
 	if err := s.authorize(ctx, user, db, Edit); err != nil {
 		return Attempt{}, err
 	}
@@ -269,8 +299,11 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 	if err != nil {
 		return attempt, err
 	}
+	ctx = attemptContext(ctx, attempt)
+	slog.InfoContext(ctx, "migration.attempt_started", "status", "running",
+		"retry", operation == OperationApply && definition.State == "failed")
 	if onBegin != nil {
-		onBegin(attempt)
+		onBegin(ctx, attempt)
 	}
 	result := executePostgres(ctx, pool, attempt.SQL, expectedTarget, func(xid, identity string) error {
 		_, recordErr := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1`, attempt.ID, xid, identity)
@@ -281,7 +314,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		return recordErr
 	})
 
-	clean, done := cleanupContext()
+	clean, done := cleanupContext(ctx)
 	defer done()
 	if err = finishAttempt(clean, platformConn, &attempt, result.Status, result.Code, result.Message); err != nil {
 		return attempt, fault("indeterminate", "Target outcome could not be recorded; execution is blocked until reconciliation")
@@ -302,6 +335,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 // Only one recovery operation can run per database at a time.
 func (s *Service) Reconcile(ctx context.Context, user, db string) error {
 	db = canonicalDatabaseID(db)
+	ctx = migrationContext(ctx, user, db, "")
 	if err := s.authorize(ctx, user, db, Edit); err != nil {
 		return err
 	}
@@ -316,18 +350,28 @@ func (s *Service) Reconcile(ctx context.Context, user, db string) error {
 	defer release()
 	return s.reconcileLocked(ctx, c, pool, db)
 }
-func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pgxpool.Pool, db string) error {
+func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pgxpool.Pool, db string) (resultErr error) {
 	var a Attempt
 	err := c.QueryRow(ctx, `
- SELECT id,migration_id,database_id,operation,reverses_execution_id,target_xid,target_identity
- FROM dmp_migration.attempts WHERE database_id=$1 AND status IN ('running','unknown')`, db).
-		Scan(&a.ID, &a.MigrationID, &a.DatabaseID, &a.Operation, &a.ReversesExecutionID, &a.XID, &a.TargetIdentity)
+ SELECT a.id,a.migration_id,a.database_id,a.operation,a.reverses_execution_id,a.target_xid,a.target_identity,d.version
+ FROM dmp_migration.attempts a JOIN dmp_migration.definitions d ON d.id=a.migration_id
+ WHERE a.database_id=$1 AND a.status IN ('running','unknown')`, db).
+		Scan(&a.ID, &a.MigrationID, &a.DatabaseID, &a.Operation, &a.ReversesExecutionID, &a.XID, &a.TargetIdentity, &a.migrationVersion)
 	if isNoRows(err) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	ctx = attemptContext(telemetry.With(ctx, telemetry.ID("migration_id", a.MigrationID),
+		slog.String("operation", string(a.Operation))), a)
+	slog.InfoContext(ctx, "migration.reconcile", "status", "started")
+	defer func() {
+		if resultErr != nil {
+			code, _ := faultInfo(resultErr)
+			slog.WarnContext(ctx, "migration.reconcile", "status", "unresolved", "reason", code)
+		}
+	}()
 	if a.TargetIdentity == "" {
 		return fault("indeterminate", "The execution has no recorded target identity; operator investigation is required")
 	}
@@ -354,9 +398,11 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
 			if *status == "committed" {
 				resolved = "succeeded"
 			}
+			slog.InfoContext(ctx, "transaction.reconciled", "status", *status, "database_scope", "target")
 			return finishAttempt(ctx, c, &a, resolved, "", "Outcome recovered from PostgreSQL transaction status")
 		}
 	}
+	slog.WarnContext(ctx, "transaction.reconciled", "status", "unknown", "database_scope", "target")
 	// Do not retry automatically because the previous execution may have succeeded.
 	if err = finishAttempt(ctx, c, &a, "unknown", "", "Target outcome remains unresolved; operator investigation required"); err != nil {
 		return err
