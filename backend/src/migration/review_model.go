@@ -60,6 +60,8 @@ type RequestEvent struct {
 // migration. It must be approved by the leader of every group with access to the
 // database before it is queued and executed.
 type ChangeRequest struct {
+	Batch                   *BatchSpec `json:"batch,omitempty"`
+	CompensationSQLHash     string     `json:"compensation_sql_hash,omitempty"`
 	submissionCorrelationID string
 	ID                      string        `json:"id"`
 	DatabaseID              string        `json:"database_id"`
@@ -87,8 +89,11 @@ type ChangeRequest struct {
 
 // SubmitRequest is the body of POST /api/databases/:id/change-requests.
 type SubmitRequest struct {
-	MigrationID string    `json:"migration_id"`
-	Operation   Operation `json:"operation"`
+	BatchAttribute string    `json:"batch_attribute,omitempty"`
+	BatchSize      int       `json:"batch_size,omitempty"`
+	Mode           string    `json:"mode,omitempty"`
+	MigrationID    string    `json:"migration_id"`
+	Operation      Operation `json:"operation"`
 }
 
 // DecisionBody is the optional body of approve/reject/cancel. Reject requires a comment.
@@ -108,6 +113,7 @@ type RequiredApprover struct {
 
 // QueuedRequest is the part of a request the worker needs to run it.
 type QueuedRequest struct {
+	startedAt               time.Time
 	submissionCorrelationID string
 	ID                      string
 	DatabaseID              string
