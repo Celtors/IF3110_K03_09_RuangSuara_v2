@@ -63,6 +63,11 @@ func (r *Repository) insertRequest(ctx context.Context, q ChangeRequest, approve
 		}
 		return q, err
 	}
+	if q.Batch != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO dmp_migration.batch_jobs(id,attribute,batch_size,down_hash) VALUES($1,$2,$3,$4)`, q.ID, q.Batch.Attribute, q.Batch.Size, q.CompensationSQLHash); err != nil {
+			return q, err
+		}
+	}
 	for _, a := range approvers {
 		_, err = tx.Exec(ctx, `INSERT INTO dmp_migration.change_request_approvals
  (id,request_id,group_id,group_name,required_leader_id,leader_username) VALUES ($1,$2,$3,$4,$5,$6)`,
@@ -115,6 +120,13 @@ func (r *Repository) queryRequests(ctx context.Context, where string, args ...an
 	}
 	for i := range out {
 		out[i].Approvals = byRequest[out[i].ID]
+		p, e := loadBatch(ctx, r.Pool, out[i].ID)
+		if e == nil {
+			out[i].Batch = &BatchSpec{p.Attribute, p.Size}
+			out[i].CompensationSQLHash = p.DownHash
+		} else if !isNoRows(e) {
+			return nil, e
+		}
 		if out[i].Approvals == nil {
 			out[i].Approvals = []Approval{}
 		}
@@ -364,7 +376,7 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 		return nil, nil
 	}
 
-	if _, err = tx.Exec(ctx, `UPDATE dmp_migration.change_requests SET status='running',started_at=now() WHERE id=$1`, q.ID); err != nil {
+	if err = tx.QueryRow(ctx, `UPDATE dmp_migration.change_requests SET status='running',started_at=now() WHERE id=$1 RETURNING started_at`, q.ID).Scan(&q.startedAt); err != nil {
 		if postgresCode(err) == "23505" { // another worker started this database first
 			return nil, nil
 		}
@@ -387,7 +399,7 @@ func (r *Repository) linkAttempt(ctx context.Context, requestID, attemptID strin
 }
 
 // finishRequest records the outcome of a running or unresolved request.
-func (r *Repository) finishRequest(ctx context.Context, id string, status RequestStatus, code, message, attemptID string) error {
+func (r *Repository) finishRequest(ctx context.Context, id string, status RequestStatus, code, message, attemptID string, claimTime ...time.Time) error {
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -398,10 +410,14 @@ func (r *Repository) finishRequest(ctx context.Context, id string, status Reques
 	if attemptID != "" {
 		attempt = &attemptID
 	}
+	var generation *time.Time
+	if len(claimTime) > 0 {
+		generation = &claimTime[0]
+	}
 	tag, err := tx.Exec(ctx, `UPDATE dmp_migration.change_requests
  SET status=$2,result_code=$3,result_message=$4,attempt_id=COALESCE(attempt_id,$5),
      completed_at=CASE WHEN $2='unknown' THEN NULL ELSE now() END
- WHERE id=$1 AND status IN ('running','unknown')`, id, status, code, message, attempt)
+ WHERE id=$1 AND status IN ('running','unknown') AND ($6::timestamptz IS NULL OR started_at=$6)`, id, status, code, message, attempt, generation)
 	if err != nil {
 		return err
 	}
@@ -448,7 +464,7 @@ type InFlightRequest struct {
 func (r *Repository) inFlight(ctx context.Context, orphanAfter time.Duration) ([]InFlightRequest, error) {
 	rows, err := r.Pool.Query(ctx, `SELECT id,database_id,migration_id,operation,requested_by,status,started_at,submission_correlation_id
  FROM dmp_migration.change_requests
- WHERE status='unknown' OR (status='running' AND started_at < now() - make_interval(secs => $1::float8))
+ WHERE (status='unknown' OR (status='running' AND started_at < now() - make_interval(secs => $1::float8))) AND NOT EXISTS(SELECT 1 FROM dmp_migration.batch_jobs b WHERE b.id=change_requests.id)
  ORDER BY started_at`, orphanAfter.Seconds())
 	if err != nil {
 		return nil, err
@@ -471,7 +487,7 @@ func (r *Repository) blockedQueues(ctx context.Context) ([]QueuedRequest, error)
 	rows, err := r.Pool.Query(ctx, `SELECT DISTINCT ON (r.database_id) r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,r.submission_correlation_id
  FROM dmp_migration.change_requests r
  WHERE r.status='queued'
-   AND EXISTS (SELECT 1 FROM dmp_migration.attempts t WHERE t.database_id=r.database_id AND t.status IN ('running','unknown'))
+   AND EXISTS (SELECT 1 FROM dmp_migration.attempts t WHERE t.database_id=r.database_id AND t.status IN ('running','unknown')) AND NOT EXISTS(SELECT 1 FROM dmp_migration.change_requests x JOIN dmp_migration.batch_jobs b ON b.id=x.id WHERE x.database_id=r.database_id AND x.status='running')
  ORDER BY r.database_id,r.queued_at,r.seq`)
 	if err != nil {
 		return nil, err
