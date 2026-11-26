@@ -1,18 +1,22 @@
 package sessionmanager
 
 import (
-	"time"
-	"backend/access_control/utility"
-	"backend/access_control/models"
-
+	"context"
+	"log/slog"
 	"net/http"
+	"time"
+
+	"backend/access_control/models"
+	"backend/access_control/utility"
+	"backend/internal/telemetry"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 type LoginPayload struct {
-	Username    string `json:"username" binding:"omitempty"`
+	Username string `json:"username" binding:"omitempty"`
 	Password string `json:"password" binding:"omitempty,gte=8"`
 }
 
@@ -28,14 +32,15 @@ func GenerateSession(user models.User, c *gin.Context) (models.SSOSession, strin
 		UserId:           user.ID,
 		SessionTokenHash: token_hash,
 		Status:           "Active",
-		IpAddress: c.ClientIP(),
-		UserAgent: c.Request.UserAgent(),
+		IpAddress:        c.ClientIP(),
+		UserAgent:        c.Request.UserAgent(),
 		CreatedAt:        time.Now(),
 		ExpiresAt:        time.Now().Add(session_absolute_exp_duration),
 	}, session_token, nil
 }
 
 func UnauthorizedLoginResponse(c *gin.Context, message string) {
+	slog.WarnContext(c.Request.Context(), "authentication.login", "status", "rejected")
 	newUUID, _ := uuid.NewRandom()
 	c.JSON(http.StatusUnauthorized, gin.H{
 		"error": gin.H{
@@ -58,6 +63,7 @@ func InternalServerResponse(c *gin.Context) {
 }
 
 func LoginRequest(c *gin.Context, db *gorm.DB) {
+	db = db.WithContext(context.WithoutCancel(c.Request.Context()))
 	var loginPayload LoginPayload
 
 	if err := c.ShouldBindJSON(&loginPayload); err != nil {
@@ -84,24 +90,29 @@ func LoginRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
+	ctx := telemetry.With(c.Request.Context(), telemetry.ID("actor_id", user.ID.String()))
+	c.Request = c.Request.WithContext(ctx)
+	db = db.WithContext(context.WithoutCancel(ctx))
 	session, session_token, err := GenerateSession(users[0], c)
 
 	if err != nil {
+		slog.ErrorContext(ctx, "authentication.login", "status", "failed")
 		InternalServerResponse(c)
 		return
 	}
 
 	result := db.Create(&session)
 	if err := result.Error; err != nil {
+		slog.ErrorContext(ctx, "authentication.login", "status", "failed")
 		InternalServerResponse(c)
 		return
 	}
 
 	db.Model(&models.SSOSession{}).
-	   Where("user_id = ? AND id != ? AND status = ?", users[0].ID, session.ID, "Active").
-	   Updates(models.SSOSession{Status: "Revoked", RevokedReason: "new_session_created"})
-	
-	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("ssid", session_token, int(session_absolute_exp_duration.Seconds()), "/", "localhost", true, true)   
-}
+		Where("user_id = ? AND id != ? AND status = ?", users[0].ID, session.ID, "Active").
+		Updates(models.SSOSession{Status: "Revoked", RevokedReason: "new_session_created"})
 
+	slog.InfoContext(ctx, "authentication.login", "status", "succeeded")
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("ssid", session_token, int(session_absolute_exp_duration.Seconds()), "/", "localhost", true, true)
+}
