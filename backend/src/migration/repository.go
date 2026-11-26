@@ -6,7 +6,10 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"time"
+
+	"backend/internal/telemetry"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -131,6 +134,7 @@ func (r *Repository) ExecutionHistory(ctx context.Context, db string) ([]Executi
 func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func(), error) {
 	c, err := r.Pool.Acquire(ctx)
 	if err != nil {
+		slog.LogAttrs(ctx, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		return nil, nil, err
 	}
 	var ok bool
@@ -138,21 +142,25 @@ func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func()
 	if err != nil || !ok {
 		// If locking may have succeeded, close the connection to avoid leaving a lock.
 		if err != nil {
-			clean, cancel := cleanupContext()
+			clean, cancel := cleanupContext(ctx)
 			_ = c.Conn().Close(clean)
 			cancel()
 		}
 		c.Release()
 		if err != nil {
+			slog.LogAttrs(ctx, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 			return nil, nil, err
 		}
+		slog.WarnContext(ctx, "migration.lock", "status", "busy")
 		return nil, nil, fault("conflict", "Another migration operation is in progress")
 	}
+	slog.InfoContext(ctx, "migration.lock", "status", "acquired")
 	release := func() {
-		clean, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		clean, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		var unlocked bool
 		if e := c.QueryRow(clean, `SELECT pg_advisory_unlock(hashtextextended($1,781349))`, db).Scan(&unlocked); e != nil || !unlocked {
+			slog.LogAttrs(clean, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(e), slog.String("status", "release_failed"))...)
 			_ = c.Conn().Close(clean)
 		}
 		c.Release()
@@ -168,10 +176,12 @@ func (r *Repository) save(ctx context.Context, db, id, user string, d Draft) (Mi
 	defer release()
 
 	if id == "" {
+		id := newID()
+		ctx = telemetry.With(ctx, telemetry.ID("migration_id", id))
 		row := c.QueryRow(ctx, `INSERT INTO dmp_migration.definitions
  (id,database_id,name,description,sql_script,sql_down,irreversible,irreversible_reason,release_label,author_user_id)
  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING `+definitionColumns,
-			newID(), db, d.Name, d.Description, d.SQLUp, d.SQLDown, d.Irreversible, d.IrreversibleReason, d.ReleaseLabel, user)
+			id, db, d.Name, d.Description, d.SQLUp, d.SQLDown, d.Irreversible, d.IrreversibleReason, d.ReleaseLabel, user)
 		return scanMigration(row, false)
 	}
 
@@ -215,13 +225,14 @@ func beginAttempt(ctx context.Context, c *pgxpool.Conn, definition Migration, us
 	attempt := Attempt{
 		ID: newID(), MigrationID: definition.ID, DatabaseID: definition.DatabaseID,
 		Operation: operation, ReversesExecutionID: reversesExecutionID,
-		SQL: sql, Executor: user, Status: "running",
+		SQL: sql, Executor: user, Status: "running", migrationVersion: definition.Version,
 	}
+	ctx = attemptContext(ctx, attempt)
 	tx, err := c.Begin(ctx)
 	if err != nil {
 		return attempt, err
 	}
-	defer rollback(tx)
+	defer rollback(ctx, tx)
 
 	if definition.Version == nil {
 		if err := reserveMigrationVersion(ctx, tx, definition.DatabaseID, definition.ID); err != nil {
@@ -232,12 +243,14 @@ func beginAttempt(ctx context.Context, c *pgxpool.Conn, definition Migration, us
 	err = tx.QueryRow(ctx, `
  INSERT INTO dmp_migration.attempts
      (id,migration_id,database_id,operation,reverses_execution_id,sql_script_snapshot,executor_user_id,status)
- VALUES ($1,$2,$3,$4,$5,$6,$7,'running') RETURNING started_at`,
+ VALUES ($1,$2,$3,$4,$5,$6,$7,'running')
+ RETURNING started_at, (SELECT version FROM dmp_migration.definitions WHERE id=$2)`,
 		attempt.ID, attempt.MigrationID, attempt.DatabaseID, operation, reversesExecutionID, sql, user,
-	).Scan(&attempt.Started)
+	).Scan(&attempt.Started, &attempt.migrationVersion)
 	if err != nil {
 		return attempt, err
 	}
+	ctx = attemptContext(ctx, attempt)
 	return attempt, tx.Commit(ctx)
 }
 
@@ -256,7 +269,7 @@ func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, statu
 	if err != nil {
 		return err
 	}
-	defer rollback(tx)
+	defer rollback(ctx, tx)
 
 	var successOrder *int64
 	if status == "succeeded" {
@@ -312,10 +325,19 @@ func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, statu
 	attempt.Completed = completed
 	attempt.ErrorCode = code
 	attempt.Error = message
+	level := slog.LevelInfo
+	if status != "succeeded" {
+		level = slog.LevelWarn
+	}
+	attrs := []slog.Attr{slog.String("status", status)}
+	if code != "" {
+		attrs = append(attrs, slog.String("sqlstate", code))
+	}
+	slog.LogAttrs(ctx, level, "migration.attempt_finished", attrs...)
 	return nil
 }
-func rollback(tx pgx.Tx) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+func rollback(ctx context.Context, tx pgx.Tx) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
 	_ = tx.Rollback(ctx)
 }

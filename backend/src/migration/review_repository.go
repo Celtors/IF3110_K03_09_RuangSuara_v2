@@ -3,7 +3,10 @@ package migration
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
+
+	"backend/internal/telemetry"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -14,7 +17,7 @@ import (
 
 const requestSelect = `SELECT r.id,r.database_id,r.migration_id,d.name,r.operation,r.sql_hash,r.requested_by,r.status,
  r.attempt_id,r.reject_reason,r.result_code,r.result_message,r.created_at,r.updated_at,r.approved_at,r.queued_at,
- r.started_at,r.completed_at,
+ r.started_at,r.completed_at,r.submission_correlation_id,
  CASE WHEN r.status='queued' THEN (SELECT count(*)+1 FROM dmp_migration.change_requests q
    WHERE q.database_id=r.database_id AND q.status='queued' AND (q.queued_at,q.seq)<(r.queued_at,r.seq)) END
  FROM dmp_migration.change_requests r
@@ -24,7 +27,7 @@ func scanRequest(row pgx.Row) (ChangeRequest, error) {
 	var q ChangeRequest
 	err := row.Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.MigrationName, &q.Operation, &q.SQLHash, &q.RequestedBy, &q.Status,
 		&q.AttemptID, &q.RejectReason, &q.ResultCode, &q.ResultMessage, &q.CreatedAt, &q.UpdatedAt, &q.ApprovedAt, &q.QueuedAt,
-		&q.StartedAt, &q.CompletedAt, &q.QueuePosition)
+		&q.StartedAt, &q.CompletedAt, &q.submissionCorrelationID, &q.QueuePosition)
 	return q, err
 }
 
@@ -43,15 +46,17 @@ func addEvent(ctx context.Context, tx pgx.Tx, requestID, event, actor string, de
 
 // insertRequest stores the request, its required approvals and the "submitted" event atomically.
 func (r *Repository) insertRequest(ctx context.Context, q ChangeRequest, approvers []RequiredApprover) (ChangeRequest, error) {
+	ctx = telemetry.With(ctx, telemetry.ID("job_id", q.ID))
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
 		return q, err
 	}
-	defer rollback(tx)
+	defer rollback(ctx, tx)
 
 	_, err = tx.Exec(ctx, `INSERT INTO dmp_migration.change_requests
- (id,database_id,migration_id,operation,sql_hash,requested_by) VALUES ($1,$2,$3,$4,$5,$6)`,
-		q.ID, q.DatabaseID, q.MigrationID, q.Operation, q.SQLHash, q.RequestedBy)
+ (id,database_id,migration_id,operation,sql_hash,requested_by,submission_correlation_id)
+ VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		q.ID, q.DatabaseID, q.MigrationID, q.Operation, q.SQLHash, q.RequestedBy, q.submissionCorrelationID)
 	if err != nil {
 		if postgresCode(err) == "23505" {
 			return q, fault("conflict", "This migration already has an open change request for the same operation")
@@ -74,6 +79,7 @@ func (r *Repository) insertRequest(ctx context.Context, q ChangeRequest, approve
 	if err = tx.Commit(ctx); err != nil {
 		return q, err
 	}
+	slog.InfoContext(ctx, "approval.submitted", "status", "pending_review", "required_groups", len(approvers))
 	return r.GetRequest(ctx, q.DatabaseID, q.ID)
 }
 
@@ -177,11 +183,13 @@ func (r *Repository) decide(ctx context.Context, db, id, user string, approve bo
 	if err != nil {
 		return false, err
 	}
-	defer rollback(tx)
+	defer func() { rollback(ctx, tx) }()
 
-	var status, requester string
-	err = tx.QueryRow(ctx, `SELECT status,requested_by FROM dmp_migration.change_requests
- WHERE id=$1 AND database_id=$2 FOR UPDATE`, id, db).Scan(&status, &requester)
+	var status, requester, migrationID, correlationID string
+	var operation Operation
+	err = tx.QueryRow(ctx, `SELECT status,requested_by,migration_id,operation,submission_correlation_id
+ FROM dmp_migration.change_requests WHERE id=$1 AND database_id=$2 FOR UPDATE`, id, db).
+		Scan(&status, &requester, &migrationID, &operation, &correlationID)
 	if isNoRows(err) {
 		return false, fault("not_found", "Change request not found")
 	}
@@ -195,6 +203,8 @@ func (r *Repository) decide(ctx context.Context, db, id, user string, approve bo
 		return false, fault("forbidden", "You cannot decide on a change request you submitted")
 	}
 
+	ctx = telemetry.With(ctx, telemetry.ID("migration_id", migrationID), slog.String("operation", string(operation)),
+		telemetry.ID("submission_correlation_id", jobCorrelation(correlationID, id)))
 	decision := "approved"
 	if !approve {
 		decision = "rejected"
@@ -226,7 +236,11 @@ func (r *Repository) decide(ctx context.Context, db, id, user string, approve bo
 		if err = addEvent(ctx, tx, id, "rejected", user, map[string]any{"comment": comment, "groups": tag.RowsAffected()}); err != nil {
 			return false, err
 		}
-		return false, tx.Commit(ctx)
+		if err = tx.Commit(ctx); err != nil {
+			return false, err
+		}
+		slog.InfoContext(ctx, "approval.decided", "status", decision, "groups", tag.RowsAffected())
+		return false, nil
 	}
 
 	if err = addEvent(ctx, tx, id, "approved", user, map[string]any{"comment": comment, "groups": tag.RowsAffected()}); err != nil {
@@ -253,6 +267,10 @@ func (r *Repository) decide(ctx context.Context, db, id, user string, approve bo
 	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
+	slog.InfoContext(ctx, "approval.decided", "status", decision, "groups", tag.RowsAffected())
+	if queued {
+		slog.InfoContext(ctx, "queue.submitted", "status", "queued")
+	}
 	return queued, nil
 }
 
@@ -262,7 +280,7 @@ func (r *Repository) cancel(ctx context.Context, db, id, user, reason string) er
 	if err != nil {
 		return err
 	}
-	defer rollback(tx)
+	defer rollback(ctx, tx)
 
 	var status, requester string
 	err = tx.QueryRow(ctx, `SELECT status,requested_by FROM dmp_migration.change_requests
@@ -293,7 +311,7 @@ func (r *Repository) cancel(ctx context.Context, db, id, user, reason string) er
 
 // claimSQL picks the head of the queue of a database that has nothing running and no
 // unresolved attempt. Skipping locked rows lets several workers poll safely.
-const claimSQL = `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by
+const claimSQL = `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,r.submission_correlation_id
  FROM dmp_migration.change_requests r
  WHERE r.status='queued'
    AND r.id=(SELECT q.id FROM dmp_migration.change_requests q
@@ -314,10 +332,10 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 	if err != nil {
 		return nil, err
 	}
-	defer rollback(tx)
+	defer func() { rollback(ctx, tx) }()
 
 	var q QueuedRequest
-	err = tx.QueryRow(ctx, claimSQL).Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation, &q.SQLHash, &q.RequestedBy)
+	err = tx.QueryRow(ctx, claimSQL).Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation, &q.SQLHash, &q.RequestedBy, &q.submissionCorrelationID)
 	if isNoRows(err) {
 		return nil, nil
 	}
@@ -325,8 +343,10 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 		return nil, err
 	}
 
+	ctx = q.logContext(ctx)
 	ok, code, message, err := validate(ctx, q)
 	if err != nil {
+		slog.LogAttrs(ctx, slog.LevelWarn, "queue.claim", append(telemetry.ErrorAttrs(err), slog.String("status", "retry_pending"))...)
 		return nil, err
 	}
 	if !ok {
@@ -337,7 +357,11 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 		if err = addEvent(ctx, tx, q.ID, "cancelled", "", map[string]any{"code": code, "message": message}); err != nil {
 			return nil, err
 		}
-		return nil, tx.Commit(ctx)
+		if err = tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		slog.WarnContext(ctx, "queue.claim", "status", "cancelled", "reason", code)
+		return nil, nil
 	}
 
 	if _, err = tx.Exec(ctx, `UPDATE dmp_migration.change_requests SET status='running',started_at=now() WHERE id=$1`, q.ID); err != nil {
@@ -352,6 +376,7 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	slog.InfoContext(ctx, "queue.claim", "status", "running")
 	return &q, nil
 }
 
@@ -367,7 +392,7 @@ func (r *Repository) finishRequest(ctx context.Context, id string, status Reques
 	if err != nil {
 		return err
 	}
-	defer rollback(tx)
+	defer rollback(ctx, tx)
 
 	var attempt *string
 	if attemptID != "" {
@@ -386,7 +411,11 @@ func (r *Repository) finishRequest(ctx context.Context, id string, status Reques
 	if err = addEvent(ctx, tx, id, "finished", "", map[string]any{"status": status, "code": code, "message": message}); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	slog.InfoContext(ctx, "queue.completed", "status", status, "reason", code)
+	return nil
 }
 
 // attemptFor finds the execution attempt of a request that started at startedAt.
@@ -404,19 +433,20 @@ func (r *Repository) attemptFor(ctx context.Context, q InFlightRequest) (id, sta
 
 // InFlightRequest is a request the worker had started but not finished.
 type InFlightRequest struct {
-	ID          string
-	DatabaseID  string
-	MigrationID string
-	Operation   Operation
-	RequestedBy string
-	Status      RequestStatus
-	StartedAt   time.Time
+	submissionCorrelationID string
+	ID                      string
+	DatabaseID              string
+	MigrationID             string
+	Operation               Operation
+	RequestedBy             string
+	Status                  RequestStatus
+	StartedAt               time.Time
 }
 
 // inFlight lists requests that are unresolved or have been running for longer than any
 // live execution could (so their worker must have stopped).
 func (r *Repository) inFlight(ctx context.Context, orphanAfter time.Duration) ([]InFlightRequest, error) {
-	rows, err := r.Pool.Query(ctx, `SELECT id,database_id,migration_id,operation,requested_by,status,started_at
+	rows, err := r.Pool.Query(ctx, `SELECT id,database_id,migration_id,operation,requested_by,status,started_at,submission_correlation_id
  FROM dmp_migration.change_requests
  WHERE status='unknown' OR (status='running' AND started_at < now() - make_interval(secs => $1::float8))
  ORDER BY started_at`, orphanAfter.Seconds())
@@ -427,7 +457,7 @@ func (r *Repository) inFlight(ctx context.Context, orphanAfter time.Duration) ([
 	out := []InFlightRequest{}
 	for rows.Next() {
 		var q InFlightRequest
-		if err = rows.Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation, &q.RequestedBy, &q.Status, &q.StartedAt); err != nil {
+		if err = rows.Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation, &q.RequestedBy, &q.Status, &q.StartedAt, &q.submissionCorrelationID); err != nil {
 			return nil, err
 		}
 		out = append(out, q)
@@ -438,7 +468,7 @@ func (r *Repository) inFlight(ctx context.Context, orphanAfter time.Duration) ([
 // blockedQueues lists databases whose queue head waits on an unresolved attempt,
 // with the user to reconcile as.
 func (r *Repository) blockedQueues(ctx context.Context) ([]QueuedRequest, error) {
-	rows, err := r.Pool.Query(ctx, `SELECT DISTINCT ON (r.database_id) r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by
+	rows, err := r.Pool.Query(ctx, `SELECT DISTINCT ON (r.database_id) r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,r.submission_correlation_id
  FROM dmp_migration.change_requests r
  WHERE r.status='queued'
    AND EXISTS (SELECT 1 FROM dmp_migration.attempts t WHERE t.database_id=r.database_id AND t.status IN ('running','unknown'))
@@ -450,7 +480,7 @@ func (r *Repository) blockedQueues(ctx context.Context) ([]QueuedRequest, error)
 	out := []QueuedRequest{}
 	for rows.Next() {
 		var q QueuedRequest
-		if err = rows.Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation, &q.SQLHash, &q.RequestedBy); err != nil {
+		if err = rows.Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation, &q.SQLHash, &q.RequestedBy, &q.submissionCorrelationID); err != nil {
 			return nil, err
 		}
 		out = append(out, q)

@@ -1,10 +1,11 @@
 package migration
 
 import (
-	databasemanagement "backend/database_management"
 	"context"
 	"net/http"
 	"time"
+
+	databasemanagement "backend/database_management"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -76,6 +77,7 @@ const (
 )
 
 type Attempt struct {
+	migrationVersion    *int64
 	ID                  string     `json:"id"`
 	MigrationID         string     `json:"migration_id"`
 	DatabaseID          string     `json:"database_id"`

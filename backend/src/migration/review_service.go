@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
+
+	"backend/internal/telemetry"
 )
 
 // Review adds the approval workflow and the execution queue on top of Service.
@@ -132,6 +135,7 @@ func faultInfo(err error) (code, message string) {
 // It needs Edit permission, like running the migration directly did.
 func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) (ChangeRequest, error) {
 	db = canonicalDatabaseID(db)
+	ctx = migrationContext(ctx, user, db, "")
 	if err := r.Service.authorize(ctx, user, db, Edit); err != nil {
 		return ChangeRequest{}, err
 	}
@@ -152,6 +156,7 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 	if err != nil {
 		return ChangeRequest{}, err
 	}
+	ctx = telemetry.With(ctx, telemetry.ID("migration_id", m.ID), slog.String("operation", string(in.Operation)))
 	sql, err := requestSQL(m, in.Operation)
 	if err != nil {
 		return ChangeRequest{}, err
@@ -166,7 +171,7 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 
 	return r.repo().insertRequest(ctx, ChangeRequest{
 		ID: newID(), DatabaseID: db, MigrationID: m.ID, Operation: in.Operation,
-		SQLHash: sqlHash(sql), RequestedBy: user,
+		SQLHash: sqlHash(sql), RequestedBy: user, submissionCorrelationID: telemetry.CorrelationID(ctx),
 	}, approvers)
 }
 
@@ -174,6 +179,8 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 // leader of the request. When the last required leader approves, the request is queued.
 func (r *Review) Decide(ctx context.Context, user, db, id string, approve bool, comment string) (ChangeRequest, error) {
 	db = canonicalDatabaseID(db)
+	ctx = migrationContext(ctx, user, db, "")
+	ctx = telemetry.With(ctx, telemetry.ID("job_id", id))
 	// A leader blocked from the database (for example through another group) cannot decide.
 	if err := r.Service.authorize(ctx, user, db, View); err != nil {
 		return ChangeRequest{}, err
@@ -214,6 +221,8 @@ func (r *Review) Decide(ctx context.Context, user, db, id string, approve bool, 
 // Cancel withdraws a request before it starts running. Only its submitter can cancel it.
 func (r *Review) Cancel(ctx context.Context, user, db, id, reason string) (ChangeRequest, error) {
 	db = canonicalDatabaseID(db)
+	ctx = migrationContext(ctx, user, db, "")
+	ctx = telemetry.With(ctx, telemetry.ID("job_id", id))
 	if err := r.Service.authorize(ctx, user, db, View); err != nil {
 		return ChangeRequest{}, err
 	}
@@ -224,6 +233,7 @@ func (r *Review) Cancel(ctx context.Context, user, db, id, reason string) (Chang
 	if err := r.repo().cancel(ctx, db, id, user, reason); err != nil {
 		return ChangeRequest{}, err
 	}
+	slog.InfoContext(ctx, "approval.cancelled", "status", "cancelled")
 	return r.repo().GetRequest(ctx, db, id)
 }
 

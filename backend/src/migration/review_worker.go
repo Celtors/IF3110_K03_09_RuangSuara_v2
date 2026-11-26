@@ -2,9 +2,11 @@ package migration
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
+
+	"backend/internal/telemetry"
 )
 
 // WorkerConfig tunes the queue worker.
@@ -30,7 +32,7 @@ func DefaultWorkerConfig() WorkerConfig {
 func (r *Review) StartWorker(ctx context.Context, cfg WorkerConfig) <-chan struct{} {
 	done := make(chan struct{})
 	if r.Service == nil || r.Service.Repository == nil || r.Service.Repository.Pool == nil {
-		log.Print("Migration worker disabled: platform storage is unavailable")
+		slog.WarnContext(ctx, "queue.worker", "status", "disabled", "reason", "platform_unavailable")
 		close(done)
 		return done
 	}
@@ -49,7 +51,9 @@ func (r *Review) StartWorker(ctx context.Context, cfg WorkerConfig) <-chan struc
 	}
 	go func() {
 		defer close(done)
+		slog.InfoContext(ctx, "queue.worker", "status", "started")
 		r.runWorker(ctx, cfg)
+		slog.InfoContext(ctx, "queue.worker", "status", "stopped")
 	}()
 	return done
 }
@@ -89,7 +93,7 @@ func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.Wai
 		if err != nil {
 			<-sem
 			if ctx.Err() == nil {
-				log.Printf("migration worker: claiming a request failed: %v", err)
+				slog.LogAttrs(ctx, slog.LevelWarn, "queue.poll", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 			}
 			return
 		}
@@ -119,12 +123,15 @@ func (r *Review) revalidate(ctx context.Context, q QueuedRequest) (bool, string,
 
 	permission, err := s.Access.Permission(ctx, q.RequestedBy, q.DatabaseID)
 	if err != nil {
+		authorizationOutcome(ctx, Edit, err)
 		return false, "", "", err
 	}
 	if permission != Edit {
+		slog.WarnContext(ctx, "authorization.database", "status", "denied", "required_permission", "edit")
 		return false, "requester_lost_access", "The person who submitted this request no longer has edit access to the database", nil
 	}
 
+	authorizationOutcome(ctx, Edit, nil)
 	m, err := r.repo().Get(ctx, q.DatabaseID, q.MigrationID)
 	if err != nil {
 		if code, _ := faultInfo(err); code == "not_found" {
@@ -167,40 +174,43 @@ func (r *Review) revalidate(ctx context.Context, q QueuedRequest) (bool, string,
 
 // process executes one claimed request and records its outcome.
 func (r *Review) process(ctx context.Context, q QueuedRequest) {
+	ctx = q.logContext(ctx)
+	slog.InfoContext(ctx, "queue.execution_started", "status", "running")
 	r.inflight.Store(q.ID, struct{}{})
 	defer r.inflight.Delete(q.ID)
 
 	var attemptID string
-	began := false
-	_, err := r.Service.executeOperation(ctx, q.RequestedBy, q.DatabaseID, q.MigrationID, q.Operation, func(a Attempt) {
-		began = true
+	attempt, err := r.Service.executeOperation(ctx, q.RequestedBy, q.DatabaseID, q.MigrationID, q.Operation, func(attemptCtx context.Context, a Attempt) {
 		attemptID = a.ID
-		clean, cancel := cleanupContext()
+		clean, cancel := cleanupContext(attemptCtx)
 		defer cancel()
 		if e := r.repo().linkAttempt(clean, q.ID, a.ID); e != nil {
-			log.Printf("migration worker: could not link attempt to request %s: %v", q.ID, e)
+			slog.LogAttrs(clean, slog.LevelWarn, "queue.link_attempt", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
 		}
 	})
 
+	if attemptID != "" {
+		ctx = attemptContext(ctx, attempt)
+	}
 	status, code, message := RequestSucceeded, "", ""
 	if err != nil {
 		code, message = faultInfo(err)
 		status = RequestFailed
 		// The attempt exists but its outcome could not be confirmed: keep the request
 		// unresolved until recovery learns what the target did.
-		if began && code == "indeterminate" {
+		if attemptID != "" && code == "indeterminate" {
 			status = RequestUnknown
 		}
 		if code == "internal_error" {
-			log.Printf("migration worker: request %s failed unexpectedly: %v", q.ID, err)
+			slog.LogAttrs(ctx, slog.LevelError, "queue.execution", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		}
 	}
 
-	clean, cancel := cleanupContext()
+	clean, cancel := cleanupContext(ctx)
 	defer cancel()
 	if err = r.repo().finishRequest(clean, q.ID, status, code, message, attemptID); err != nil {
 		// The request stays running; recoverInterrupted settles it from the attempt record.
-		log.Printf("migration worker: could not record outcome of request %s: %v", q.ID, err)
+		slog.LogAttrs(ctx, slog.LevelError, "queue.record_outcome", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 	}
 }
 
@@ -210,7 +220,7 @@ func (r *Review) recoverInterrupted(ctx context.Context, cfg WorkerConfig) {
 	stuck, err := r.repo().inFlight(ctx, cfg.OrphanAfter)
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Printf("migration worker: listing interrupted requests failed: %v", err)
+			slog.LogAttrs(ctx, slog.LevelWarn, "queue.recovery_scan", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		}
 		return
 	}
@@ -224,40 +234,46 @@ func (r *Review) recoverInterrupted(ctx context.Context, cfg WorkerConfig) {
 	blocked, err := r.repo().blockedQueues(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Printf("migration worker: listing blocked queues failed: %v", err)
+			slog.LogAttrs(ctx, slog.LevelWarn, "queue.blocked_scan", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		}
 		return
 	}
 	for _, q := range blocked {
-		if e := r.Service.Reconcile(ctx, q.RequestedBy, q.DatabaseID); e != nil {
+		blockedCtx := telemetry.With(migrationContext(ctx, q.RequestedBy, q.DatabaseID, ""),
+			telemetry.ID("blocked_job_id", q.ID),
+			telemetry.ID("correlation_id", jobCorrelation(q.submissionCorrelationID, q.ID)))
+		if e := r.Service.Reconcile(blockedCtx, q.RequestedBy, q.DatabaseID); e != nil {
 			if code, _ := faultInfo(e); code != "indeterminate" && code != "conflict" {
-				log.Printf("migration worker: reconcile of database %s failed: %v", q.DatabaseID, e)
+				slog.LogAttrs(blockedCtx, slog.LevelWarn, "queue.blocked_reconcile", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
 			}
 		}
 	}
 }
 
 func (r *Review) recoverOne(ctx context.Context, q InFlightRequest) {
+	ctx = q.logContext(ctx)
+	slog.InfoContext(ctx, "queue.recovery", "status", "started")
 	attemptID, status, code, message, err := r.repo().attemptFor(ctx, q)
 	if err != nil {
-		log.Printf("migration worker: looking up attempt of request %s failed: %v", q.ID, err)
+		slog.LogAttrs(ctx, slog.LevelWarn, "queue.find_attempt", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		return
 	}
 	if status == "running" || status == "unknown" {
 		// Ask the target database what happened to the interrupted transaction.
 		if e := r.Service.Reconcile(ctx, q.RequestedBy, q.DatabaseID); e != nil {
 			if c, _ := faultInfo(e); c != "indeterminate" && c != "conflict" {
-				log.Printf("migration worker: reconcile for request %s failed: %v", q.ID, e)
+				slog.LogAttrs(ctx, slog.LevelWarn, "queue.reconcile", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
 			}
 		}
 		attemptID, status, code, message, err = r.repo().attemptFor(ctx, q)
 		if err != nil {
-			log.Printf("migration worker: looking up attempt of request %s failed: %v", q.ID, err)
+			slog.LogAttrs(ctx, slog.LevelWarn, "queue.find_attempt", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 			return
 		}
 	}
 
-	clean, cancel := cleanupContext()
+	ctx = telemetry.With(ctx, telemetry.ID("execution_id", attemptID), telemetry.ID("attempt_id", attemptID))
+	clean, cancel := cleanupContext(ctx)
 	defer cancel()
 	var finalStatus RequestStatus
 	switch status {
@@ -281,6 +297,6 @@ func (r *Review) recoverOne(ctx context.Context, q InFlightRequest) {
 		finalStatus, code, message = RequestUnknown, "indeterminate", "The outcome on the target database is unresolved; an operator must reconcile it"
 	}
 	if err = r.repo().finishRequest(clean, q.ID, finalStatus, code, message, attemptID); err != nil {
-		log.Printf("migration worker: could not settle request %s: %v", q.ID, err)
+		slog.LogAttrs(ctx, slog.LevelError, "queue.recovery", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"backend/internal/telemetry"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,7 +21,7 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarge
 	if err != nil {
 		return executionResult{Status: "failed", Message: "Target connection unavailable before SQL execution", FaultCode: "database_unavailable"}
 	}
-	defer rollback(tx)
+	defer rollback(ctx, tx)
 	if _, err = tx.Exec(ctx, `SET LOCAL statement_timeout = '30s'; SET LOCAL lock_timeout = '5s'; SET LOCAL idle_in_transaction_session_timeout = '40s'`); err != nil {
 		return executionResult{Status: "failed", Message: "Could not configure target transaction"}
 	}
@@ -39,8 +41,21 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarge
 	if err = recordXID(xid, identity); err != nil {
 		return executionResult{Status: "failed", Message: "Could not persist transaction identity; SQL was not submitted"}
 	}
-	// Run the entire SQL script and check for errors.
-	err = tx.Conn().PgConn().Exec(ctx, sql).Close()
+	// Drain each result without materializing returned rows. Command tags belong
+	// to statement execution and say nothing about the later commit.
+	activity := telemetry.StartSQL(ctx, "target", sql, 0)
+	results := tx.Conn().PgConn().Exec(ctx, sql)
+	var total int64
+	var rows *int64
+	for results.NextResult() {
+		tag, _ := results.ResultReader().Close()
+		if count := telemetry.RowCount(tag); count != nil {
+			total += *count
+			rows = &total
+		}
+	}
+	err = results.Close()
+	activity.Finish(ctx, rows, err)
 	if err != nil {
 		return executionResult{Status: "failed", Code: postgresCode(err), Message: "PostgreSQL rejected the migration; transaction rolled back"}
 	}
@@ -72,6 +87,6 @@ func postgresCode(err error) string {
 	return ""
 }
 
-func cleanupContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 5*time.Second)
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }
