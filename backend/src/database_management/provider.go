@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"strconv"
@@ -11,9 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"backend/internal/telemetry"
+
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type Provider struct {
@@ -70,7 +75,9 @@ func (p *Provider) Target(ctx context.Context, id string) (*gorm.DB, error) {
 	}
 	var db *gorm.DB
 
-	db, err = gorm.Open(postgres.Open(postgresDSN(d, password)), &gorm.Config{DisableAutomaticPing: true})
+	db, err = gorm.Open(postgres.New(postgres.Config{
+		DSN: postgresDSN(d, password), OptionOpenDB: []stdlib.OptionOpenDB{telemetry.TraceStdlib("target")},
+	}), &gorm.Config{DisableAutomaticPing: true, Logger: logger.Discard})
 	if err != nil {
 		return nil, errors.New("target database connection failed")
 	}
@@ -85,9 +92,11 @@ func (p *Provider) Target(ctx context.Context, id string) (*gorm.DB, error) {
 	pingCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	if err := sqlDB.PingContext(pingCtx); err != nil {
+		slog.LogAttrs(ctx, slog.LevelWarn, "database.ping", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		_ = sqlDB.Close()
 		return nil, errors.New("target database connection failed or timed out")
 	}
+	slog.InfoContext(ctx, "database.ping", "status", "succeeded")
 	return db, nil
 }
 
@@ -120,6 +129,7 @@ func (p *Provider) PostgreSQL(ctx context.Context, id string) (*pgxpool.Pool, er
 	config.MaxConnLifetime = 2 * time.Minute
 	config.MaxConnIdleTime = 30 * time.Second
 	config.ConnConfig.ConnectTimeout = p.timeout
+	config.ConnConfig.Tracer = telemetry.PostgresTracer{Scope: "target"}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, errors.New("target database connection failed")
@@ -127,9 +137,11 @@ func (p *Provider) PostgreSQL(ctx context.Context, id string) (*pgxpool.Pool, er
 	pingCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	if err = pool.Ping(pingCtx); err != nil {
+		slog.LogAttrs(ctx, slog.LevelWarn, "database.ping", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		pool.Close()
 		return nil, errors.New("target database connection failed or timed out")
 	}
+	slog.InfoContext(ctx, "database.ping", "status", "succeeded")
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
