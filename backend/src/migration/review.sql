@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_requests (
     CHECK (status NOT IN ('succeeded','failed','rejected','cancelled') OR completed_at IS NOT NULL)
 );
 
+-- Older requests use their job ID as the correlation ID when read by a worker.
+ALTER TABLE dmp_migration.change_requests
+ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '';
+
 -- A migration can have only one open request per operation.
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_request_per_operation
 ON dmp_migration.change_requests(migration_id, operation)
@@ -144,7 +148,8 @@ BEGIN
     OR NEW.migration_id IS DISTINCT FROM OLD.migration_id
     OR NEW.operation    IS DISTINCT FROM OLD.operation
     OR NEW.sql_hash     IS DISTINCT FROM OLD.sql_hash
-    OR NEW.requested_by IS DISTINCT FROM OLD.requested_by THEN
+    OR NEW.requested_by IS DISTINCT FROM OLD.requested_by
+    OR NEW.submission_correlation_id IS DISTINCT FROM OLD.submission_correlation_id THEN
         RAISE EXCEPTION 'change request % is immutable except for its status fields', OLD.id
             USING ERRCODE = 'check_violation';
     END IF;
