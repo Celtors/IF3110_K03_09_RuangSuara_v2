@@ -26,7 +26,19 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx); err != nil {
+	shutdownTracing, err := telemetry.InitTracing(os.Stdout)
+	if err != nil {
+		slog.LogAttrs(ctx, slog.LevelError, "tracing.initialize", telemetry.ErrorAttrs(err)...)
+		os.Exit(1)
+	}
+	err = run(ctx)
+	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	if flushErr := shutdownTracing(flushCtx); flushErr != nil {
+		slog.LogAttrs(ctx, slog.LevelWarn, "tracing.shutdown", telemetry.ErrorAttrs(flushErr)...)
+	}
+	cancel()
+	if err != nil {
+		// run returns fixed startup errors without database configuration or driver text.
 		slog.ErrorContext(ctx, "application.stopped", "status", "failed", "error", err.Error())
 		os.Exit(1)
 	}
@@ -100,11 +112,8 @@ func run(ctx context.Context) error {
 		defer close(shutdownDone)
 		select {
 		case <-ctx.Done():
-			clean, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := server.Shutdown(clean); err != nil {
-				_ = server.Close()
-			}
+			// Finish active handlers before closing their pools and flushing spans.
+			_ = server.Shutdown(context.WithoutCancel(ctx))
 		case <-serverDone:
 		}
 	}()

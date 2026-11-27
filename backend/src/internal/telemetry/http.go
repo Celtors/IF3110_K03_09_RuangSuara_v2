@@ -3,16 +3,39 @@ package telemetry
 import (
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func HTTP(c *gin.Context) {
 	start := time.Now()
 	id := uuid.NewString()
-	ctx := With(c.Request.Context(), slog.String("correlation_id", id), ID("database_id", c.Param("id")))
+	ctx := c.Request.Context()
+	// Tracestate is opaque and can carry arbitrary client data into span exports.
+	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier{"traceparent": c.Request.Header.Get("Traceparent")})
+	ctx = With(ctx, slog.String("correlation_id", id), ID("database_id", c.Param("id")))
+	method, route := httpMethod(c.Request.Method), c.FullPath()
+	spanName, spanMethod := method, method
+	if method == "OTHER" {
+		spanName, spanMethod = "HTTP", "_OTHER"
+	}
+	if route != "" {
+		spanName += " " + route
+	}
+	ctx, span := Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attribute.String("http.request.method", spanMethod)))
+	defer EndSpan(span)
+	if route != "" {
+		span.SetAttributes(attribute.String("http.route", route))
+	}
 	c.Request = c.Request.WithContext(ctx)
 	c.Header("X-Correlation-ID", id)
 
@@ -20,10 +43,18 @@ func HTTP(c *gin.Context) {
 		ctx := c.Request.Context()
 		panicked := recover() != nil
 		if panicked {
-			slog.ErrorContext(ctx, "http.panic", "status", "failed", "route", c.FullPath())
+			slog.ErrorContext(ctx, "http.panic", "status", "failed", "route", route)
 			c.AbortWithStatus(http.StatusInternalServerError)
 		}
 		status := c.Writer.Status()
+		span.SetAttributes(attribute.Int("http.response.status_code", status))
+		switch {
+		case panicked:
+			spanPanic(span)
+		case status >= 500:
+			span.SetAttributes(attribute.String("error.type", strconv.Itoa(status)))
+			span.SetStatus(codes.Error, "")
+		}
 		level, outcome := slog.LevelInfo, "succeeded"
 		switch {
 		case panicked || status >= 500:
@@ -32,7 +63,7 @@ func HTTP(c *gin.Context) {
 			level, outcome = slog.LevelWarn, "rejected"
 		}
 		slog.Log(ctx, level, "http.request", "status", outcome, "http_status", status,
-			"method", httpMethod(c.Request.Method), "route", c.FullPath(),
+			"method", method, "route", route,
 			"duration_ms", float64(time.Since(start).Microseconds())/1000)
 	}()
 	c.Next()

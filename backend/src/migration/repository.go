@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 //go:embed storage.sql
@@ -132,29 +133,37 @@ func (r *Repository) ExecutionHistory(ctx context.Context, db string) ([]Executi
 
 // Lock this database so migration edits and executions cannot overlap.
 func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func(), error) {
-	c, err := r.Pool.Acquire(ctx)
+	lockCtx, span := telemetry.Start(ctx, "migration.lock")
+	defer telemetry.EndSpan(span)
+	c, err := r.Pool.Acquire(lockCtx)
 	if err != nil {
-		slog.LogAttrs(ctx, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
+		span.SetAttributes(attribute.String("outcome", "failed"))
+		telemetry.SpanError(span, err)
+		slog.LogAttrs(lockCtx, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		return nil, nil, err
 	}
 	var ok bool
-	err = c.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtextextended($1,781349))`, db).Scan(&ok)
+	err = c.QueryRow(lockCtx, `SELECT pg_try_advisory_lock(hashtextextended($1,781349))`, db).Scan(&ok)
 	if err != nil || !ok {
 		// If locking may have succeeded, close the connection to avoid leaving a lock.
 		if err != nil {
-			clean, cancel := cleanupContext(ctx)
+			clean, cancel := cleanupContext(lockCtx)
 			_ = c.Conn().Close(clean)
 			cancel()
 		}
 		c.Release()
 		if err != nil {
-			slog.LogAttrs(ctx, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
+			span.SetAttributes(attribute.String("outcome", "failed"))
+			telemetry.SpanError(span, err)
+			slog.LogAttrs(lockCtx, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 			return nil, nil, err
 		}
-		slog.WarnContext(ctx, "migration.lock", "status", "busy")
+		span.SetAttributes(attribute.String("outcome", "busy"))
+		slog.WarnContext(lockCtx, "migration.lock", "status", "busy")
 		return nil, nil, fault("conflict", "Another migration operation is in progress")
 	}
-	slog.InfoContext(ctx, "migration.lock", "status", "acquired")
+	span.SetAttributes(attribute.String("outcome", "acquired"))
+	slog.InfoContext(lockCtx, "migration.lock", "status", "acquired")
 	release := func() {
 		clean, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
@@ -330,8 +339,8 @@ func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, statu
 		level = slog.LevelWarn
 	}
 	attrs := []slog.Attr{slog.String("status", status)}
-	if code != "" {
-		attrs = append(attrs, slog.String("sqlstate", code))
+	if state := telemetry.SQLStateAttr(code); state.Key != "" {
+		attrs = append(attrs, state)
 	}
 	slog.LogAttrs(ctx, level, "migration.attempt_finished", attrs...)
 	return nil

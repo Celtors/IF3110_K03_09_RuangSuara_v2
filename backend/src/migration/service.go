@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type Service struct {
@@ -240,8 +241,11 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 	if validOperation(operation) {
 		ctx = telemetry.With(ctx, slog.String("operation", string(operation)))
 	}
+	ctx, span := telemetry.Start(ctx, "migration.execute")
+	defer telemetry.EndSpan(span)
 	defer func() {
 		if resultErr == nil {
+			span.SetAttributes(attribute.String("outcome", "succeeded"))
 			slog.InfoContext(ctx, "migration.execution", "status", "succeeded")
 			return
 		}
@@ -250,6 +254,8 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		if code == "indeterminate" {
 			status = "unknown"
 		}
+		span.SetAttributes(attribute.String("outcome", status))
+		traceMigrationError(span, resultErr)
 		slog.WarnContext(ctx, "migration.execution", "status", status, "reason", code)
 	}()
 	if err := s.authorize(ctx, user, db, Edit); err != nil {
@@ -300,6 +306,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		return attempt, err
 	}
 	ctx = attemptContext(ctx, attempt)
+	span.SetAttributes(attribute.String("attempt_id", attempt.ID))
 	slog.InfoContext(ctx, "migration.attempt_started", "status", "running",
 		"retry", operation == OperationApply && definition.State == "failed")
 	if onBegin != nil {
@@ -351,6 +358,14 @@ func (s *Service) Reconcile(ctx context.Context, user, db string) error {
 	return s.reconcileLocked(ctx, c, pool, db)
 }
 func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pgxpool.Pool, db string) (resultErr error) {
+	ctx, span := telemetry.Start(ctx, "migration.reconcile")
+	defer telemetry.EndSpan(span)
+	outcome := "unresolved"
+	defer func() {
+		span.SetAttributes(attribute.String("outcome", outcome))
+		traceMigrationError(span, resultErr)
+	}()
+
 	var a Attempt
 	err := c.QueryRow(ctx, `
  SELECT a.id,a.migration_id,a.database_id,a.operation,a.reverses_execution_id,a.target_xid,a.target_identity,d.version
@@ -358,6 +373,7 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
  WHERE a.database_id=$1 AND a.status IN ('running','unknown')`, db).
 		Scan(&a.ID, &a.MigrationID, &a.DatabaseID, &a.Operation, &a.ReversesExecutionID, &a.XID, &a.TargetIdentity, &a.migrationVersion)
 	if isNoRows(err) {
+		outcome = "no_unresolved_attempt"
 		return nil
 	}
 	if err != nil {
@@ -365,6 +381,8 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
 	}
 	ctx = attemptContext(telemetry.With(ctx, telemetry.ID("migration_id", a.MigrationID),
 		slog.String("operation", string(a.Operation))), a)
+	span.SetAttributes(attribute.String("attempt_id", a.ID), attribute.String("migration_id", a.MigrationID),
+		attribute.String("operation", string(a.Operation)))
 	slog.InfoContext(ctx, "migration.reconcile", "status", "started")
 	defer func() {
 		if resultErr != nil {
@@ -399,10 +417,16 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
 				resolved = "succeeded"
 			}
 			slog.InfoContext(ctx, "transaction.reconciled", "status", *status, "database_scope", "target")
-			return finishAttempt(ctx, c, &a, resolved, "", "Outcome recovered from PostgreSQL transaction status")
+			span.SetAttributes(attribute.String("transaction.outcome", *status))
+			if err := finishAttempt(ctx, c, &a, resolved, "", "Outcome recovered from PostgreSQL transaction status"); err != nil {
+				return err
+			}
+			outcome = "resolved"
+			return nil
 		}
 	}
 	slog.WarnContext(ctx, "transaction.reconciled", "status", "unknown", "database_scope", "target")
+	span.SetAttributes(attribute.String("transaction.outcome", "unknown"))
 	// Do not retry automatically because the previous execution may have succeeded.
 	if err = finishAttempt(ctx, c, &a, "unknown", "", "Target outcome remains unresolved; operator investigation required"); err != nil {
 		return err

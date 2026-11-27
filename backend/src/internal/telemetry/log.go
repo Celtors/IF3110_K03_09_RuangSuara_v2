@@ -96,8 +96,8 @@ func ErrorAttrs(err error) []slog.Attr {
 	switch {
 	case errors.As(err, &postgres):
 		attrs := []slog.Attr{slog.String("error", "postgres_error")}
-		if validSQLState(postgres.Code) {
-			attrs = append(attrs, slog.String("sqlstate", postgres.Code))
+		if state := SQLStateAttr(postgres.Code); state.Key != "" {
+			attrs = append(attrs, state)
 		}
 		return attrs
 	case errors.Is(err, context.Canceled):
@@ -111,14 +111,14 @@ func ErrorAttrs(err error) []slog.Attr {
 	}
 }
 
-func validSQLState(value string) bool {
+func SQLStateAttr(value string) slog.Attr {
 	if len(value) != 5 {
-		return false
+		return slog.Attr{}
 	}
 	for _, c := range value {
 		if (c < '0' || c > '9') && (c < 'A' || c > 'Z') {
-			return false
+			return slog.Attr{}
 		}
 	}
-	return true
+	return slog.String("sqlstate", value)
 }

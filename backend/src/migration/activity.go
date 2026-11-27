@@ -5,6 +5,9 @@ import (
 	"log/slog"
 
 	"backend/internal/telemetry"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func migrationContext(ctx context.Context, user, database, migration string) context.Context {
@@ -52,4 +55,19 @@ func jobContext(ctx context.Context, id, correlation, user, database, migration 
 	return telemetry.With(migrationContext(ctx, user, database, migration),
 		telemetry.ID("correlation_id", jobCorrelation(correlation, id)),
 		telemetry.ID("job_id", id), slog.String("operation", string(operation)))
+}
+
+func traceMigrationError(span trace.Span, err error) {
+	if err == nil {
+		return
+	}
+	code, _ := faultInfo(err)
+	span.SetAttributes(attribute.String("reason", code))
+	switch code {
+	case "forbidden", "unauthenticated", "invalid_input", "invalid_sql", "unsupported_sql",
+		"conflict", "already_applied", "migration_order_conflict", "not_found":
+		return
+	default:
+		telemetry.SpanError(span, err)
+	}
 }

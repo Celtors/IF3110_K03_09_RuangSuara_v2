@@ -3,6 +3,10 @@ package migration
 import (
 	"encoding/json"
 	"time"
+
+	"backend/internal/telemetry"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // RequestStatus is the position of a change request in the workflow:
@@ -109,6 +113,8 @@ type RequiredApprover struct {
 // QueuedRequest is the part of a request the worker needs to run it.
 type QueuedRequest struct {
 	submissionCorrelationID string
+	queueTrace              telemetry.TraceContext
+	claimSpan               trace.SpanContext
 	ID                      string
 	DatabaseID              string
 	MigrationID             string

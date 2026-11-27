@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_requests (
 ALTER TABLE dmp_migration.change_requests
 ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '';
 
+-- W3C context from final approval. Empty values support existing queue entries.
+ALTER TABLE dmp_migration.change_requests
+ADD COLUMN IF NOT EXISTS traceparent text NOT NULL DEFAULT '',
+ADD COLUMN IF NOT EXISTS tracestate text NOT NULL DEFAULT '';
+
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_request_per_operation
 ON dmp_migration.change_requests(migration_id, operation)
 WHERE status IN ('pending_review','approved','queued','running','unknown');

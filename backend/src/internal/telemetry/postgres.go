@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	pg "github.com/pganalyze/pg_query_go/v6"
 	pgquery "github.com/wasilibs/go-pgquery"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // TraceStdlib installs the same query hook on GORM's database/sql driver.
@@ -35,7 +37,8 @@ func (t PostgresTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data p
 		}
 		count++
 	}
-	return context.WithValue(ctx, queryKey{}, StartSQL(ctx, t.Scope, data.SQL, count))
+	ctx, query := StartSQL(ctx, t.Scope, data.SQL, count)
+	return context.WithValue(ctx, queryKey{}, query)
 }
 
 func (t PostgresTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
@@ -52,15 +55,17 @@ type SQLExecution struct {
 	start       time.Time
 	attrs       []slog.Attr
 	transaction string
+	span        trace.Span
 }
 
 // StartSQL is also used by the migration script executor, which calls PgConn
 // directly and bypasses pgx's query hooks.
-func StartSQL(ctx context.Context, scope, sql string, parameterCount int) SQLExecution {
+func StartSQL(ctx context.Context, scope, sql string, parameterCount int) (context.Context, SQLExecution) {
+	shape := sqlShape(sql)
 	q := SQLExecution{
 		attrs: []slog.Attr{
 			slog.String("database_scope", scope),
-			slog.String("query", sqlShape(sql)),
+			slog.String("query", shape),
 			slog.Int("parameter_count", parameterCount),
 		},
 	}
@@ -70,9 +75,22 @@ func StartSQL(ctx context.Context, scope, sql string, parameterCount int) SQLExe
 	case strings.EqualFold(sql, "rollback"):
 		q.transaction = "rollback"
 	}
+	// Startup and idle queue polling keep their SQL logs without producing root spans.
+	if trace.SpanContextFromContext(ctx).IsValid() {
+		name := "db.query"
+		if q.transaction != "" {
+			name = "db." + q.transaction
+		}
+		ctx, q.span = Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
+			attribute.String("db.system.name", "postgresql"),
+			attribute.String("database_scope", scope),
+			attribute.String("db.query.text", shape),
+			attribute.Int("parameter_count", parameterCount),
+		))
+	}
 	slog.LogAttrs(ctx, slog.LevelInfo, "sql.started", append(q.attrs, slog.String("status", "started"))...)
 	q.start = time.Now()
-	return q
+	return ctx, q
 }
 
 func (q SQLExecution) Finish(ctx context.Context, rows *int64, err error) {
@@ -95,6 +113,14 @@ func (q SQLExecution) Finish(ctx context.Context, rows *int64, err error) {
 		attrs = append(attrs, slog.Int64("rows_affected", *rows))
 	}
 	slog.LogAttrs(ctx, level, event, append(attrs, ErrorAttrs(err)...)...)
+	if q.span != nil {
+		q.span.SetAttributes(attribute.String("outcome", status))
+		if rows != nil && err == nil {
+			q.span.SetAttributes(attribute.Int64("rows_affected", *rows))
+		}
+		SpanError(q.span, err)
+		q.span.End()
+	}
 }
 
 func commitStatus(err error) string {

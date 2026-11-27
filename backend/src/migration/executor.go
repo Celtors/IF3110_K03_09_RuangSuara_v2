@@ -43,8 +43,8 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarge
 	}
 	// Drain each result without materializing returned rows. Command tags belong
 	// to statement execution and say nothing about the later commit.
-	activity := telemetry.StartSQL(ctx, "target", sql, 0)
-	results := tx.Conn().PgConn().Exec(ctx, sql)
+	sqlCtx, activity := telemetry.StartSQL(ctx, "target", sql, 0)
+	results := tx.Conn().PgConn().Exec(sqlCtx, sql)
 	var total int64
 	var rows *int64
 	for results.NextResult() {
@@ -55,7 +55,7 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarge
 		}
 	}
 	err = results.Close()
-	activity.Finish(ctx, rows, err)
+	activity.Finish(sqlCtx, rows, err)
 	if err != nil {
 		return executionResult{Status: "failed", Code: postgresCode(err), Message: "PostgreSQL rejected the migration; transaction rolled back"}
 	}
