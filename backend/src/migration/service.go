@@ -228,13 +228,13 @@ func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, er
 // ExecuteOperation runs an operation with the caller's context, including from a worker.
 // Approval and job delivery checks belong to the caller's integration.
 func (s *Service) ExecuteOperation(ctx context.Context, user, db, id string, operation Operation) (Attempt, error) {
-	return s.executeOperation(ctx, user, db, id, operation, nil)
+	return s.executeOperation(ctx, user, db, id, operation, nil, nil)
 }
 
 // executeOperation is ExecuteOperation with a hook. onBegin runs once the attempt has been
 // stored and before any SQL reaches the target, so the queue worker can link the attempt to
 // its change request even if the process dies mid-execution.
-func (s *Service) executeOperation(ctx context.Context, user, db, id string, operation Operation, onBegin func(context.Context, Attempt)) (_ Attempt, resultErr error) {
+func (s *Service) executeOperation(ctx context.Context, user, db, id string, operation Operation, beforeBegin func(context.Context, *pgxpool.Conn) error, onBegin func(context.Context, Attempt) error) (_ Attempt, resultErr error) {
 	db = canonicalDatabaseID(db)
 	ctx = migrationContext(ctx, user, db, id)
 	if validOperation(operation) {
@@ -267,6 +267,11 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		return Attempt{}, err
 	}
 	defer release()
+	if beforeBegin != nil {
+		if err = beforeBegin(ctx, platformConn); err != nil {
+			return Attempt{}, err
+		}
+	}
 
 	// Resolve unfinished executions before assigning another migration version.
 	if err = s.reconcileLocked(ctx, platformConn, pool, db); err != nil {
@@ -303,16 +308,54 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 	slog.InfoContext(ctx, "migration.attempt_started", "status", "running",
 		"retry", operation == OperationApply && definition.State == "failed")
 	if onBegin != nil {
-		onBegin(ctx, attempt)
-	}
-	result := executePostgres(ctx, pool, attempt.SQL, expectedTarget, func(xid, identity string) error {
-		_, recordErr := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1`, attempt.ID, xid, identity)
-		if recordErr == nil {
-			attempt.XID = &xid
-			attempt.TargetIdentity = identity
+		if err = onBegin(ctx, attempt); err != nil {
+			clean, done := cleanupContext(ctx)
+			defer done()
+			if e := finishAttempt(clean, platformConn, &attempt, "failed", "", "Approval or attempt linking failed before SQL"); e != nil {
+				return attempt, fault("indeterminate", "Attempt outcome could not be recorded")
+			}
+			return attempt, err
 		}
-		return recordErr
-	})
+	}
+	var replay *batchReplay
+	if operation != OperationApply {
+		replay, err = completedBatchReplay(ctx, platformConn, definition, operation)
+		if err != nil {
+			clean, done := cleanupContext(ctx)
+			defer done()
+			if e := finishAttempt(clean, platformConn, &attempt, "failed", "", err.Error()); e != nil {
+				return attempt, fault("indeterminate", "Outcome could not be recorded")
+			}
+			return attempt, err
+		}
+	}
+	var result executionResult
+	for tries := 0; tries < 3; tries++ {
+		result = executePostgres(ctx, pool, attempt.SQL, expectedTarget, func(xid, identity string) error {
+			_, recordErr := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3,prepared_rows=NULL WHERE id=$1`, attempt.ID, xid, identity)
+			if recordErr == nil {
+				attempt.XID = &xid
+				attempt.TargetIdentity = identity
+			}
+			return recordErr
+		}, func(rows int64) error {
+			_, e := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET prepared_rows=$2 WHERE id=$1`, attempt.ID, rows)
+			return e
+		}, replay)
+		if result.Status != "failed" || (result.Code != "40001" && result.Code != "40P01" && result.Code != "55P03") || tries == 2 {
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		time.Sleep(time.Duration(tries+1) * 250 * time.Millisecond)
+		if onBegin != nil {
+			if e := onBegin(ctx, attempt); e != nil {
+				result = executionResult{Status: "failed", FaultCode: "forbidden", Message: "Execution authorization could not be revalidated before retry"}
+				break
+			}
+		}
+	}
 
 	clean, done := cleanupContext(ctx)
 	defer done()
@@ -351,6 +394,13 @@ func (s *Service) Reconcile(ctx context.Context, user, db string) error {
 	return s.reconcileLocked(ctx, c, pool, db)
 }
 func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pgxpool.Pool, db string) (resultErr error) {
+	var batchActive bool
+	if err := c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests r JOIN dmp_migration.batch_jobs b ON b.id=r.id WHERE r.database_id=$1 AND r.status='running')`, db).Scan(&batchActive); err != nil {
+		return err
+	}
+	if batchActive {
+		return fault("indeterminate", "Active batch job holds this database; use its recovery API")
+	}
 	var a Attempt
 	err := c.QueryRow(ctx, `
  SELECT a.id,a.migration_id,a.database_id,a.operation,a.reverses_execution_id,a.target_xid,a.target_identity,d.version
@@ -372,6 +422,9 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
 			slog.WarnContext(ctx, "migration.reconcile", "status", "unresolved", "reason", code)
 		}
 	}()
+	if a.TargetIdentity == "pending" && a.XID == nil {
+		return finishAttempt(ctx, c, &a, "failed", "interrupted", "Worker stopped before target SQL was submitted")
+	}
 	if a.TargetIdentity == "" {
 		return fault("indeterminate", "The execution has no recorded target identity; operator investigation is required")
 	}
