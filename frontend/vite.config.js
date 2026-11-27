@@ -1,6 +1,7 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 import { matchPath } from './src/paths.js'
+import process from 'node:process'
 
 // Single-page app: index.html is the only HTML entry and src/router.js shows the screen named
 // in the URL (/login, /admin/users, /migrations/details?...; the old .html names still work). The
