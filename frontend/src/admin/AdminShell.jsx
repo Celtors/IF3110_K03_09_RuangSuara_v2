@@ -9,7 +9,7 @@ const NAV = [
 ]
 
 export default function AdminShell({ active, username, access, children }) {
-  const { signOut } = useSession()
+  const { signOut, error } = useSession()
 
   return (
     <ToastProvider>
@@ -37,7 +37,10 @@ export default function AdminShell({ active, username, access, children }) {
             </button>
           </div>
         </aside>
-        <main className="content">{children}</main>
+        <main className="content">
+          {error && <p className="alert alert-error" role="alert">{error}</p>}
+          {children}
+        </main>
       </div>
     </ToastProvider>
   )

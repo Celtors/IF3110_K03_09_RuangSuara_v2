@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { LOGIN_PAGE, fetchMe, login, logout } from './session'
 import { navigate } from '../router'
@@ -15,12 +15,17 @@ import { SessionContext } from './session-context'
 export default function SessionProvider({ children }) {
   const [state, setState] = useState({ status: 'loading', me: null, error: '' })
 
+  const generation = useRef(0)
+
   const refresh = useCallback(async () => {
+    const current = generation.current
     try {
       const me = await fetchMe()
+      if (current !== generation.current) return null
       setState((s) => (s.status === 'ready' && s.error === '' && JSON.stringify(s.me) === JSON.stringify(me) ? s : { status: 'ready', me, error: '' }))
       return me
     } catch (e) {
+      if (current !== generation.current) return null
       // keep whoever was signed in: a backend that is briefly unreachable is not a sign-out
       setState((s) => ({ status: 'ready', me: s.me, error: e.message }))
       return null
@@ -35,6 +40,7 @@ export default function SessionProvider({ children }) {
   }, [refresh])
 
   const signIn = useCallback(async (username, password) => {
+    generation.current++
     await login(username, password)
     const me = await fetchMe()
     setState({ status: 'ready', me, error: '' })
@@ -44,7 +50,14 @@ export default function SessionProvider({ children }) {
   // Ends the session, then shows the sign-in page without a ?next= (leaving on purpose is not
   // the same as being thrown out).
   const signOut = useCallback(async () => {
-    await logout()
+    generation.current++
+    try {
+      await logout()
+    } catch (error) {
+      setState((s) => ({ ...s, error: error.message }))
+      return
+    }
+    generation.current++
     // One synchronous update for both: if the URL changed first, the sign-in screen would still
     // see a signed-in user and send them straight back; if the session changed first, the old
     // screen would redirect to sign-in with a ?next= pointing at itself.

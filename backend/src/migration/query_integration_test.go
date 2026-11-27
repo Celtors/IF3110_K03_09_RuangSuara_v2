@@ -3,7 +3,6 @@ package migration
 import (
 	"context"
 	"errors"
-	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -20,7 +19,6 @@ func (fakeAccess) Identity(*gin.Context) (string, error) { return "", nil }
 func (f fakeAccess) Permission(_ context.Context, user, _ string) (Permission, error) {
 	return f.perms[user], nil
 }
-func (fakeAccess) CSRF(*http.Request) error { return nil }
 
 type fakeConnections struct {
 	pool *pgxpool.Pool

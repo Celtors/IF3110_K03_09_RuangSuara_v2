@@ -48,6 +48,10 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarge
 		return executionResult{Status: "failed", Message: "Could not identify target transaction"}
 	}
 	if err = recordXID(xid, identity); err != nil {
+		var denied *Fault
+		if errors.As(err, &denied) {
+			return executionResult{Status: "failed", FaultCode: denied.Code, Message: denied.Message}
+		}
 		return executionResult{Status: "failed", Message: "Could not persist transaction identity; SQL was not submitted"}
 	}
 	if replay != nil {

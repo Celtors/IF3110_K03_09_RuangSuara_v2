@@ -1,9 +1,11 @@
 package databasemanagement
 
 import (
+	"net/http/httptest"
 	"testing"
 
 	fx "backend/access_control/effect"
+	sessionmanager "backend/access_control/session_manager"
 )
 
 func TestCreateDatabaseValidation(t *testing.T) {
@@ -81,15 +83,15 @@ func TestEffectivePermission(t *testing.T) {
 	}
 }
 
-func TestReadOnlyMethods(t *testing.T) {
-	for _, m := range []string{"GET", "HEAD", "OPTIONS"} {
-		if !isReadOnlyMethod(m) {
-			t.Fatalf("%s must be treated as read-only", m)
+func TestCSRFRequiresProofForMutations(t *testing.T) {
+	for _, method := range []string{"GET", "HEAD", "OPTIONS"} {
+		if err := sessionmanager.ValidateCSRF(httptest.NewRequest(method, "https://ruangsuara.test", nil)); err != nil {
+			t.Errorf("%s unexpectedly requires CSRF proof", method)
 		}
 	}
-	for _, m := range []string{"POST", "PATCH", "PUT", "DELETE"} {
-		if isReadOnlyMethod(m) {
-			t.Fatalf("%s changes state and must need ViewEdit", m)
+	for _, method := range []string{"POST", "PATCH", "PUT", "DELETE"} {
+		if err := sessionmanager.ValidateCSRF(httptest.NewRequest(method, "https://ruangsuara.test", nil)); err == nil {
+			t.Errorf("%s accepted without CSRF proof", method)
 		}
 	}
 }

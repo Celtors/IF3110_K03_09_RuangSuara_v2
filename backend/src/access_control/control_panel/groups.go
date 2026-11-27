@@ -96,7 +96,8 @@ func GetAllGroupsRequest(c *gin.Context, db *gorm.DB) {
             g.updated_at
         `).
 		Joins("LEFT JOIN group_leaders gl ON g.id = gl.group_id").
-		Joins("LEFT JOIN users u ON u.id = gl.leader_id").
+		Joins("LEFT JOIN user_groups ug ON ug.group_id = gl.group_id AND ug.user_id = gl.leader_id").
+		Joins("LEFT JOIN users u ON u.id = ug.user_id AND u.status = 'Active'").
 		Scan(&groups).Error
 
 	if err != nil {

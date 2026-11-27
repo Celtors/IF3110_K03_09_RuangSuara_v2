@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -24,6 +23,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 const (
@@ -53,7 +54,6 @@ func (a *jobTestAccess) Permission(_ context.Context, user, _ string) (Permissio
 	}
 	return NoAccess, nil
 }
-func (*jobTestAccess) CSRF(*http.Request) error { return nil }
 
 type jobHarness struct {
 	r                *Review
@@ -454,13 +454,23 @@ func TestAsyncPermissionRevalidationIntegration(t *testing.T) {
 	rel, _, _ := batchFixture(t, h.target, 2, false)
 	id := h.submit(t, `UPDATE `+rel+` SET score=score+1`, `UPDATE `+rel+` SET score=score-1`, 0)
 	h.approve(t, id)
-	h.access.mu.Lock()
-	h.access.revoked = true
-	h.access.mu.Unlock()
+	ctx := context.Background()
+	accessDB, err := gorm.Open(postgres.Open(os.Getenv("SQL_CONSOLE_TEST_PLATFORM_DSN")))
+	if err != nil {
+		t.Fatal("could not open disposable authorization database")
+	}
+	sqlDB, err := accessDB.DB()
+	if err != nil {
+		t.Fatal("could not open disposable authorization pool")
+	}
+	defer sqlDB.Close()
+	h.r.Service.Access = ApplicationAccess{Platform: accessDB}
+	h.execPlatform(t, "UPDATE users SET status='Inactive' WHERE id=$1", jobEditor)
+	defer h.execPlatform(t, "UPDATE users SET status='Active' WHERE id=$1", jobEditor)
 	h.worker(t)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		q, e := h.r.Get(context.Background(), jobLeader, h.db, id)
+		q, e := h.r.Get(ctx, jobLeader, h.db, id)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -734,5 +744,77 @@ func TestCompensationJobIntegration(t *testing.T) {
 	if workflowMetric(t, metrics, "batch_commits_total", "action", "compensate") != initialBatches+1 ||
 		workflowMetric(t, metrics, "batch_rows_total", "action", "compensate") != initialRows+2 {
 		t.Fatal("verified compensation was omitted from its own counters")
+	}
+}
+
+type batchRetryAccess struct {
+	ApplicationAccess
+	beforeCheck func()
+}
+
+func (a batchRetryAccess) Permission(ctx context.Context, user, db string) (Permission, error) {
+	a.beforeCheck()
+	return a.ApplicationAccess.Permission(ctx, user, db)
+}
+
+func TestBatchRetryRevalidatesRequester(t *testing.T) {
+	h := newJobHarness(t)
+	ctx := context.Background()
+	rel, up, down := batchFixture(t, h.target, 3, false)
+	id := h.submit(t, up, down, 1)
+	h.approve(t, id)
+	claimed, err := h.r.repo().claim(ctx, h.r.revalidate)
+	if err != nil || claimed == nil || claimed.ID != id {
+		t.Fatal("could not claim the approved fixture job")
+	}
+
+	mustExec(t, h.target, targetBatchDDL)
+	mustExec(t, h.target, `CREATE SEQUENCE public.slice7b1_batch_retry;
+		CREATE FUNCTION public.slice7b1_batch_retry() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.id = TG_ARGV[0] AND NEW.completed = 2 THEN
+				PERFORM nextval('public.slice7b1_batch_retry');
+				RAISE EXCEPTION 'fixture serialization failure' USING ERRCODE = '40001';
+			END IF;
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER fixture_retry BEFORE UPDATE OF completed ON dmp_batch.jobs
+		FOR EACH ROW EXECUTE FUNCTION public.slice7b1_batch_retry('`+id+`');`)
+	defer mustExec(t, h.target, `DROP TRIGGER fixture_retry ON dmp_batch.jobs;
+		DROP FUNCTION public.slice7b1_batch_retry(); DROP SEQUENCE public.slice7b1_batch_retry;`)
+	accessDB, err := gorm.Open(postgres.Open(os.Getenv("SQL_CONSOLE_TEST_PLATFORM_DSN")))
+	if err != nil {
+		t.Fatal("could not open disposable authorization database")
+	}
+	sqlDB, err := accessDB.DB()
+	if err != nil {
+		t.Fatal("could not open disposable authorization pool")
+	}
+	defer sqlDB.Close()
+	defer h.execPlatform(t, "UPDATE users SET status='Active' WHERE id=$1", jobEditor)
+
+	deactivated := false
+	h.r.Service.Access = batchRetryAccess{ApplicationAccess: ApplicationAccess{Platform: accessDB}, beforeCheck: func() {
+		var ran bool
+		if err := h.target.QueryRow(ctx, "SELECT is_called FROM public.slice7b1_batch_retry").Scan(&ran); err != nil {
+			t.Fatal(err)
+		}
+		if ran && !deactivated {
+			h.execPlatform(t, "UPDATE users SET status='Inactive' WHERE id=$1", jobEditor)
+			deactivated = true
+		}
+	}}
+	h.r.process(ctx, *claimed, &batchLockWaits{pending: make(map[batchLockKey]batchLockWait)})
+	p, err := loadBatch(ctx, h.platform, id)
+	if err != nil || !deactivated || p.State != "paused" || p.Batches != 1 || p.Rows != 1 {
+		t.Fatalf("expected the first commit to be preserved with a paused batch, got state=%s batches=%d rows=%d error=%v",
+			p.State, p.Batches, p.Rows, err)
+	}
+	var attempts int
+	if err := h.target.QueryRow(ctx, "SELECT last_value FROM public.slice7b1_batch_retry").Scan(&attempts); err != nil || attempts != 1 {
+		t.Fatalf("requester reached a new transaction after deactivation, transaction probes=%d error=%v", attempts, err)
+	}
+	if score(t, h.target, rel, 1) != 1 || score(t, h.target, rel, 2) != 0 || score(t, h.target, rel, 3) != 9 {
+		t.Fatal("the target did not preserve exactly the first committed batch")
 	}
 }

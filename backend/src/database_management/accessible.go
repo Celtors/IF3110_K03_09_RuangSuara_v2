@@ -61,6 +61,7 @@ func (h *Handler) accessibleDatabases(c *gin.Context) {
 		Select("d.id::text AS id, d.name AS name, gp.effect AS effect").
 		Joins("JOIN group_policies gp ON gp.database_id = d.id").
 		Joins("JOIN user_groups ug ON ug.group_id = gp.group_id").
+		Joins("JOIN users u ON u.id = ug.user_id AND u.status = 'Active'").
 		Where("ug.user_id = ?", principal).
 		Scan(&rows).Error
 	if err != nil {

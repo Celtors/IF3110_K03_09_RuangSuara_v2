@@ -1,12 +1,10 @@
+import { sessionFetch } from "../api/client.js";
 import { fetchMe } from "../auth/session.js";
 
-let token = "";
 let me = null;
 export async function session() {
-  token = "";
   const value = await fetchMe();
   if (!value) throw new APIError("A validated session is required", "unauthenticated");
-  token = value.csrf_token ?? "";
   me = value;
   return value;
 }
@@ -21,35 +19,18 @@ export class APIError extends Error {
   }
 }
 export async function api(path, method = "GET", body) {
-  const response = await fetch(path, {
-    method,
-    credentials: "same-origin",
-    headers: {
-      "Content-Type": "application/json",
-      ...(method !== "GET" ? { "X-CSRF-Token": token } : {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const response = await sessionFetch(path, method, body);
   const data = await response.json().catch(() => ({}));
   if (!response.ok)
     throw new APIError(
       data.error?.message ?? `Request failed (${response.status})`,
-      data.error?.code ?? "request_failed",
+      response.status === 401 ? "unauthenticated" : data.error?.code ?? "request_failed",
       data.data ?? undefined,
     );
   return data;
 }
 export const databaseBase = (id) => `/api/databases/${encodeURIComponent(id)}`;
-export async function apiWithSessionRetry(path, method, body) {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await api(path, method, body);
-    } catch (e) {
-      if (e.code !== "csrf_failed" || attempt >= 2) throw e;
-      await session();
-    }
-  }
-}
+export const apiWithSessionRetry = api;
 // /migrations for the workspace home, /migrations/<page> for the rest.
 const migrationPath = (page) => (page === "index" ? "/migrations" : `/migrations/${page}`);
 
