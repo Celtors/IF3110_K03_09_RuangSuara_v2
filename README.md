@@ -272,3 +272,13 @@ npm run build
 ```
 
 The added backend tests are **unit tests** covering access decisions, DBMS configuration/validation, and migration SQL/schema validation. **They do not yet prove live connection behavior, HTTP session flows, migration transactions, rollback, or migration-history persistence.** See [TESTING.md](TESTING.md) for details. Local automated-test execution was not confirmed in the preparation environment due to the missing required Go toolchain.
+## Security / SAST
+
+CodeQL scans Go (`backend/src`) and JavaScript/JSX with the `security-extended`
+query suite. See [laporan SAST CodeQL](docs/security/sast-codeql.md) for scope,
+triage decisions, evidence and limitations. View alerts under **Security > Code
+scanning** and SARIF artifacts under **Actions > CodeQL SAST > run > Artifacts**.
+To run manually, use **Actions > CodeQL SAST > Run workflow** (`workflow_dispatch`)
+after the workflow is available on the default branch. Pushing `feat/sast-codeql`
+also triggers a scan before merging. Private repositories require applicable
+GitHub Code Security access; see the report for the authorized SARIF-only fallback.
