@@ -6,7 +6,7 @@ Static Application Security Testing (SAST) examines source code without requirin
 
 The purpose of this report is to document the scan evidence, all reported findings, their potential impact, and the proposed decisions and follow-up actions. A CodeQL result is a candidate vulnerability, not automatic proof of exploitability.
 
-**Report status:** Initial scan verified; source-based triage proposed; remediation, regression testing, GitHub alert dispositions, and re-scan verification pending.
+**Report status:** Initial scan verified; two source-level corrections verified in Git history; thirteen log-injection findings have source-based false-positive justifications. Post-fix SARIF, test execution evidence and final GitHub dispositions remain pending.
 
 ## 2. Implementation and configuration
 
@@ -14,8 +14,8 @@ Repository: [Celtors/IF3110_K03_09_RuangSuara_v2](https://github.com/Celtors/IF3
 
 | Configuration | Implementation |
 | --- | --- |
-| Workflow | [`.github/workflows/codeql.yml`](../../.github/workflows/codeql.yml) |
-| Query configuration | [`.github/codeql/codeql-config.yml`](../../.github/codeql/codeql-config.yml) |
+| Workflow | [`.github/workflows/codeql.yml`](../.github/workflows/codeql.yml) |
+| Query configuration | [`.github/codeql/codeql-config.yml`](../.github/codeql/codeql-config.yml) |
 | Automation | GitHub Actions, `ubuntu-latest` |
 | Triggers | Pushes and pull requests targeting `main` or `feat/**`; weekly schedule; manual dispatch |
 | Schedule | `23 3 * * 1` (Monday 03:23 UTC / 10:23 WIB, default branch only) |
@@ -50,11 +50,11 @@ The baseline for this report is the **push scan on `feat/integrate`**, not the e
 | Code scanning upload | Both jobs report `Successfully uploaded results` and `Analysis upload status is complete.` |
 | Artifact upload | Both artifacts successfully finalized |
 
-The repository ZIP identifies its HEAD as `feat/integrate` at the same SHA as both SARIF metadata files. The source locations reviewed below match the supplied snapshot; uncommitted worktree changes and individual Git blobs have not been independently verified. The GitHub UI alert state was not independently inspected.
+Both baseline SARIF metadata files identify the same integration-branch commit. The updated repository archive is on `docs/sast-ql-initial-report` at `61867bc4d51afa74749baa8f0eb434f7049d8340`, with the authentication correction in its ancestry. The local `feat/integrate` reference is `065c750`; the archived `origin/feat/integrate` reference is `b2cf56f5a1bd4a54f5ec67f1ed976a968d732938`. The latter commit was inspected directly for the database viewer correction; it is not yet an ancestor of the documentation branch HEAD. The reported subsequent README commit `eaf4c3e` is not available in the archive. The supplied baseline dashboard screenshot independently confirms six open alerts and their GitHub numbers. Later dashboard states are taken from the supplied remediation history, pending supporting evidence.
 
 ### 3.1 Evidence files
 
-Retain the original downloaded archives under `docs/security/evidence/initial/` (or another team-approved evidence location). The links below identify the supplied files after that placement; they are not included in this Markdown file.
+The supplied `docs.zip` already contains these archives and three screenshots in `docs/evidence/initial/`. Preserve them in place. All relative links in this document are resolved from `docs/sast-codeql.md`.
 
 | Evidence | Contents |
 | --- | --- |
@@ -62,7 +62,7 @@ Retain the original downloaded archives under `docs/security/evidence/initial/` 
 | [`codeql-javascript-typescript-46012284127-1.zip`](evidence/initial/codeql-javascript-typescript-46012284127-1.zip) | `sarif/javascript.sarif`, `metadata.json`; artifact ID `15204328369` |
 | [`logs_124479857497.zip`](evidence/initial/logs_124479857497.zip) | Original workflow logs for both matrix jobs |
 
-The supplied download names had a local `(2)` suffix; the intended evidence filenames above omit that suffix. Preserve the original bytes when renaming. SHA-256 checksums of the supplied archives:
+SHA-256 checksums of the archives in the supplied `docs.zip` (recomputed and matched to the initial report):
 
 ```
 fad5b4bc14fa02b8ee8c3171bd5f6bf6dfdba52569c31cce685e574d2b3c2e46  codeql-go-46012284127-1.zip
@@ -72,12 +72,14 @@ f2a668ab1b7bf0d2af8da964f6f2761dfa81b7e02427598b3f3e9a9e48e0e7aa  logs_124479857
 
 Relevant log entries are found in each `Analyze (<language>)/8_Analyze and upload to code scanning.txt` file and each `9_Preserve SARIF and metadata.txt` file. Before committing evidence, review archives for credentials, sensitive logs and unintended source exposure. Do not commit `.env`.
 
-**Screenshot placeholders:**
+- Workflow summary with both successful analysis jobs, run URL, branch and commit.
+![Workflow Summary](evidence/initial/workflow-summary.png)
 
-- [ ] TODO: Workflow summary showing both successful analysis jobs, run URL, branch and commit.
-- [ ] TODO: Code scanning dashboard filtered to `feat/integrate` showing the findings.
-- [ ] TODO: Tool status / coverage view for both languages.
-- [ ] TODO: Individual alert detail screenshots where useful.
+- Code scanning dashboard filtered to `feat/integrate` with findings.
+![Code Scanning Dashboard](./evidence/initial/initial-findings.png)
+
+- Sample of individual alert detail screenshots
+![Individual alert screenshot](./evidence/initial/individual-sample-alert.png)
 
 ## 4. Analysis coverage
 
@@ -110,223 +112,330 @@ Although the workflow sets `CODEQL_EXTRACTOR_GO_OPTION_EXTRACT_TESTS=true`, this
 
 **Frontend result:** CodeQL returned zero JavaScript/TypeScript findings. This means no findings were produced by the configured queries for the extracted code at this commit; it does not establish that the frontend is secure.
 
-## 5. Initial findings
+## 5. Findings and remediation history
 
-The Go SARIF contains six results across three rule IDs. The JavaScript SARIF contains zero results. Each SARIF result is counted once; the four paths associated with the SQL injection result are not four separate alerts.
+The verified baseline contains six Go results across three rule IDs and zero JavaScript results. The SQL injection result contains four reported paths, not four separate alerts. Severity is the CodeQL rule's security-severity score, not an independently calculated application CVSS score.
 
-| Security severity | Go | JavaScript | Total |
-| --- | ---: | ---: | ---: |
-| Critical (9.0–10.0) | 0 | 0 | 0 |
-| High (7.0–8.9) | 1 | 0 | 1 |
-| Medium (4.0–6.9) | 5 | 0 | 5 |
-| Low (0.1–3.9) | 0 | 0 | 0 |
-| **Total** | **6** | **0** | **6** |
+| Rule | CWE | Security severity | Baseline raw results |
+| --- | --- | --- | ---: |
+| [`go/cookie-secure-not-set`](https://codeql.github.com/codeql-query-help/go/go-cookie-secure-not-set/) | CWE-614 | Medium (4.0) | 1 |
+| [`go/sql-injection`](https://codeql.github.com/codeql-query-help/go/go-sql-injection/) | CWE-89 | High (8.8) | 1 |
+| [`go/log-injection`](https://codeql.github.com/codeql-query-help/go/go-log-injection/) | CWE-117 | Medium (6.1) | 4 |
+| **Total** | | | **6** |
 
-Severity bands use CodeQL's `security-severity` metadata, not the separate diagnostic `problem.severity` field. The scores are CodeQL rule scores, not newly calculated application-specific CVSS assessments.
+Nine additional log-injection alerts were reported after authentication changes, according to the supplied implementation history. The baseline six alert numbers and locations are confirmed by SARIF and the initial screenshot; the nine later numbers and their mapping are reported by the implementation history and must be matched to their own SARIF/alert details. Report IDs below are stable local identifiers, not GitHub alert numbers.
 
-The following IDs are local report identifiers, not GitHub alert numbers. Decisions are **proposed** based on source review; no finding has been dismissed or fixed as part of preparing this report.
+### 5.1 Commit history
 
-| ID | Rule | Security severity | Code location (relative to repository root) | Potential impact | Proposed decision and rationale |
-| --- | --- | --- | --- | --- | --- |
-| SAST-01 | [`go/cookie-secure-not-set`](https://codeql.github.com/codeql-query-help/go/go-cookie-secure-not-set/) | Medium (4.0) | `backend/src/access_control/session_manager/logout.go:61` | Logout cookie is emitted without the Secure attribute; inconsistent cookie handling. | **Fix.** Login sets Secure but logout does not; align deletion attributes. Empty value reduces direct confidentiality impact. |
-| SAST-02 | [`go/sql-injection`](https://codeql.github.com/codeql-query-help/go/go-sql-injection/) | High (8.8) | `backend/src/database_management/handlers.go:452` | If identifier escaping is bypassed, unauthorized reads or other SQL operations may occur within target database privileges. | **Candidate false positive; verification required.** PostgreSQL identifiers are quoted and embedded double quotes doubled; metadata existence check and bound pagination provide additional controls. Verify the actual driver path and adversarial tests before dismissal. |
-| SAST-03 | [`go/log-injection`](https://codeql.github.com/codeql-query-help/go/go-log-injection/) | Medium (6.1) | `backend/src/internal/telemetry/http.go:46` | Forged panic log entries could mislead incident response. | **Candidate false positive.** Logged route comes from Gin's registered route pattern, not the raw request path. |
-| SAST-04 | [`go/log-injection`](https://codeql.github.com/codeql-query-help/go/go-log-injection/) | Medium (6.1) | `backend/src/internal/telemetry/http.go:74` | Forged request telemetry could undermine monitoring and audit integrity. | **Candidate false positive.** Same registered-route source; HTTP method is separately normalized. |
-| SAST-05 | [`go/log-injection`](https://codeql.github.com/codeql-query-help/go/go-log-injection/) | Medium (6.1) | `backend/src/database_management/handlers.go:55` | Forged database failure records could conceal unauthorized requests or create misleading evidence. | **Candidate false positive.** The flagged expression is `c.FullPath()`, not the user-supplied database ID or raw URL. |
-| SAST-06 | [`go/log-injection`](https://codeql.github.com/codeql-query-help/go/go-log-injection/) | Medium (6.1) | `backend/src/migration/http.go:133` | Forged migration failure records could compromise audit integrity. | **Candidate false positive.** The flagged expression is the registered route pattern. |
+| Commit | Description | Verification |
+| --- | --- | --- |
+| [e68735b](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/commit/e68735b2d9dae5efd4ae1c4b3a27fc94eca76e47) | Baseline integration with SAST | Git object and initial SARIF verified |
+| [d5e658a](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/commit/d5e658abf4d15bf7de578f06fbfb8cdeb9d3ef50) | Enforce session lifecycle and access control; add administrative activity logs | Git object and implementation verified |
+| [40a6dcb](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/commit/40a6dcbee253cc5b04d723d44e9004caeee8c0c8) | Add unit testing | Git object verified; execution evidence pending |
+| [065c750](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/commit/065c7503598751537676cfcfc879c73606634d4c) | Add k6 testing; authentication correction scan revision | Git object verified; scan evidence pending |
+| [b2cf56f](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/commit/b2cf56f5a1bd4a54f5ec67f1ed976a968d732938) | Complete database viewer and enforce target isolation | Git object and implementation verified on archived remote integration ref |
+| `eaf4c3e` | Subsequent README update | Reported by implementation history; Git object unavailable in archive |
 
-### 5.1 SAST-01 — Cookie 'Secure' attribute is not set to true
+### 5.2 Individual finding register
 
-- **Rule:** `go/cookie-secure-not-set`; CWE-614; CodeQL problem severity `warning`, precision `high`.
-- **Location:** `backend/src/access_control/session_manager/logout.go:61`, `LogoutRequest`.
-- **Evidence:** SARIF message: `Cookie does not set Secure attribute to true.`
+All locations are relative to `backend/src/` and refer to the scan revision, not necessarily the current line numbers. The rule and severity in the first table apply individually to each row below. The `#` numbers are GitHub alert numbers.
+
+| ID / alert | Rule | Severity | Scan location | Potential impact in RuangSuara | Decision / justification | Fix commit | Verification status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SAST-01 / #1 | `go/cookie-secure-not-set` | Medium 4.0 | `access_control/session_manager/logout.go:61` | Inconsistent session cookie security; deletion cookie could be emitted without Secure | Fix; shared Secure cookie helper | `d5e658a` | Source fixed; no longer open according to implementation history; closure evidence pending |
+| SAST-02 / #2 | `go/sql-injection` | High 8.8 | `database_management/handlers.go:452` | Unintended target SQL execution if identifier context is broken; placeholder ambiguity could disrupt viewer | Fix query construction; native pgx identifier quoting and value parameters | `b2cf56f` | Source fixed at commit; re-scan disposition pending |
+| SAST-03 / #7 | `go/log-injection` | Medium 6.1 | `internal/telemetry/http.go:46` | Forged panic events could mislead incident investigation | False positive recommended; registered route template | N/A | Source justification verified; dismissal pending |
+| SAST-04 / #8 | `go/log-injection` | Medium 6.1 | `internal/telemetry/http.go:74` | Forged request telemetry could mislead monitoring | False positive recommended; registered route template | N/A | Source justification verified; dismissal pending |
+| SAST-05 / #3 | `go/log-injection` | Medium 6.1 | `database_management/handlers.go:55` | Forged database failure audit records | False positive recommended; registered route template | N/A | Source justification verified; dismissal pending |
+| SAST-06 / #6 | `go/log-injection` | Medium 6.1 | `migration/http.go:133` | Forged migration failure audit records | False positive recommended; registered route template | N/A | Source justification verified; dismissal pending |
+| SAST-07 / #17 | `go/log-injection` | Medium 6.1 | `access_control/control_panel/users.go:156` | Forged account deactivation audit records via `affected_user_id` | False positive recommended; typed UUID → canonical string → validated attribute | N/A | Source control verified; SARIF mapping and dismissal pending |
+| SAST-08 / #11 | `go/log-injection` | Medium 6.1 | `access_control/control_panel/usergroups.go:77` | Forged membership addition audit records via `group_id` | False positive recommended; typed UUID → canonical string → validated attribute | N/A | Source control verified; SARIF mapping and dismissal pending |
+| SAST-09 / #12 | `go/log-injection` | Medium 6.1 | `access_control/control_panel/usergroups.go:78` | Forged membership addition audit records via `affected_user_id` | False positive recommended; typed UUID → canonical string → validated attribute | N/A | Source control verified; SARIF mapping and dismissal pending |
+| SAST-10 / #13 | `go/log-injection` | Medium 6.1 | `access_control/control_panel/usergroups.go:116` | Forged membership removal audit records via `group_id` | False positive recommended; typed UUID → canonical string → validated attribute | N/A | Source control verified; SARIF mapping and dismissal pending |
+| SAST-11 / #14 | `go/log-injection` | Medium 6.1 | `access_control/control_panel/usergroups.go:117` | Forged membership removal audit records via `affected_user_id` | False positive recommended; typed UUID → canonical string → validated attribute | N/A | Source control verified; SARIF mapping and dismissal pending |
+| SAST-12 / #15 | `go/log-injection` | Medium 6.1 | `access_control/control_panel/usergroups.go:206` | Forged leader assignment audit records via `group_id` | False positive recommended; typed UUID → canonical string → validated attribute | N/A | Source control verified; SARIF mapping and dismissal pending |
+| SAST-13 / #16 | `go/log-injection` | Medium 6.1 | `access_control/control_panel/usergroups.go:207` | Forged leader assignment audit records via `affected_user_id` | False positive recommended; typed UUID → canonical string → validated attribute | N/A | Source control verified; SARIF mapping and dismissal pending |
+| SAST-14 / #9 | `go/log-injection` | Medium 6.1 | `access_control/control_panel/policy.go:145` | Forged policy change audit records via `group_id` | False positive recommended; typed UUID → canonical string → validated attribute | N/A | Source control verified; SARIF mapping and dismissal pending |
+| SAST-15 / #10 | `go/log-injection` | Medium 6.1 | `access_control/control_panel/policy.go:145` | Forged policy change audit records via `database_id` | False positive recommended; typed UUID → canonical string → validated attribute | N/A | Source control verified; SARIF mapping and dismissal pending |
+
+For SAST-14 and SAST-15 in particular, the mapping of alert number to individual argument at the shared source line is provisional until the actual SARIF/alert code flow is checked. No alerts have been dismissed during report preparation.
+
+## 6. Remediation details and justification
+
+### 6.1 SAST-01 — Insecure cookie configuration (fixed in source)
+
+**Rule:** `go/cookie-secure-not-set` (CWE-614, Medium 4.0). The baseline finding was emitted at `logout.go:61`:
 
 ```go
 c.SetCookie("ssid", "", -1, "/", "", false, true)
 ```
 
-The fifth argument is the cookie domain, the sixth is Secure (`false`), and the seventh is HttpOnly (`true`). The cookie is empty and expired to delete the session cookie. The server also attempts to revoke the session in the database (`logout.go:52–59`). At login, `login.go:116–117` sets `SameSite=Lax`, uses an empty domain (host-only), path `/`, Secure and HttpOnly.
+The deletion response did not set Secure, unlike the login cookie. Since this particular response carries an empty deletion value, actual session-token disclosure at this sink was not demonstrated; consistent security attributes nevertheless warrant correction.
 
-**Impact:** A cookie without Secure can be transmitted over HTTP, but this particular response contains an empty deletion value, not the session token. The direct token-disclosure consequence described by the generic rule is therefore not demonstrated for this sink. Inconsistent security attributes nevertheless warrant correction and verification of logout behavior.
-
-**Proposed decision: Fix.** Match the login cookie attributes, preserving the host-only domain. Proposed code (not yet applied):
+**Fix:** [d5e658a — enforce session lifecycle and access control](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/commit/d5e658abf4d15bf7de578f06fbfb8cdeb9d3ef50). Verified in the supplied repository: `backend/src/access_control/session_manager/authorization.go:216–225` defines the shared helper:
 
 ```go
-c.SetSameSite(http.SameSiteLaxMode)
-c.SetCookie("ssid", "", -1, "/", "", true, true)
+func setSessionCookie(c *gin.Context, token string, expires time.Time) {
+    cookie := &http.Cookie{
+        Name: sessionCookie, Value: token, Path: "/",
+        Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: expires,
+    }
+    if token == "" {
+        cookie.MaxAge = -1
+    }
+    http.SetCookie(c.Writer, cookie)
+}
 ```
 
-**Verification plan:** Test logout over the supported deployment transport, confirm `Set-Cookie` contains Secure, HttpOnly, SameSite=Lax, path `/`, no Domain and an expiration/deletion directive. Confirm browser cookie removal and server-side session revocation. Also review the existing behavior if database revocation fails; that is separate from this CodeQL rule.
+Login (`login.go:86`), renewal (`authorization.go:197`) and logout (`logout.go:62`) call the same helper. The cookie is host-only, Secure, HttpOnly, SameSite=Lax and scoped to `/`. Logout revokes the server-side session first and returns a failure if revocation fails rather than incorrectly clearing the browser cookie and claiming success. This addresses the specific missing attribute and improves session lifecycle consistency.
 
-- Fix commit: TODO — SHA and link.
-- Test result: TODO.
-- Re-scan result: TODO.
+**Regression coverage:** `backend/src/session_integration_test.go`, `TestSessionAndAdminIntegration`, checks login cookie attributes (lines 92–94), failed revocation (174) and deletion attributes matching the active cookie (180–181), as well as session lifecycle behavior. The implementation history reports that backend integration tests passed against disposable PostgreSQL 18.6 and browser verification covered login/logout. Test output and browser evidence are not supplied; no tests were executed in preparing this report.
 
-### 5.2 SAST-02 — Database query built from user-controlled sources
+**Re-scan:** [run 46027462987](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions/runs/46027462987), reported at commit `065c750`. The implementation history reports the cookie alert was no longer open. Independent confirmation requires the post-authentication SARIF and the GitHub alert #1 closed/fixed detail.
 
-- **Rule:** `go/sql-injection`; CWE-89; CodeQL problem severity `error`, precision `high`.
-- **Location:** `backend/src/database_management/handlers.go:452`, `Handler.rows`.
-- **Evidence:** One result with two user-controlled sources and four reported data-flow paths.
+### 6.2 SAST-02 — SQL injection candidate (query construction corrected)
 
-**Source-to-sink:** `c.Param("schema")` and `c.Param("table")` at line 426 → custom `quote` function at line 448 → `fmt.Sprintf` at line 450 → `db.Raw(query, limit, offset)` at line 452.
-
-Relevant source:
+**Rule:** `go/sql-injection` (CWE-89, High 8.8). The baseline SARIF traces `c.Param("schema")` and `c.Param("table")` through custom identifier quoting and `fmt.Sprintf` into `db.Raw(query, limit, offset)` at `backend/src/database_management/handlers.go:452`.
 
 ```go
 quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 query := fmt.Sprintf("SELECT * FROM %s.%s LIMIT ? OFFSET ?", quote(schema), quote(table))
-var rows []map[string]interface{}
-if err := db.Raw(query, limit, offset).Scan(&rows).Error; err != nil {
-    // Error handling omitted.
-}
 ```
 
-**Existing controls:**
+The original code escaped PostgreSQL identifiers, checked relation existence and bound pagination values. The alert alone did not prove conventional SQL injection. However, a valid quoted identifier containing `?` could interfere with GORM question-mark placeholder processing. Improving the query construction was warranted; an exploitable breakout from quoted identifiers was not established.
 
-- `handlers.go:46–52` registers the viewer endpoint under session and database view-permission middleware. `requireView` checks the database ID and permission at lines 133–147.
-- `handlers.go:428–435` performs a parameterized metadata existence check for the requested schema/table. This is useful validation but is not a substitute for identifier escaping.
-- `handlers.go:448` surrounds each identifier with double quotes and doubles embedded double quotes, consistent with PostgreSQL identifier syntax.
-- Pagination is passed as bound values and checked at lines 436–452.
-- `backend/src/database_management/provider.go`, `Provider.Target`, uses the PostgreSQL GORM driver in the supplied code. No alternative SQL dialect is established for this path.
+**Fix:** [b2cf56f — complete database viewer and enforce target isolation](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/commit/b2cf56f5a1bd4a54f5ec67f1ed976a968d732938). Inspected directly using the Git object because the documentation branch worktree does not yet include this commit. In `backend/src/database_management/viewer.go` at that revision:
 
-**Impact:** If an attacker could break out of the identifier context, the target database connection could execute unintended SQL, potentially exposing or modifying data subject to driver behavior and target database privileges. Database-level view authorization does not itself prevent SQL injection.
+- Lines 26–49: native pgx pool; read-only transaction; reserved ledger schema rejected; query/lock timeouts and restricted search path.
+- Lines 127–133: relation existence check with `$1` and `$2` value parameters.
+- Lines 136–149: pagination validated; schema and table quoted by `pgx.Identifier{schema, table}.Sanitize()`.
+- Lines 151–165: optional ordering keys derived from PostgreSQL catalog metadata using `quote_ident`, or a constant fallback.
+- Lines 166 and 180–182: native PostgreSQL pagination placeholders and driver argument binding via `textRows` and `tx.Query`.
 
-**Proposed decision: Candidate false positive, not yet approved.** The reported flow reaches a SQL sink but the query uses PostgreSQL identifier escaping. A syntactically valid identifier can still contain unusual characters, and the exact GORM placeholder-processing and PostgreSQL execution path has not been tested here. Prioritize verification because the rule is High severity.
+```go
+relation := pgx.Identifier{schema, table}.Sanitize()
+// Optional ORDER BY is built from quoted catalog identifiers or a fixed fallback.
+columns, data, err := textRows(ctx, tx, sql+" LIMIT $1 OFFSET $2", limit+1, offset)
+```
 
-**Verification plan:** Use a controlled PostgreSQL test database with ordinary and unusual schema/table identifiers (quotes, dots, question marks and whitespace). Confirm that only the intended table is queried, pagination remains correctly bound, invalid or nonexistent identifiers are rejected, and unauthorized database access fails. Verify that the SQL construction does not reinterpret identifier content as SQL syntax or placeholders. If the current implementation fails, replace it with a verified identifier construction and execution approach compatible with the driver, such as `pgx.Identifier.Sanitize()` with appropriate native parameter binding; add tests and re-scan. Do not use value placeholders as a substitute for SQL identifier quoting.
+SQL identifiers cannot be bound as ordinary SQL values. Established driver quoting preserves the identifier context; numeric pagination values are bound separately without the former GORM placeholder-processing ambiguity. The viewer retains authorization checks and relation validation; read-only execution limits persistent writes but is not a substitute for correct quoting or protection against unauthorized reads.
 
-- Final disposition: TODO — confirm false positive or implement a fix.
-- Test result / evidence: TODO.
-- Fix commit (if needed): TODO.
-- GitHub alert number and dismissal (if justified): TODO.
-- Re-scan result: TODO.
+**Regression coverage:** At `b2cf56f`, `backend/src/activity_integration_test.go`, `TestActivityLoggingThroughWorker`, subtest `registration protection and viewer` (435 onwards), creates unusual schema and table names containing slash, whitespace, question mark and a double quote (475–488). It asserts column metadata, denied access before ViewOnly permission (497–502), paging and exact result values (518–525), nonexistent table and reserved-schema rejection (528–529). These assertions are present in Git. The implementation history reports successful backend integration tests against disposable PostgreSQL 18.6 and desktop/mobile viewer checks. Execution output has not been provided.
 
-### 5.3 SAST-03 to SAST-06 — Log entries created from user input
+**Re-scan:** [run 46031632813](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions/runs/46031632813) is reported successful for `b2cf56f`; the later [run 46032617920](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions/runs/46032617920) is reported for `eaf4c3e`. Neither post-fix SARIF is available. Confirm whether #2 is fixed, and separately assess any new SQL alert on the native pgx query. A successful workflow is not sufficient proof of closure.
 
-All four results use `go/log-injection`, CWE-117, CodeQL problem severity `error`, precision `medium`, and a security score of 6.1. The potential weakness is insertion of forged or misleading log records by attacker-controlled input.
+### 6.3 SAST-03–06 — Route-template log injection (no source fix recommended)
 
-| ID | Source and sink | Context-specific assessment |
+**Rule:** `go/log-injection` (CWE-117, Medium 6.1). Unsafe plain-text logging could permit attacker-supplied control characters to create forged entries and impair incident response. The four baseline findings concern logging of Gin's `c.FullPath()`, which returns the registered route template, not the actual URL path with user-controlled substitutions. Unmatched routes can return an empty string. Route registration uses server-defined patterns.
+
+| Finding | Source-to-sink explanation | Why no fix is recommended |
 | --- | --- | --- |
-| SAST-03 | `telemetry/http.go:25` (`c.FullPath()`) → `route` → `slog.ErrorContext` at line 46 | Panic recovery logs the matched route pattern. The panic value and raw request URL are not the flagged input. |
-| SAST-04 | `telemetry/http.go:25` → `route` → `slog.Log` at line 74 | Request completion logs the matched route pattern. `httpMethod` at lines 80–88 restricts the method to known methods or `OTHER`. |
-| SAST-05 | `database_management/handlers.go:55` (`c.FullPath()` directly in `slog.WarnContext`) | Database request failure logs the route pattern; route parameters are not directly inserted by this expression. |
-| SAST-06 | `migration/http.go:133` (`c.FullPath()` directly in `slog.WarnContext`) | Migration request failure logs the route pattern, not the raw migration SQL or request body. |
+| SAST-03 / #7 | `c.FullPath()` → route variable → panic `slog` event in `internal/telemetry/http.go` | Registered template; raw path and panic payload are not the flagged attribute |
+| SAST-04 / #8 | `c.FullPath()` → route variable → HTTP completion `slog` event in `internal/telemetry/http.go` | Route parameters do not alter the template; method normalization is separate |
+| SAST-05 / #3 | `c.FullPath()` → `slog.WarnContext` in `database_management/handlers.go` | Logged route is a registered template, not the request database identifier |
+| SAST-06 / #6 | `c.FullPath()` → `slog.WarnContext` in `migration/http.go` | Logged route is a registered template, not submitted SQL or request body |
 
-The SARIF contains explicit code flows for SAST-03 and SAST-04; SAST-05 and SAST-06 contain a related source location but no separate code-flow list.
+For example, a request to `/databases/12345` matches `/databases/:id`; only the latter is logged as the route. `backend/src/internal/telemetry/log.go:63–77` configures `slog.NewJSONHandler`, so strings are JSON encoded rather than concatenated as plain-text log lines. The OTLP bridge emits structured records; verify downstream consumers independently if enabled. The fixed route template is the primary protection; JSON encoding is defense in depth.
 
-**Existing controls and reasoning:** Gin's `Context.FullPath()` represents the registered route template (or an empty string for an unmatched route), not the raw path containing attacker-controlled parameters. The supplied route registration code uses static templates. The local logger is configured with `slog.NewJSONHandler` in `backend/src/internal/telemetry/log.go:63–77`, which encodes string values in structured JSON. `main.go:31–32` installs the application logger; `internal/telemetry/export.go:44–58` optionally adds a structured OTLP logging bridge. The JSON encoding is a secondary control for the local sink and should not be assumed to prove every downstream exporter or viewer is safe.
+**Decision:** Retain useful route telemetry; recommend false-positive disposition for each of the four specific flows. Removing these records would reduce diagnostic value without fixing a demonstrated injection weakness. No rule suppression or additional source change is needed for these flows if the final alert details confirm the same source and sink.
 
-**Proposed decision for each of SAST-03, SAST-04, SAST-05 and SAST-06: Candidate false positive.** The specific flagged route expression is expected to be a server-defined string. Preserve useful telemetry rather than removing log statements just to silence the rule. Confirm that dynamic route registration or other application-specific behavior cannot introduce untrusted route templates. This decision is limited to the flagged `route` expressions; it does not certify every other log attribute.
+**Verification:** `backend/src/internal/telemetry/telemetry_test.go:63–127`, `TestHTTPLogging`, checks normal requests, panic, unmatched paths, registered template `/databases/:id`, parsed event count and absence of private request values. `TestOTLPPreservesLoggingPolicyAndCorrelation` in `internal/telemetry/export_test.go` checks the structured export path. Existing assertions do not by themselves prove control-character handling in all four failure paths. Capture focused test output for malicious route parameters, unmatched routes, panic, database failures and migration failures; ensure each record stays a single structured event. No execution result or formal dismissal is supplied.
 
-**Verification plan:** Exercise the actual Gin middleware and handlers with attacker-controlled route parameters (including encoded control characters where the server accepts them), unmatched routes, forced panic and normal completion, database request failures and migration failures. Capture structured logs; verify that route attributes equal registered templates or an empty value, every local log record parses as one JSON object, and no forged record appears. If OTLP is enabled, verify the bridge and downstream consumer preserve record boundaries and do not reinterpret strings unsafely.
+### 6.4 SAST-07–15 — Administrative identifier log injection (no source fix recommended)
 
-| ID | Required test evidence | Final disposition / alert reference |
+**Rule:** `go/log-injection` (CWE-117, Medium 6.1). The supplied implementation history associates nine new alerts with activity logging introduced by `d5e658a`. Administrative user, group and policy changes now emit structured audit events. Attacker-controlled text in such events could falsify attribution if logged without neutralization.
+
+The archived post-authentication source verifies the following nine argument paths. Each uses a typed `uuid.UUID` value (JSON bind errors return before logging), converted to its canonical representation by `.String()`, followed by `telemetry.ID`. The helper at `backend/src/internal/telemetry/log.go:40–47` accepts only 32- or 36-character strings that parse as UUIDs and returns an empty attribute otherwise. For these callers the value has already been canonicalized. The local JSON logger then encodes the attribute as a structured string.
+
+| Finding / reported alert | Value passed to `telemetry.ID` | Source and operation |
 | --- | --- | --- |
-| SAST-03 | TODO — panic log regression test | TODO |
-| SAST-04 | TODO — completion / unmatched-route regression test | TODO |
-| SAST-05 | TODO — database failure log regression test | TODO |
-| SAST-06 | TODO — migration failure log regression test | TODO |
+| SAST-07 / #17 | `telemetry.ID("affected_user_id", userQuery.ID.String())` | Typed UUID from account deactivation; `access_control/control_panel/users.go:156` |
+| SAST-08 / #11 | `telemetry.ID("group_id", userGroupPayload.GroupId.String())` | Typed UUID from membership addition; `access_control/control_panel/usergroups.go:77` |
+| SAST-09 / #12 | `telemetry.ID("affected_user_id", userGroupPayload.UserId.String())` | Typed UUID from membership addition; `access_control/control_panel/usergroups.go:78` |
+| SAST-10 / #13 | `telemetry.ID("group_id", userGroupPayload.GroupId.String())` | Typed UUID from membership removal; `access_control/control_panel/usergroups.go:116` |
+| SAST-11 / #14 | `telemetry.ID("affected_user_id", userGroupPayload.UserId.String())` | Typed UUID from membership removal; `access_control/control_panel/usergroups.go:117` |
+| SAST-12 / #15 | `telemetry.ID("group_id", leader.GroupId.String())` | Typed UUID from leader assignment; `access_control/control_panel/usergroups.go:206` |
+| SAST-13 / #16 | `telemetry.ID("affected_user_id", leader.LeaderId.String())` | Typed UUID from leader assignment; `access_control/control_panel/usergroups.go:207` |
+| SAST-14 / #9 | `telemetry.ID("group_id", policy.GroupId.String())` | Typed UUID from policy change; `access_control/control_panel/policy.go:145` |
+| SAST-15 / #10 | `telemetry.ID("database_id", policy.DatabaseId.String())` | Typed UUID from policy change; `access_control/control_panel/policy.go:145` |
 
-## 6. Remediation and triage tracking
+The user update payload, group membership payload and group policy payload all declare UUID-typed identifier fields. For leadership assignment, `GetLeaderStruct()` copies typed UUIDs into `models.GroupLeader`. `logPolicyChange` receives `GroupPolicyPayload` and logs its two UUID fields. Administrative routes are also protected by platform-admin middleware; authorization alone is not the reason these particular log arguments are safe.
 
-No security fix was implemented, committed, tested or re-scanned during preparation of this report. The initial scan SHA is not a remediation commit.
+```text
+HTTP JSON request → typed UUID decoding → canonical UUID string
+    → telemetry.ID validation → structured slog attribute → JSON / OTLP record
+```
 
-| ID | Proposed action | Final decision | Fix commit | Validation evidence | Status after re-scan |
-| --- | --- | --- | --- | --- | --- |
-| SAST-01 | Fix logout cookie attributes | Fix proposed; implementation pending | TODO | TODO | TODO |
-| SAST-02 | Verify SQL identifier handling; fix if unsafe | TODO | TODO / N/A if confirmed false positive | TODO | TODO |
-| SAST-03 | Verify route template and panic logging | TODO | TODO / N/A if confirmed false positive | TODO | TODO |
-| SAST-04 | Verify route template and request logging | TODO | TODO / N/A if confirmed false positive | TODO | TODO |
-| SAST-05 | Verify route template and database failure logging | TODO | TODO / N/A if confirmed false positive | TODO | TODO |
-| SAST-06 | Verify route template and migration failure logging | TODO | TODO / N/A if confirmed false positive | TODO | TODO |
+Canonical UUID text contains hexadecimal digits and hyphens, not arbitrary log prefixes or control characters. Consequently the user may select an identifier but cannot preserve arbitrary injected log text through these conversions. Existing audit logs should be retained to support accountability. The source-level justification is established for the listed arguments; precise post-authentication SARIF paths and GitHub alert numbers still require verification (especially the two policy arguments on the same line). The affected-user log moved to line 164 at `b2cf56f`; use fingerprints and exact arguments, not line numbers alone, when matching later scans.
 
-Once verification is complete, record the actual GitHub alert number and the final decision for every result. For a confirmed false positive, document the concrete control, test results and GitHub dismissal reason `False positive` (where the dashboard permits dismissal). For a valid weakness, fix it rather than dismissing the alert to make the dashboard green.
+**Decision:** Recommend false-positive disposition individually for SAST-07 through SAST-15, conditional on confirming the reported SARIF paths. No accepted risk or formal dismissal is claimed. If a later alert instead flags an unrestricted string, review it independently.
 
-### 6.1 Accepted risks
+**Verification:** Exercise the administrative endpoints with valid UUIDs and malformed UUID strings containing control characters; verify malformed inputs are rejected and successful events contain canonical IDs only. Check `telemetry.ID` directly for invalid strings, and verify structured event boundaries. The existing integration tests and reported test pass do not replace focused evidence of these exact paths.
 
-No accepted risk is claimed in this initial report. If a valid finding is intentionally not fixed, complete the following record:
+- TODO — add `evidence/repaired/false-positives/uuid-logging-tests.txt`.
+- TODO — capture individual alert details/dispositions for #9–#17 and preserve the post-authentication SARIF.
 
-| Field | Value |
-| --- | --- |
-| Finding ID / GitHub alert | TODO, if applicable |
-| Reason for accepting risk | TODO |
-| Compensating control and evidence | TODO |
-| Residual impact and likelihood | TODO |
-| Risk owner / approval | TODO |
-| Revisit date | TODO |
-| GitHub disposition | TODO |
+### 6.5 Consolidated decisions
 
-### 6.2 Test and build verification
+| Category | Count | Status |
+| --- | ---: | --- |
+| Source-level corrections | 2 | Cookie and SQL construction verified in Git; post-fix closure evidence pending |
+| Route-template false-positive recommendations | 4 | Source review completed; final disposition pending |
+| UUID log false-positive recommendations | 9 | Source review completed; later SARIF mapping and final disposition pending |
+| Accepted risks | 0 | None claimed |
+| **Distinct findings reported across the first two stages** | **15** | 6 baseline verified + 9 later reported; not a current open-alert count |
 
-| Command / check | Initial evidence | After remediation |
-| --- | --- | --- |
-| `cd backend/src && go build ./...` | Completed during CodeQL job | TODO |
-| `cd backend/src && go vet ./...` | Not established by supplied logs | TODO |
-| `cd backend/src && go test ./...` | Not established by supplied logs | TODO |
-| `cd frontend && npm ci` | Not required by this CodeQL job | TODO |
-| `cd frontend && npm run lint` | Not established by supplied logs | TODO |
-| `cd frontend && npm test` (or CI run mode) | Not established by supplied logs | TODO |
-| `cd frontend && npm run build` | Not established by supplied logs | TODO |
-| Focused cookie, SQL and logging tests | Not run for this report | TODO |
+For a confirmed false positive, select **False positive** on the corresponding GitHub alert and record the reasoning from Section 6.3 or 6.4, reviewer and date. Do not dismiss real weaknesses or disable rules. If an accepted risk is identified later, document the residual impact, compensating control, approval/owner and revisit date. No accepted risk is needed for the current proposed dispositions.
 
-A successful CodeQL analysis is not equivalent to passing application tests.
+## 7. Re-scan results and evidence
 
-## 7. Re-scan and final evidence
+### 7.1 Scan history and comparison
 
-After implementing required fixes and completing triage, push to a branch containing the CodeQL workflow and matching its trigger filters. Prefer a full push scan of the same integration branch and query configuration for a comparable baseline.
+The baseline is verified from raw artifacts and a screenshot. Later workflow success and the intermediate dashboard counts are reported by the supplied implementation history, not independently verified against GitHub or post-fix artifacts. Keep raw SARIF results distinct from dashboard open/fixed/dismissed states; a dismissed result can still appear in raw SARIF.
 
-| Metric | Initial scan | Post-remediation scan |
-| --- | --- | --- |
-| Run URL | [46012284127](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions/runs/46012284127) | TODO |
-| Branch | `feat/integrate` | TODO |
-| SHA | `e68735b2d9dae5efd4ae1c4b3a27fc94eca76e47` | TODO |
-| Date | 2026-11-27 | TODO |
-| CodeQL version | 2.27.6 | TODO |
-| Query suite | Default + `security-extended` | TODO |
-| Go raw SARIF findings | 6 | TODO |
-| JavaScript raw SARIF findings | 0 | TODO |
-| High / Medium raw findings | 1 / 5 | TODO |
-| Confirmed fixed alerts | Not yet verified | TODO |
-| Confirmed false-positive dismissals | Not yet verified | TODO |
-| Approved accepted risks | None claimed | TODO |
-| Newly introduced alerts | Not applicable to baseline | TODO |
-| Go coverage | 55 / 65 expected Go files | TODO |
+| Stage | Commit | Workflow run | Evidence status |
+| --- | --- | --- | --- |
+| Initial | `e68735b` | [46012284127](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions/runs/46012284127) | Verified: both jobs successful; SARIF and logs supplied |
+| After authentication | `065c750` | [46027462987](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions/runs/46027462987) | Reported successful; TODO artifacts and dashboard evidence |
+| After database viewer | `b2cf56f` | [46031632813](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions/runs/46031632813) | Reported successful; TODO artifacts and dashboard evidence |
+| Subsequent README update | `eaf4c3e` | [46032617920](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions/runs/46032617920) | Reported successful; TODO artifacts, SHA and dashboard evidence |
 
-A false-positive dismissal may change the GitHub dashboard state without removing the corresponding result from a later raw SARIF file. Report raw findings and dashboard dispositions separately. Match each finding using its rule, code location and, where available, SARIF fingerprint or GitHub alert number; do not rely only on aggregate counts.
+| Metric | Initial (verified) | After authentication (reported dashboard) | After viewer (pending) | Latest (pending) |
+| --- | ---: | ---: | --- | --- |
+| Open cookie alerts | 1 | 0 | TODO | TODO |
+| Open SQL injection alerts | 1 | 1 | TODO | TODO |
+| Open log injection alerts | 4 | 13 | TODO | TODO |
+| Total open alerts | 6 | 14 | TODO | TODO |
+| Total closed alerts | 0 | TODO | TODO | TODO |
+| Raw Go SARIF findings | 6 | TODO | TODO | TODO |
+| Raw JS/TS SARIF findings | 0 | TODO | TODO | TODO |
+| Verified fixed alerts | 0 | TODO (#1 reported no longer open) | TODO (#2) | TODO |
+| Verified false-positive dismissals | 0 | TODO | TODO | TODO |
+| New findings since previous stage | N/A | 9 log injection (reported) | TODO | TODO |
+| CodeQL version | 2.27.6 | TODO | TODO | TODO |
+| Go extraction coverage | 55/65 files | TODO | TODO | TODO |
+| Go LOC / JS user LOC | 8,209 / 6,768 | TODO | TODO | TODO |
+| Scan date (UTC) | 2026-11-27 | TODO | TODO | TODO |
 
-### 7.1 Evidence collection instructions
+The increase from six to fourteen open findings is explained by one reported cookie closure and nine new reported logging alerts. It is not an independently verified change in exploitability. Do not assume the later raw SARIF count is 13 or that all false positives have been dismissed.
 
-1. Open the [Actions page](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions), choose the new CodeQL SAST run, and confirm both language jobs succeeded.
-2. From the run Summary, download both SARIF artifacts and the workflow logs. Save them under `docs/security/evidence/rescan/`; record actual filenames, URLs, commit SHA, version and date.
-3. Open [Code scanning](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/security/code-scanning) and filter to the scanned branch (`feat/integrate` for the baseline). Review alert dispositions and [tool coverage](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/security/code-scanning/tools/CodeQL/status/).
-4. Complete the tracking table and verify the required fixes are absent in the re-scan, not merely hidden by a filter. Document new findings and remaining coverage gaps.
-5. Add screenshots and commit links.
+### 7.2 Where to store supporting evidence
 
-Optional GitHub CLI commands (replace `RUN_ID` with the real re-scan ID; authentication and repository permissions are required):
+Use the existing `docs/evidence/repaired/` directory from the supplied `docs.zip`. Keep `initial/` unchanged. Create the subdirectories below when the relevant evidence is available. Suggested artifact names use the reported run IDs and assume attempt 1; use the actual downloaded names/run attempts and update links if different. Do not create empty SARIF files or fake screenshots. Paths are relative to the repository root.
+
+```text
+docs/
+├── sast-codeql.md
+└── evidence/
+    ├── initial/                         # existing verified baseline archives and screenshots
+    └── repaired/
+        ├── authentication/              # run 46027462987
+        │   ├── codeql-go-46027462987-1.zip
+        │   ├── codeql-javascript-typescript-46027462987-1.zip
+        │   ├── workflow-logs.zip
+        │   ├── workflow-summary.png
+        │   ├── dashboard.png
+        │   ├── alert-1-fixed.png
+        │   └── backend-tests.txt
+        ├── database-viewer/             # run 46031632813
+        │   ├── codeql-go-46031632813-1.zip
+        │   ├── codeql-javascript-typescript-46031632813-1.zip
+        │   ├── workflow-logs.zip
+        │   ├── workflow-summary.png
+        │   ├── alert-2-status.png
+        │   └── backend-tests.txt
+        ├── false-positives/
+        │   ├── route-logging-tests.txt
+        │   ├── uuid-logging-tests.txt
+        │   └── alert-<number>.png        # one for each of 3, 6, 7, 8, 9–17
+        └── final/                       # run 46032617920 or newer final run
+            ├── codeql-go-46032617920-1.zip
+            ├── codeql-javascript-typescript-46032617920-1.zip
+            ├── workflow-logs.zip
+            ├── workflow-summary.png
+            ├── open-alerts.png
+            ├── closed-alerts.png
+            ├── alerts.json
+            └── coverage.png
+```
+
+The following placeholders are the intended insertion points for supporting evidence. Uncomment or convert to Markdown links only after saving the actual file. Keep evidence screenshots readable and include the branch filter, alert number and disposition where relevant.
+
+| Evidence to add | Target path relative to this report | Supports | Status |
+| --- | --- | --- | --- |
+| Authentication workflow screenshot | `evidence/repaired/authentication/workflow-summary.png` | Run success and commit | TODO |
+| Authentication dashboard screenshot | `evidence/repaired/authentication/dashboard.png` | Reported 14 open alerts | TODO |
+| Cookie closure screenshot | `evidence/repaired/authentication/alert-1-fixed.png` | SAST-01 | TODO |
+| Authentication SARIF and logs | `evidence/repaired/authentication/` | SAST-01 closure and nine new alerts | TODO |
+| Viewer workflow screenshot | `evidence/repaired/database-viewer/workflow-summary.png` | SQL correction re-scan | TODO |
+| SQL alert detail | `evidence/repaired/database-viewer/alert-2-status.png` | SAST-02 fixed/open/new flow | TODO |
+| Viewer SARIF and logs | `evidence/repaired/database-viewer/` | SAST-02 re-scan | TODO |
+| Individual false-positive alert details and dismissal reason | `evidence/repaired/false-positives/alert-<number>.png` | SAST-03–15 | TODO for each |
+| Focused test logs | `evidence/repaired/authentication/backend-tests.txt`, `evidence/repaired/database-viewer/backend-tests.txt`, `evidence/repaired/false-positives/` | Regression and data-flow justifications | TODO |
+| Final SARIF, logs and screenshots | `evidence/repaired/final/` | Final raw results, dashboard state, coverage | TODO |
+
+<!-- Insert the evidence here after adding the files:
+![Authentication workflow](evidence/repaired/authentication/workflow-summary.png)
+![Cookie alert fixed](evidence/repaired/authentication/alert-1-fixed.png)
+![Viewer workflow](evidence/repaired/database-viewer/workflow-summary.png)
+![SQL alert status](evidence/repaired/database-viewer/alert-2-status.png)
+![Final open alerts](evidence/repaired/final/open-alerts.png)
+![Final closed alerts](evidence/repaired/final/closed-alerts.png)
+![Final extraction coverage](evidence/repaired/final/coverage.png)
+-->
+
+### 7.3 Evidence collection and disposition checklist
+
+1. Open each linked Actions run, confirm both matrix jobs and upload status, download both language artifacts and the workflow logs. Record `metadata.json` values (SHA, branch/ref, timestamp, version and query suite).
+2. Open [Code scanning](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/security/code-scanning), filter to `feat/integrate`, and inspect #1 and #2 under both open and closed states. Capture their actual fixed/dismissed status and relevant code flow.
+3. Match all thirteen proposed false positives to their alert detail, including the two policy arguments at the same line. Record the reviewer, decision, date and supporting test. Only dismiss as `False positive` once the exact flow is verified.
+4. Update the latest counts, extraction coverage and all statuses above. If the SQL query correction introduces a new result, add a separate finding with its own decision and evidence. If more recent commits exist, use a final full branch scan with the same query configuration.
+5. Preserve logs after checking for secrets and sensitive data. Do not commit `.env` or database credentials.
+
+Optional GitHub CLI commands (run with repository access; replace `RUN_ID` with the actual run ID and use the corresponding evidence directory):
 
 ```bash
-gh run list --repo Celtors/IF3110_K03_09_RuangSuara_v2 --branch feat/integrate
-gh run view RUN_ID --repo Celtors/IF3110_K03_09_RuangSuara_v2 --log
+gh run view RUN_ID --repo Celtors/IF3110_K03_09_RuangSuara_v2 --log > workflow-log.txt
 gh run download RUN_ID --repo Celtors/IF3110_K03_09_RuangSuara_v2 --pattern 'codeql-*'
-gh api --paginate 'repos/Celtors/IF3110_K03_09_RuangSuara_v2/code-scanning/alerts?ref=refs/heads/feat/integrate&per_page=100'
+gh api --paginate --slurp 'repos/Celtors/IF3110_K03_09_RuangSuara_v2/code-scanning/alerts?ref=refs/heads/feat/integrate&per_page=100' > alerts.json
 ```
 
-- TODO: Post-remediation workflow screenshot.
-- TODO: Post-remediation SARIF/log evidence links.
-- TODO: Alert detail / closure or justified dismissal screenshots.
-- TODO: Final reviewer approval and date.
+`gh run download` extracts artifacts into directories; if preserving the exact ZIP filenames above, download the original archives through the web UI. Keep the actual download format and update the evidence references accordingly.
+
+### 7.4 Regression testing status
+
+| Validation | Evidence/status |
+| --- | --- |
+| Baseline `go build ./...` | Verified successful in initial CodeQL logs |
+| Session integration tests | Assertions verified in source; implementation history reports pass; TODO execution output |
+| Viewer integration tests (unusual identifiers, pagination, authorization) | Assertions verified at `b2cf56f`; implementation history reports pass; TODO execution output |
+| HTTP and OTLP telemetry tests | Existing test code verified; TODO focused execution output |
+| UUID log-injection regression checks | TODO targeted test / output |
+| Desktop/mobile browser checks | Reported successful; TODO screenshots or test notes |
+| Backend `go vet ./...` and full `go test ./...` | TODO exact commands, test configuration and outputs |
+| Frontend lint/test/build | TODO outputs if used as regression evidence; not established by CodeQL |
+
+No tests were executed and no repository source changes, GitHub dismissals or live scans were performed in preparing this updated report. The evidence of implementation is Git source inspection; the evidence of later runtime behavior remains to be attached. Record final reviewer and date: **TODO**.
 
 ## 8. Limitations and conclusion
 
-The supplied evidence demonstrates that CodeQL SAST is enabled and successfully analyzed the Go and JavaScript/JSX code on `feat/integrate`. Six backend findings were reported, including one High-severity SQL injection candidate and five Medium-severity findings. No frontend findings were reported. Source review suggests one cookie configuration fix and five potential false positives that require verification; none is claimed as remediated or formally dismissed.
+CodeQL SAST is enabled and the initial scan successfully analyzed the Go backend and JavaScript/JSX frontend. It reported six backend findings (one High, five Medium) and no frontend findings. Later work corrected cookie configuration and replaced the database viewer's SQL construction; these two changes are verified in commits `d5e658a` and `b2cf56f`. Thirteen log-injection findings (four baseline and nine subsequently reported) have specific source-based justifications for retaining route-template and canonical UUID logging. These are recommended false positives, not formally verified GitHub dismissals.
 
-Static analysis is limited by extraction coverage, query scope, framework modeling and available code. It cannot by itself establish runtime configuration safety, correct business logic and authorization design, dependency CVE coverage, or resistance to dynamic attacks. In particular, the ten missing Go test files and the absence of frontend findings must not be interpreted as complete security assurance. Dependency analysis, dynamic testing and manual security review are complementary activities.
+The remaining submission requirements are to attach post-fix SARIF and logs, establish the final state of the cookie and SQL alerts, verify each logging disposition and its test evidence, and record final extraction coverage. The archived documentation branch must also be integrated with the database viewer fix if it is to represent the final implementation. Neither the final open-alert count nor the raw result count is inferred from a green workflow.
 
-**A clean CodeQL result does not prove that the application is secure.** The assignment's remediation and re-scan requirements remain open until the TODO entries are completed with real evidence.
+CodeQL is limited by query coverage, extraction and framework modeling. The baseline missed ten expected Go test files; zero frontend findings are not proof of frontend safety. Runtime configuration, business logic and authorization design, dependency CVEs and dynamic attack behavior require complementary review and testing. **A clean CodeQL result does not prove that the application is secure.**
 
 ## References
 
 - [OWASP — Static Application Security Testing](https://owasp.org/www-community/Source_Code_Analysis_Tools)
-- [CodeQL query help — Go](https://codeql.github.com/codeql-query-help/go/)
-- [Initial workflow run](https://github.com/Celtors/IF3110_K03_09_RuangSuara_v2/actions/runs/46012284127)
-- Primary evidence: supplied Go and JavaScript SARIF archives, workflow logs and repository source snapshot, as identified in Section 3.
+- [CodeQL — Secure cookie attribute](https://codeql.github.com/codeql-query-help/go/go-cookie-secure-not-set/)
+- [CodeQL — SQL injection](https://codeql.github.com/codeql-query-help/go/go-sql-injection/)
+- [CodeQL — Log injection](https://codeql.github.com/codeql-query-help/go/go-log-injection/)
+- [GitHub — Resolving code scanning alerts](https://docs.github.com/en/code-security/how-tos/manage-security-alerts/manage-code-scanning-alerts/resolve-alerts)
+- [PostgreSQL pgx driver](https://pkg.go.dev/github.com/jackc/pgx/v5)
+- [Go structured logging](https://pkg.go.dev/log/slog)
+- [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+- Primary evidence: original SARIF/log archives and screenshots in `docs/evidence/initial/`; supplied repository Git objects and remediation history (later scan claims pending evidence).
+
+- New repaired alert evidence
+![New Repaired Alert](./evidence/repaired/repaired-alert.png)
