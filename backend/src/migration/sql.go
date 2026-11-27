@@ -11,6 +11,10 @@ import (
 // Parse SQL and reject unsupported or unsafe statements.
 // Migration must control its own transactions and database settings.
 func parseSQL(sql string, plan bool) ([]map[string]any, error) {
+	if strings.Contains(strings.ToLower(sql), "dmp_batch") {
+		return nil, fault("unsupported_sql", "The internal batch ledger is reserved")
+	}
+
 	if len(sql) > 256*1024 || strings.TrimSpace(sql) == "" {
 		return nil, fault("invalid_sql", "SQL must contain 1 to 262144 bytes")
 	}

@@ -8,6 +8,7 @@ import (
 
 	"backend/internal/telemetry"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -86,6 +87,7 @@ func (r *Review) runWorker(ctx context.Context, cfg WorkerConfig) {
 
 // drain starts requests until the queue has nothing runnable or the worker is full.
 func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.WaitGroup) {
+	attempted := map[string]bool{}
 	for ctx.Err() == nil {
 		select {
 		case sem <- struct{}{}:
@@ -93,6 +95,9 @@ func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.Wai
 			return
 		}
 		q, err := r.repo().claim(ctx, r.revalidate)
+		if err == nil && q == nil {
+			q, err = r.nextBatch(ctx, attempted)
+		}
 		if err != nil {
 			<-sem
 			if ctx.Err() == nil {
@@ -104,9 +109,15 @@ func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.Wai
 			<-sem
 			return
 		}
+		attempted[q.ID] = true
+		if _, loaded := r.inflight.LoadOrStore(q.ID, struct{}{}); loaded {
+			<-sem
+			return
+		}
 		running.Add(1)
 		go func(q QueuedRequest) {
 			defer running.Done()
+			defer r.inflight.Delete(q.ID)
 			defer func() { <-sem }()
 			// Shutdown must not abort SQL halfway: the request gets its own context and
 			// the worker waits for it. A killed process is handled by recoverInterrupted.
@@ -175,24 +186,54 @@ func (r *Review) revalidate(ctx context.Context, q QueuedRequest) (bool, string,
 	return true, "", "", nil
 }
 
-// process executes one claimed request and records its outcome.
+// process executes a fresh claim or reloads a running batch from durable state.
 func (r *Review) process(ctx context.Context, q QueuedRequest) {
-	// Carry only the claim's span identity onto the worker's own context.
-	ctx = trace.ContextWithSpanContext(q.logContext(ctx), q.claimSpan)
+	ctx = q.logContext(ctx)
+	if q.claimSpan.IsValid() {
+		ctx = trace.ContextWithSpanContext(ctx, q.claimSpan)
+	} else {
+		ctx = q.queueTrace.Extract(ctx)
+	}
 	ctx, span := telemetry.Start(ctx, "worker.process")
 	defer telemetry.EndSpan(span)
+	if _, e := loadBatch(ctx, r.repo().Pool, q.ID); e == nil {
+		outcome, err := r.processBatch(ctx, q)
+		span.SetAttributes(attribute.String("outcome", outcome))
+		traceMigrationError(span, err)
+		return
+	} else if !isNoRows(e) {
+		span.SetAttributes(attribute.String("outcome", "dispatch_failed"))
+		telemetry.SpanError(span, e)
+		slog.LogAttrs(ctx, slog.LevelWarn, "queue.dispatch", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
+		return
+	}
 	slog.InfoContext(ctx, "queue.execution_started", "status", "running")
-	r.inflight.Store(q.ID, struct{}{})
-	defer r.inflight.Delete(q.ID)
 
 	var attemptID string
-	attempt, err := r.Service.executeOperation(ctx, q.RequestedBy, q.DatabaseID, q.MigrationID, q.Operation, func(attemptCtx context.Context, a Attempt) {
+	attempt, err := r.Service.executeOperation(ctx, q.RequestedBy, q.DatabaseID, q.MigrationID, q.Operation, func(ctx context.Context, c *pgxpool.Conn) error {
+		var valid bool
+		if e := c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests WHERE id=$1 AND status='running' AND started_at=$2 AND attempt_id IS NULL)`, q.ID, q.startedAt).Scan(&valid); e != nil {
+			return e
+		}
+		if !valid {
+			return fault("stale_job", "Claim was recovered by another worker")
+		}
+		return nil
+	}, func(attemptCtx context.Context, a Attempt) error {
 		attemptID = a.ID
 		clean, cancel := cleanupContext(attemptCtx)
 		defer cancel()
-		if e := r.repo().linkAttempt(clean, q.ID, a.ID); e != nil {
-			slog.LogAttrs(clean, slog.LevelWarn, "queue.link_attempt", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
+		if sqlHash(a.SQL) != q.SQLHash {
+			return fault("conflict", "Approved SQL changed")
 		}
+		ok, code, message, e := r.revalidate(clean, q)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			return fault(code, message)
+		}
+		return r.repo().linkAttempt(clean, q.ID, a.ID)
 	})
 
 	if attemptID != "" {
@@ -203,6 +244,9 @@ func (r *Review) process(ctx context.Context, q QueuedRequest) {
 	if err != nil {
 		traceMigrationError(span, err)
 		code, message = faultInfo(err)
+		if code == "stale_job" || (attemptID == "" && attempt.ID != "") {
+			return
+		}
 		status = RequestFailed
 		// The attempt exists but its outcome could not be confirmed: keep the request
 		// unresolved until recovery learns what the target did.
@@ -217,7 +261,7 @@ func (r *Review) process(ctx context.Context, q QueuedRequest) {
 
 	clean, cancel := cleanupContext(ctx)
 	defer cancel()
-	if err = r.repo().finishRequest(clean, q.ID, status, code, message, attemptID); err != nil {
+	if err = r.repo().finishRequest(clean, q.ID, status, code, message, attemptID, q.startedAt); err != nil {
 		// The request stays running; recoverInterrupted settles it from the attempt record.
 		span.SetAttributes(attribute.String("outcome", "record_failed"))
 		telemetry.SpanError(span, err)
@@ -273,22 +317,46 @@ func (r *Review) recoverOne(ctx context.Context, q InFlightRequest) {
 	ctx, span := telemetry.Start(ctx, "queue.recover")
 	defer telemetry.EndSpan(span)
 	span.SetAttributes(attribute.String("outcome", "failed"))
+
+	lock, release, e := r.repo().lock(ctx, q.DatabaseID)
+	if e != nil {
+		span.SetAttributes(attribute.String("outcome", "lock_unavailable"))
+		traceMigrationError(span, e)
+		return
+	}
+	defer release()
+	var current bool
+	e = lock.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests
+ WHERE id=$1 AND status=$2 AND started_at=$3)`, q.ID, q.Status, q.StartedAt).Scan(&current)
+	if e != nil {
+		telemetry.SpanError(span, e)
+		slog.LogAttrs(ctx, slog.LevelWarn, "queue.recovery_check", telemetry.ErrorAttrs(e)...)
+		return
+	}
+	if !current {
+		span.SetAttributes(attribute.String("outcome", "stale"))
+		return
+	}
 	slog.InfoContext(ctx, "queue.recovery", "status", "started")
-	attemptID, status, code, message, err := r.repo().attemptFor(ctx, q)
+	attemptID, status, code, message, err := r.repo().attemptFor(ctx, lock, q)
 	if err != nil {
 		telemetry.SpanError(span, err)
 		slog.LogAttrs(ctx, slog.LevelWarn, "queue.find_attempt", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		return
 	}
 	if status == "running" || status == "unknown" {
-		// Ask the target database what happened to the interrupted transaction.
-		if e := r.Service.Reconcile(ctx, q.RequestedBy, q.DatabaseID); e != nil {
+		// Settle recorded transaction evidence even if the requester has lost Edit.
+		pool, e := r.Service.connection(ctx, q.DatabaseID)
+		if e == nil {
+			e = r.Service.reconcileLocked(ctx, lock, pool, q.DatabaseID)
+		}
+		if e != nil {
 			traceMigrationError(span, e)
 			if c, _ := faultInfo(e); c != "indeterminate" && c != "conflict" {
 				slog.LogAttrs(ctx, slog.LevelWarn, "queue.reconcile", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
 			}
 		}
-		attemptID, status, code, message, err = r.repo().attemptFor(ctx, q)
+		attemptID, status, code, message, err = r.repo().attemptFor(ctx, lock, q)
 		if err != nil {
 			telemetry.SpanError(span, err)
 			slog.LogAttrs(ctx, slog.LevelWarn, "queue.find_attempt", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
@@ -317,7 +385,17 @@ func (r *Review) recoverOne(ctx context.Context, q InFlightRequest) {
 			span.SetAttributes(attribute.String("outcome", "attempt_missing"))
 			return
 		}
-		finalStatus, code, message = RequestFailed, "interrupted", "The worker stopped before the migration started. Submit a new change request"
+		_, err = lock.Exec(clean, `UPDATE dmp_migration.change_requests SET status='queued',started_at=NULL
+ WHERE id=$1 AND status='running' AND started_at=$2 AND attempt_id IS NULL`, q.ID, q.StartedAt)
+		if err != nil {
+			telemetry.SpanError(span, err)
+			slog.LogAttrs(ctx, slog.LevelError, "queue.requeue", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
+		} else {
+			span.SetAttributes(attribute.String("outcome", "requeued"))
+			slog.InfoContext(ctx, "queue.requeue", "status", "queued")
+			r.notify()
+		}
+		return
 	default: // still running or unknown on the target
 		if q.Status == RequestUnknown {
 			span.SetAttributes(attribute.String("outcome", "unknown"))
@@ -325,7 +403,7 @@ func (r *Review) recoverOne(ctx context.Context, q InFlightRequest) {
 		}
 		finalStatus, code, message = RequestUnknown, "indeterminate", "The outcome on the target database is unresolved; an operator must reconcile it"
 	}
-	if err = r.repo().finishRequest(clean, q.ID, finalStatus, code, message, attemptID); err != nil {
+	if err = r.repo().finishRequest(clean, q.ID, finalStatus, code, message, attemptID, q.StartedAt); err != nil {
 		telemetry.SpanError(span, err)
 		slog.LogAttrs(ctx, slog.LevelError, "queue.recovery", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		return

@@ -45,6 +45,10 @@ var consoleBlockedPrefixes = []string{
 // parseConsoleSQL validates one ad-hoc statement for the user's permission and
 // returns its pg_query node kind (used only for audit logging).
 func parseConsoleSQL(sql string, permission Permission) (string, error) {
+	if strings.Contains(strings.ToLower(sql), "dmp_batch") {
+		return "", fault("unsupported_sql", "The internal batch ledger is reserved")
+	}
+
 	if permission < View || permission > Edit {
 		return "", fault("forbidden", "You do not have the required database permission")
 	}

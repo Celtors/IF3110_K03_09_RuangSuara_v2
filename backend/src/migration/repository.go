@@ -22,6 +22,9 @@ var storageSQL string
 //go:embed review.sql
 var reviewSQL string
 
+//go:embed batch.sql
+var batchSQL string
+
 type Repository struct{ Pool *pgxpool.Pool }
 
 // Initialize creates the migration tables, then the change request workflow tables that depend on them.
@@ -29,7 +32,10 @@ func (r *Repository) Initialize(ctx context.Context) error {
 	if _, err := r.Pool.Exec(ctx, storageSQL); err != nil {
 		return err
 	}
-	_, err := r.Pool.Exec(ctx, reviewSQL)
+	if _, err := r.Pool.Exec(ctx, reviewSQL); err != nil {
+		return err
+	}
+	_, err := r.Pool.Exec(ctx, batchSQL)
 	return err
 }
 func newID() string {
@@ -251,8 +257,8 @@ func beginAttempt(ctx context.Context, c *pgxpool.Conn, definition Migration, us
 
 	err = tx.QueryRow(ctx, `
  INSERT INTO dmp_migration.attempts
-     (id,migration_id,database_id,operation,reverses_execution_id,sql_script_snapshot,executor_user_id,status)
- VALUES ($1,$2,$3,$4,$5,$6,$7,'running')
+     (id,migration_id,database_id,operation,reverses_execution_id,sql_script_snapshot,executor_user_id,status,target_identity)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,'running','pending')
  RETURNING started_at, (SELECT version FROM dmp_migration.definitions WHERE id=$2)`,
 		attempt.ID, attempt.MigrationID, attempt.DatabaseID, operation, reversesExecutionID, sql, user,
 	).Scan(&attempt.Started, &attempt.migrationVersion)

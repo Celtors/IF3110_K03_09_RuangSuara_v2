@@ -148,7 +148,8 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 	if r.Approvers == nil {
 		return ChangeRequest{}, fault("database_unavailable", "Approver lookup is unavailable")
 	}
-	if _, err := r.Service.connection(ctx, db); err != nil {
+	pool, err := r.Service.connection(ctx, db)
+	if err != nil {
 		return ChangeRequest{}, err
 	}
 
@@ -161,6 +162,40 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 	if err != nil {
 		return ChangeRequest{}, err
 	}
+	var batch *BatchSpec
+	var downHash string
+	if in.Mode != "" && in.Mode != "normal" && in.Mode != "batch" {
+		return ChangeRequest{}, fault("invalid_input", "mode must be normal or batch")
+	}
+	if in.Mode == "batch" || in.BatchAttribute != "" || in.BatchSize != 0 {
+		if in.Operation != OperationApply || in.Mode == "normal" {
+			return ChangeRequest{}, fault("invalid_input", "Batch mode supports apply only")
+		}
+		spec := BatchSpec{in.BatchAttribute, in.BatchSize}
+		b, e := parseBatch(sql, spec)
+		if e != nil {
+			return ChangeRequest{}, e
+		}
+		if e = b.validate(ctx, pool); e != nil {
+			return ChangeRequest{}, e
+		}
+		batch = &spec
+		if !m.Irreversible {
+			if inverseBatchSQL(m.SQLUp, m.SQLDown, spec) {
+				downHash = sqlHash(m.SQLDown)
+			}
+		}
+	} else if in.Operation != OperationApply {
+		replay, e := completedBatchReplay(ctx, r.repo().Pool, m, in.Operation)
+		if e != nil {
+			return ChangeRequest{}, e
+		}
+		if replay == nil && batchPattern.MatchString(sql) {
+			return ChangeRequest{}, fault("invalid_input", "Parameterized SQL requires a recorded batch scope")
+		}
+	} else if batchPattern.MatchString(sql) {
+		return ChangeRequest{}, fault("invalid_input", "Parameterized batch SQL requires batch mode")
+	}
 	approvers, err := r.Approvers.RequiredApprovers(ctx, db)
 	if err != nil {
 		return ChangeRequest{}, err
@@ -170,7 +205,7 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 	}
 
 	return r.repo().insertRequest(ctx, ChangeRequest{
-		ID: newID(), DatabaseID: db, MigrationID: m.ID, Operation: in.Operation,
+		ID: newID(), DatabaseID: db, MigrationID: m.ID, Operation: in.Operation, Batch: batch, CompensationSQLHash: downHash,
 		SQLHash: sqlHash(sql), RequestedBy: user, submissionCorrelationID: telemetry.CorrelationID(ctx),
 	}, approvers)
 }
@@ -203,8 +238,8 @@ func (r *Review) Decide(ctx context.Context, user, db, id string, approve bool, 
 		if err != nil {
 			return ChangeRequest{}, err
 		}
-		if sqlHash(rawSQL(m, q.Operation)) != q.SQLHash {
-			return ChangeRequest{}, fault("conflict", "The migration SQL changed after this request was submitted. Cancel it and submit a new request")
+		if sqlHash(rawSQL(m, q.Operation)) != q.SQLHash || (q.CompensationSQLHash != "" && (m.Irreversible || sqlHash(m.SQLDown) != q.CompensationSQLHash)) {
+			return ChangeRequest{}, fault("conflict", "The approved SQL changed; cancel and submit a new request")
 		}
 	}
 

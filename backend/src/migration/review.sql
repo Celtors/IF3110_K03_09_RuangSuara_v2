@@ -63,22 +63,38 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_requests (
     completed_at  timestamptz,
     CHECK (status NOT IN ('queued','running','succeeded','failed','unknown') OR approved_at IS NOT NULL),
     CHECK (status NOT IN ('queued','running','succeeded','failed','unknown') OR queued_at IS NOT NULL),
-    CHECK (status NOT IN ('running','succeeded','failed','unknown') OR started_at IS NOT NULL),
+    CONSTRAINT request_started_required CHECK (status NOT IN ('running','succeeded','failed','unknown') OR started_at IS NOT NULL),
     -- attempt_id is linked as soon as ExecuteOperation creates the attempt; a request can
     -- fail before that point (revalidation, ordering, unavailable target), so only
     -- outcomes that ran SQL require it.
-    CHECK (status NOT IN ('succeeded','unknown') OR attempt_id IS NOT NULL),
+    CONSTRAINT request_attempt_required CHECK (status NOT IN ('succeeded','unknown') OR attempt_id IS NOT NULL),
     CHECK (status NOT IN ('succeeded','failed','rejected','cancelled') OR completed_at IS NOT NULL)
 );
 
--- Older requests use their job ID as the correlation ID when read by a worker.
+-- Upgrade earlier bootstrap schemas without discarding approval history.
 ALTER TABLE dmp_migration.change_requests
-ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '';
-
--- W3C context from final approval. Empty values support existing queue entries.
-ALTER TABLE dmp_migration.change_requests
-ADD COLUMN IF NOT EXISTS traceparent text NOT NULL DEFAULT '',
-ADD COLUMN IF NOT EXISTS tracestate text NOT NULL DEFAULT '';
+    ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS traceparent text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS tracestate text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS result_code text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS result_message text NOT NULL DEFAULT '';
+DO $$ DECLARE con record; BEGIN
+    FOR con IN SELECT conname FROM pg_constraint
+        WHERE conrelid='dmp_migration.change_requests'::regclass AND contype='c'
+            AND pg_get_constraintdef(oid) LIKE '%started_at%'
+            AND pg_get_constraintdef(oid) LIKE '%attempt_id%'
+    LOOP
+        EXECUTE format('ALTER TABLE dmp_migration.change_requests DROP CONSTRAINT %I', con.conname);
+    END LOOP;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='dmp_migration.change_requests'::regclass AND conname='request_started_required') THEN
+        ALTER TABLE dmp_migration.change_requests ADD CONSTRAINT request_started_required
+            CHECK (status NOT IN ('running','succeeded','failed','unknown') OR started_at IS NOT NULL);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='dmp_migration.change_requests'::regclass AND conname='request_attempt_required') THEN
+        ALTER TABLE dmp_migration.change_requests ADD CONSTRAINT request_attempt_required
+            CHECK (status NOT IN ('succeeded','unknown') OR attempt_id IS NOT NULL);
+    END IF;
+END $$;
 
 -- A migration can have only one open request per operation.
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_request_per_operation
@@ -122,6 +138,10 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_request_approvals (
     CHECK ((decision = 'pending') = (decided_at IS NULL AND decided_by IS NULL))
 );
 
+ALTER TABLE dmp_migration.change_request_approvals
+    ADD COLUMN IF NOT EXISTS group_name text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS leader_username text NOT NULL DEFAULT '';
+
 -- "My pending approvals" inbox for a leader.
 CREATE INDEX IF NOT EXISTS approvals_leader_pending
 ON dmp_migration.change_request_approvals(required_leader_id)
@@ -164,7 +184,7 @@ BEGIN
                (OLD.status = 'pending_review' AND NEW.status IN ('approved','rejected','cancelled'))
             OR (OLD.status = 'approved'       AND NEW.status IN ('queued','cancelled'))
             OR (OLD.status = 'queued'         AND NEW.status IN ('running','cancelled'))
-            OR (OLD.status = 'running'        AND NEW.status IN ('succeeded','failed','unknown'))
+            OR (OLD.status = 'running'        AND (NEW.status IN ('succeeded','failed','unknown') OR (NEW.status='queued' AND OLD.attempt_id IS NULL AND NEW.attempt_id IS NULL)))
             OR (OLD.status = 'unknown'        AND NEW.status IN ('succeeded','failed'))
         ) THEN
             RAISE EXCEPTION 'invalid change request transition % -> %', OLD.status, NEW.status
