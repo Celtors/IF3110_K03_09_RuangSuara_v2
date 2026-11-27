@@ -42,15 +42,15 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_requests (
     sql_hash      text NOT NULL CHECK (sql_hash ~ '^[0-9a-f]{64}$'),
     requested_by  text NOT NULL,
     status        text NOT NULL DEFAULT 'pending_review' CHECK (status IN (
-                      'pending_review',  -- waiting for group leaders
-                      'approved',        -- every required leader approved
-                      'queued',          -- waiting for its turn on the target database
-                      'running',
-                      'succeeded',
-                      'failed',
-                      'unknown',         -- outcome unresolved; mirrors attempts.status
-                      'rejected',        -- a leader rejected it
-                      'cancelled')),     -- withdrawn before it started running
+                    'pending_review',  -- waiting for group leaders
+                    'approved',        -- every required leader approved
+                    'queued',          -- waiting for its turn on the target database
+                    'running',
+                    'succeeded',
+                    'failed',
+                    'unknown',         -- outcome unresolved; mirrors attempts.status
+                    'rejected',        -- a leader rejected it
+                    'cancelled')),     -- withdrawn before it started running
     attempt_id    text REFERENCES dmp_migration.attempts(id),   -- set once execution begins
     reject_reason text NOT NULL DEFAULT '',   -- reviewer's reason (rejected) or requester's note (cancelled)
     result_code   text NOT NULL DEFAULT '',   -- machine code of the outcome, e.g. execution_failed
@@ -71,8 +71,26 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_requests (
     CHECK (status NOT IN ('succeeded','failed','rejected','cancelled') OR completed_at IS NOT NULL)
 );
 
+-- Upgrade earlier bootstrap schemas without discarding approval history.
 ALTER TABLE dmp_migration.change_requests
-ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '';
+    ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS result_code text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS result_message text NOT NULL DEFAULT '';
+DO $$ DECLARE con record; BEGIN
+    FOR con IN SELECT conname FROM pg_constraint
+        WHERE conrelid='dmp_migration.change_requests'::regclass AND contype='c'
+            AND pg_get_constraintdef(oid) LIKE '%started_at%'
+            AND pg_get_constraintdef(oid) LIKE '%attempt_id%'
+    LOOP
+        EXECUTE format('ALTER TABLE dmp_migration.change_requests DROP CONSTRAINT %I', con.conname);
+    END LOOP;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='dmp_migration.change_requests'::regclass AND conname='request_started_required') THEN
+        ALTER TABLE dmp_migration.change_requests ADD CONSTRAINT request_started_required
+            CHECK (status NOT IN ('running','succeeded','failed','unknown') OR started_at IS NOT NULL);
+        ALTER TABLE dmp_migration.change_requests ADD CONSTRAINT request_attempt_required
+            CHECK (status NOT IN ('succeeded','unknown') OR attempt_id IS NOT NULL);
+    END IF;
+END $$;
 
 -- A migration can have only one open request per operation.
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_request_per_operation
@@ -155,10 +173,10 @@ BEGIN
 
     IF NEW.status IS DISTINCT FROM OLD.status THEN
         IF NOT (
-               (OLD.status = 'pending_review' AND NEW.status IN ('approved','rejected','cancelled'))
+                (OLD.status = 'pending_review' AND NEW.status IN ('approved','rejected','cancelled'))
             OR (OLD.status = 'approved'       AND NEW.status IN ('queued','cancelled'))
             OR (OLD.status = 'queued'         AND NEW.status IN ('running','cancelled'))
-            OR (OLD.status = 'running'        AND NEW.status IN ('succeeded','failed','unknown'))
+            OR (OLD.status = 'running'        AND (NEW.status IN ('succeeded','failed','unknown') OR (NEW.status='queued' AND OLD.attempt_id IS NULL AND NEW.attempt_id IS NULL)))
             OR (OLD.status = 'unknown'        AND NEW.status IN ('succeeded','failed'))
         ) THEN
             RAISE EXCEPTION 'invalid change request transition % -> %', OLD.status, NEW.status
@@ -166,9 +184,9 @@ BEGIN
         END IF;
 
         IF NEW.status = 'approved' AND (
-               NOT EXISTS (SELECT 1 FROM dmp_migration.change_request_approvals a WHERE a.request_id = OLD.id)
+                NOT EXISTS (SELECT 1 FROM dmp_migration.change_request_approvals a WHERE a.request_id = OLD.id)
             OR EXISTS (SELECT 1 FROM dmp_migration.change_request_approvals a
-                       WHERE a.request_id = OLD.id AND a.decision <> 'approved')
+                        WHERE a.request_id = OLD.id AND a.decision <> 'approved')
         ) THEN
             RAISE EXCEPTION 'change request % needs an approval from every required group leader', OLD.id
                 USING ERRCODE = 'check_violation';
