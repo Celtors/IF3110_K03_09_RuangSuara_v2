@@ -106,6 +106,8 @@ func checkApprovers(approvers []RequiredApprover) error {
 	if len(approvers) == 0 {
 		return fault("conflict", "No group has access to this database, so nobody can approve a change to it")
 	}
+	// A group without a leader still gets a pending approval. Only a leader may decide it,
+	// so it stays pending until one is assigned and approves; leadership is read live.
 	return nil
 }
 
@@ -280,7 +282,7 @@ func (r *Review) List(ctx context.Context, user, db, migrationID, status string,
 }
 
 // PendingApprovals lists the requests, across all databases, that are waiting on a group
-// this user belongs to or leads, and that they may still see.
+// this user leads, and that they may still see.
 func (r *Review) PendingApprovals(ctx context.Context, user string) ([]ChangeRequest, error) {
 	if user == "" || r.Service.Access == nil {
 		return nil, fault("unauthenticated", "A validated session is required")
@@ -290,7 +292,7 @@ func (r *Review) PendingApprovals(ctx context.Context, user string) ([]ChangeReq
 	}
 	all, err := r.repo().queryRequests(ctx, `WHERE r.status='pending_review' AND EXISTS (
  SELECT 1 FROM dmp_migration.change_request_approvals a
- WHERE a.request_id=r.id AND a.decision='pending' AND `+memberOfGroup("$1")+`)
+ WHERE a.request_id=r.id AND a.decision='pending' AND `+leaderOfGroup("$1")+`)
  ORDER BY r.created_at LIMIT 200`, user)
 	if err != nil {
 		return nil, err

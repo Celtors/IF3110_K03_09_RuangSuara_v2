@@ -119,9 +119,19 @@ func (r *Repository) queryRequests(ctx context.Context, where string, args ...an
 }
 
 func (r *Repository) approvalsFor(ctx context.Context, requestIDs []string) (map[string][]Approval, error) {
-	rows, err := r.Pool.Query(ctx, `SELECT id,request_id,group_id,group_name,required_leader_id,leader_username,
- decision,decided_by,decided_at,comment
- FROM dmp_migration.change_request_approvals WHERE request_id = ANY($1) ORDER BY group_name,id`, requestIDs)
+	// The leader columns stored on an approval are a snapshot from submit time and go stale
+	// when a group's leadership changes. A pending approval is shown with the group's
+	// current leader, who is the one that may decide it; a decided approval is shown with
+	// the person who actually decided, so the record stays accurate.
+	rows, err := r.Pool.Query(ctx, `SELECT a.id,a.request_id,a.group_id,a.group_name,
+ CASE WHEN a.decision='pending' THEN COALESCE(gl.leader_id::text,'') ELSE COALESCE(a.decided_by,a.required_leader_id) END,
+ CASE WHEN a.decision='pending' THEN COALESCE(lu.username,'') ELSE COALESCE(du.username,a.leader_username) END,
+ a.decision,a.decided_by,a.decided_at,a.comment
+ FROM dmp_migration.change_request_approvals a
+ LEFT JOIN group_leaders gl ON gl.group_id::text=a.group_id
+ LEFT JOIN users lu ON lu.id=gl.leader_id
+ LEFT JOIN users du ON du.id::text=a.decided_by
+ WHERE a.request_id = ANY($1) ORDER BY a.group_name,a.id`, requestIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -172,21 +182,19 @@ func (r *Repository) GetRequest(ctx context.Context, db, id string) (ChangeReque
 	return q, err
 }
 
-// memberOfGroup is a SQL condition, over an approval aliased "a", that holds when the
-// user in the parameter belongs to or leads the approval's group. Approvals are addressed
-// to the group, so membership is read live: someone who joined after the request was
-// submitted may decide it, and someone who left may not.
-func memberOfGroup(param string) string {
-	return `(EXISTS (SELECT 1 FROM user_groups ug WHERE ug.group_id::text=a.group_id AND ug.user_id::text=` + param + `)
- OR EXISTS (SELECT 1 FROM group_leaders gl WHERE gl.group_id::text=a.group_id AND gl.leader_id::text=` + param + `))`
+// leaderOfGroup is a SQL condition, over an approval aliased "a", that holds when the
+// user in the parameter currently leads the approval's group. Only a group's leader may
+// decide for it; ordinary members may not. Leadership is read live, so a leader appointed
+// after the request was submitted may decide it, and a leader who was replaced may not.
+func leaderOfGroup(param string) string {
+	return `EXISTS (SELECT 1 FROM group_leaders gl WHERE gl.group_id::text=a.group_id AND gl.leader_id::text=` + param + `)`
 }
 
-// groupsOf returns the ids of the groups a user belongs to or leads.
+// groupsOf returns the ids of the groups a user leads, i.e. the groups they may decide for.
 func (r *Repository) groupsOf(ctx context.Context, user string) (map[string]bool, error) {
-	rows, err := r.Pool.Query(ctx, `SELECT group_id::text FROM user_groups WHERE user_id::text=$1
- UNION SELECT group_id::text FROM group_leaders WHERE leader_id::text=$1`, user)
+	rows, err := r.Pool.Query(ctx, `SELECT group_id::text FROM group_leaders WHERE leader_id::text=$1`, user)
 	if err != nil {
-		return nil, fault("authorization_unavailable", "Group membership could not be determined")
+		return nil, fault("authorization_unavailable", "Group leadership could not be determined")
 	}
 	defer rows.Close()
 	out := map[string]bool{}
@@ -200,8 +208,7 @@ func (r *Repository) groupsOf(ctx context.Context, user string) (map[string]bool
 	return out, rows.Err()
 }
 
-// decide records the caller's decision on every approval addressed to a group they belong
-// to or lead. It returns true when this decision completed the review and moved the
+// decide records the caller's decision on every approval addressed to a group they lead. It returns true when this decision completed the review and moved the
 // request into the queue.
 func (r *Repository) decide(ctx context.Context, db, id, user string, approve bool, comment string, forbidSelf bool) (bool, error) {
 	tx, err := r.Pool.Begin(ctx)
@@ -236,20 +243,20 @@ func (r *Repository) decide(ctx context.Context, db, id, user string, approve bo
 	}
 	tag, err := tx.Exec(ctx, `UPDATE dmp_migration.change_request_approvals a
  SET decision=$3,decided_by=$2,decided_at=now(),comment=$4
- WHERE a.request_id=$1 AND a.decision='pending' AND `+memberOfGroup("$2"), id, user, decision, comment)
+ WHERE a.request_id=$1 AND a.decision='pending' AND `+leaderOfGroup("$2"), id, user, decision, comment)
 	if err != nil {
 		return false, err
 	}
 	if tag.RowsAffected() == 0 {
 		var owes bool
 		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_request_approvals a
- WHERE a.request_id=$1 AND `+memberOfGroup("$2")+`)`, id, user).Scan(&owes); err != nil {
+ WHERE a.request_id=$1 AND `+leaderOfGroup("$2")+`)`, id, user).Scan(&owes); err != nil {
 			return false, err
 		}
 		if owes {
 			return false, fault("conflict", "Your group's approval for this change request has already been decided")
 		}
-		return false, fault("forbidden", "Only a member of a group this request is waiting on can decide it")
+		return false, fault("forbidden", "Only the leader of a group this request is waiting on can decide it")
 	}
 
 	if !approve {

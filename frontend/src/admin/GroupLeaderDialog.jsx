@@ -3,9 +3,8 @@ import { api } from '../api/endpoints'
 import { useResource } from '../api/useResource'
 import Modal from '../components/Modal'
 
-// Choose the leader of a group. The leader is the group's named contact for database changes
-// (any member can approve them), so it has to be a person in the group: the list offers the
-// members only. Opened by admins with edit access; the server refuses anyone
+// Choose the leader of a group. The leader is the only person who can approve database changes
+// on the group's behalf, so it has to be a person in the group: the list offers the members only. Opened by admins with edit access; the server refuses anyone
 // else.
 export default function GroupLeaderDialog({ group, onClose, onSaved }) {
   const fetchMembers = useCallback(() => api.usersOfGroup(group.id), [group.id])

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { approvalProgress, isOpen, shortId, sha256Hex, sqlFor, trackFor, viewerRole } from "./changeRequests.js";
 
-// `mine` is set by the server for approvals addressed to a group the viewer belongs to.
+// `mine` is set by the server for approvals addressed to a group the viewer leads.
 const approval = (group, decision = "pending", mine = false) => ({ group_id: group, decision, group_name: group, mine });
 const request = (over = {}) => ({
   id: "r1", status: "pending_review", operation: "apply", requested_by: "carol",
@@ -9,11 +9,11 @@ const request = (over = {}) => ({
 });
 
 describe("viewerRole", () => {
-  it("lets a member of a group with a pending approval decide, leader or not", () => {
+  it("lets the leader of a group with a pending approval decide", () => {
     expect(viewerRole(request(), "alice").canDecide).toBe(true);
     expect(viewerRole(request(), "alice").mine).toHaveLength(1);
   });
-  it("does not let someone outside the waiting groups decide", () => {
+  it("does not let a member who is not the leader decide", () => {
     const outsider = request({ approvals: [approval("analysts"), approval("engineers")] });
     expect(viewerRole(outsider, "dave").canDecide).toBe(false);
   });

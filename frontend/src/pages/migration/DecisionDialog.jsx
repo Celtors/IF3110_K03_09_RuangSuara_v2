@@ -4,7 +4,7 @@ import Modal from "../../components/Modal.jsx";
 const COPY = {
   approve: {
     title: "Approve this change?",
-    body: "Your approval is recorded for every group you belong to that this request is waiting on. Once every required group has approved, the change joins the queue and runs automatically.",
+    body: "Your approval is recorded for every group you lead that this request is waiting on. Once every required group has approved, the change joins the queue and runs automatically.",
     label: "Comment (optional)",
     confirm: "Approve",
     primary: "btn-primary",

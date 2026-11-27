@@ -89,7 +89,7 @@ export function ApprovalsTable({ approvals, me }) {
                 <strong>{a.group_name || a.group_id}</strong>
               </td>
               <td>
-                {a.leader_username || <span className="muted">No leader</span>}
+                {a.leader_username || <span className="muted">No leader assigned. Pending until one is</span>}
                 {a.mine && a.decision === "pending" && <small>You can decide for this group</small>}
               </td>
               <td>

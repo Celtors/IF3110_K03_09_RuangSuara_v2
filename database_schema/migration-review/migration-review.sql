@@ -11,10 +11,11 @@
 --   * Every execution (apply, rollback, forward) needs its own change request,
 --     because rollback/forward are operations on a migration, not new definitions.
 --   * A request needs one approval from EACH group that has ViewOnly or ViewEdit
---     access to the target database (a single group means a single approval). Any
---     member of the group, or its leader, may decide it; a group without a leader
---     still has a pending approval. The approver set is snapshotted at submit time by the
---     application; this schema stores and enforces it.
+--     access to the target database (a single group means a single approval). Only the
+--     group's leader may decide it; ordinary members may not. A group without a leader
+--     still has a pending approval, which waits until a leader is assigned and approves.
+--     The approver set is snapshotted at submit time by the application; this schema
+--     stores and enforces it.
 --   * The queue is the set of requests with status = 'queued', ordered per
 --     target database. It lives here, not in a separate database, so state
 --     changes, constraints and locks share one transaction.
@@ -72,8 +73,26 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_requests (
     CHECK (status NOT IN ('succeeded','failed','rejected','cancelled') OR completed_at IS NOT NULL)
 );
 
+-- Columns the application reads and writes. CREATE TABLE IF NOT EXISTS does nothing on a
+-- database that already has the table, so every column added after the first release is
+-- also added here; without them every change-request query fails.
 ALTER TABLE dmp_migration.change_requests
-ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '';
+    ADD COLUMN IF NOT EXISTS result_code text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS result_message text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '';
+
+-- Older schemas required attempt_id for 'running', but the worker sets 'running' before the
+-- attempt exists (it is linked afterwards). Drop that constraint wherever it exists.
+DO $$
+DECLARE c record;
+BEGIN
+    FOR c IN SELECT conname FROM pg_constraint
+             WHERE conrelid = 'dmp_migration.change_requests'::regclass AND contype = 'c'
+               AND pg_get_constraintdef(oid) ILIKE '%started_at IS NOT NULL%AND%attempt_id IS NOT NULL%'
+    LOOP
+        EXECUTE format('ALTER TABLE dmp_migration.change_requests DROP CONSTRAINT %I', c.conname);
+    END LOOP;
+END $$;
 
 -- A migration can have only one open request per operation.
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_request_per_operation
@@ -97,7 +116,7 @@ CREATE INDEX IF NOT EXISTS change_requests_migration
 ON dmp_migration.change_requests(migration_id, created_at DESC);
 
 -- ---------------------------------------------------------------------------
--- Approvals: one row per required group; any member of the group may decide
+-- Approvals: one row per required group; only the group's leader may decide
 -- ---------------------------------------------------------------------------
 -- group_id / leader ids are plain text (like author_user_id), with no foreign
 -- keys into the access-control tables, so this schema stays independent of them.
@@ -109,7 +128,7 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_request_approvals (
     required_leader_id text NOT NULL,        -- leader of the group when submitted, '' if none; display only
     leader_username    text NOT NULL DEFAULT '',   -- snapshot for display
     decision           text NOT NULL DEFAULT 'pending' CHECK (decision IN ('pending','approved','rejected')),
-    decided_by         text,                 -- the group member who decided
+    decided_by         text,                 -- the group leader who decided
     decided_at         timestamptz,
     comment            text NOT NULL DEFAULT '',
     created_at         timestamptz NOT NULL DEFAULT now(),
@@ -117,8 +136,11 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_request_approvals (
     CHECK ((decision = 'pending') = (decided_at IS NULL AND decided_by IS NULL))
 );
 
--- Legacy index from when approvals were addressed to a leader; approvals are now
--- addressed to the group and found through group membership.
+ALTER TABLE dmp_migration.change_request_approvals
+    ADD COLUMN IF NOT EXISTS group_name text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS leader_username text NOT NULL DEFAULT '';
+
+-- Index for finding a leader's pending approvals.
 CREATE INDEX IF NOT EXISTS approvals_leader_pending
 ON dmp_migration.change_request_approvals(required_leader_id)
 WHERE decision = 'pending';

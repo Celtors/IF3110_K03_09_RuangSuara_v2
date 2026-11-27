@@ -51,7 +51,7 @@ export function SubmitRequestDialog({ databaseId, migration, operation, onClose,
       </p>
       <SQL value={migration[copy.field] ?? ""} />
       <ol className="cr-explain">
-        <li>Every group with access to this database reviews and approves; any member can decide for their group.</li>
+        <li>Every group with access to this database reviews and approves; only the group’s leader can decide for it.</li>
         <li>After the last approval the request joins the queue for this database.</li>
         <li>Requests on one database run one at a time, in order, without anyone clicking execute.</li>
       </ol>
