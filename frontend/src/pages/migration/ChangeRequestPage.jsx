@@ -3,21 +3,23 @@ import { date, href, viewerId } from "../../migration/api.js";
 import {
   OPERATION_LABEL,
   approveChangeRequest,
+  approvalProgress,
   cancelChangeRequest,
-  namesFrom,
   rejectChangeRequest,
   shortId,
   sqlFor,
   viewerRole,
 } from "../../migration/changeRequests.js";
 import { ErrorBox, SQL } from "../../migration/components.jsx";
-import { requestId } from "../../migration/navigation.js";
 import {
   useChangeRequest,
   useMigrationDefinition,
   useSqlIntegrity,
 } from "../../migration/useChangeRequests.js";
 import { ActivityLog, ApprovalsTable, RequestBadge, StatusTrack, Who } from "./ChangeRequestParts.jsx";
+import { namesFrom } from "./NamesFrom.jsx";
+import { useJob } from "../../migration/useJob.js";
+import { JobProgress } from "./JobProgress.jsx";
 import { DecisionDialog } from "./DecisionDialog.jsx";
 
 // What the request is doing now, in a sentence.
@@ -27,7 +29,7 @@ function Outcome({ request }) {
     const waiting = request.approvals.filter((a) => a.decision === "pending");
     return (
       <div className="alert notice">
-        Waiting for {waiting.length === 1 ? "the leader of" : "the leaders of"}{" "}
+        Waiting for approval from{" "}
         <strong>{waiting.map((a) => a.group_name || a.group_id).join(", ")}</strong>.
       </div>
     );
@@ -39,22 +41,6 @@ function Outcome({ request }) {
         {position === 1
           ? "Next in line for this database. It starts as soon as nothing else is running."
           : `Position ${position ?? "—"} in this database’s queue. Requests run one at a time, in order.`}
-      </div>
-    );
-  if (status === "running") return <div className="alert notice warning">Running on the target database now.</div>;
-  if (status === "succeeded") return <div className="alert notice success">The change was applied successfully.</div>;
-  if (status === "failed")
-    return (
-      <div className="alert notice error" role="alert">
-        The change failed{message ? `: ${message}` : "."}
-        {code && <small> ({code})</small>}
-      </div>
-    );
-  if (status === "unknown")
-    return (
-      <div className="alert notice warning" role="alert">
-        The outcome could not be confirmed on the target database. It is being checked automatically; if it stays
-        unresolved, use “Reconcile outcomes” on the Migrations tab.
       </div>
     );
   if (status === "rejected")
@@ -92,30 +78,55 @@ function Integrity({ value }) {
 
 // One change request: progress, who must approve, the SQL under review, and the actions the
 // signed-in user may take. Refreshes itself while the request can still change.
-export function ChangeRequestPage({ databaseId }) {
-  const { request, error, loading, reload, replace } = useChangeRequest(databaseId, requestId);
+export function ChangeRequestPage({ databaseId, requestId, canEdit, onDecision }) {
+  const jobResource = useJob(databaseId, requestId);
+  const { job } = jobResource;
+  // Each pending job read also refreshes the reviewers. After review, a job
+  // status change is enough to refresh the request and its audit trail.
+  const revision = job?.approval_status === "pending_review"
+    ? job
+    : `${job?.approval_status ?? ""}|${job?.status ?? ""}|${job?.compensation_status ?? ""}`;
+  const { request, error, loading, reload, replace } = useChangeRequest(databaseId, requestId, {
+    poll: !job || Boolean(jobResource.error),
+    revision,
+  });
   const definition = useMigrationDefinition(databaseId, request?.migration_id);
   const sql = sqlFor(definition.migration, request);
   const integrity = useSqlIntegrity(sql, request?.sql_hash);
+  const downSql = definition.migration?.sql_down;
+  const downIntegrity = useSqlIntegrity(downSql, request?.compensation_sql_hash);
   const [dialog, setDialog] = useState(null);
   const me = viewerId();
   const names = namesFrom(request ? [request] : []);
 
   if (!requestId) return <ErrorBox error="No change request selected. Open one from the migration history." />;
-  if (loading && !request) return <div className="panel" role="status">Loading change request…</div>;
   if (!request)
     return (
       <>
-        <ErrorBox error={error || "Change request not found."} />
-        <button className="btn btn-primary" onClick={reload}>
-          Try again
-        </button>
+        {loading ? <p role="status">Loading change request…</p> : <>
+          <ErrorBox error={error || "Change request not found."} />
+          <button className="btn btn-primary" onClick={reload}>Try again</button>
+        </>}
+        <JobProgress databaseId={databaseId} jobId={requestId} resource={jobResource} canEdit={false} isRequester={false} onRefresh={reload} />
       </>
     );
 
   const role = viewerRole(request, me);
-  const act = (fn) => async (comment) => replace(await fn(databaseId, request.id, comment));
-  const mismatched = integrity === false;
+  const { approved, total } = approvalProgress(request);
+  const canDecide = !error && role.canDecide;
+  const canCancel = !error && role.canCancel;
+  const canApprove = canDecide && sql && integrity !== false
+    && (!request.compensation_sql_hash || (downSql && downIntegrity !== false));
+  const trackReview = ["pending_review", "approved", "rejected", "cancelled"].includes(request.status);
+
+  async function submitDecision(comment) {
+    const allowed = { approve: canApprove, reject: canDecide, cancel: canCancel };
+    if (!allowed[dialog]) throw new Error("This action is no longer available. Refresh the request to check its status.");
+    const decide = { approve: approveChangeRequest, reject: rejectChangeRequest, cancel: cancelChangeRequest }[dialog];
+    replace(await decide(databaseId, request.id, comment));
+    jobResource.reload();
+    onDecision?.();
+  }
 
   return (
     <>
@@ -134,20 +145,19 @@ export function ChangeRequestPage({ databaseId }) {
             </p>
           </div>
           <div className="actions">
-            <RequestBadge status={request.status} />
-            {role.canCancel && (
+            <span>Request status: <RequestBadge status={request.status} /></span>
+            {canCancel && (
               <button className="btn btn-danger-quiet" onClick={() => setDialog("cancel")}>
                 Cancel request
               </button>
             )}
           </div>
         </div>
-        <StatusTrack request={request} />
+        {trackReview && <StatusTrack request={request} />}
         <Outcome request={request} />
         <dl className="details-grid">
           {[
             ["Database", request.database_id],
-            ["Job ID", request.id],
             ["Operation", OPERATION_LABEL[request.operation] ?? request.operation],
             ["Approved", date(request.approved_at)],
             ["Queued", date(request.queued_at)],
@@ -173,32 +183,31 @@ export function ChangeRequestPage({ databaseId }) {
         </dl>
       </section>
 
+      <JobProgress databaseId={databaseId} jobId={requestId} resource={jobResource} canEdit={canEdit} isRequester={role.isRequester} onRefresh={reload} />
+
       <section className="panel">
         <div className="panel-heading">
           <h2>Required approvals</h2>
           <span className="mono">
-            {request.approvals.filter((a) => a.decision === "approved").length} of {request.approvals.length}
+            {approved} of {total}
           </span>
         </div>
         <p className="cr-lead">
-          The leader of every group with access to this database must approve before the change can run.
+          Every group with access to this database must approve before the change can run. Only a group’s leader can decide for it.
         </p>
-        <ApprovalsTable approvals={request.approvals} me={me} />
-        {role.canDecide && (
+        <ApprovalsTable approvals={request.approvals} requestStatus={error ? undefined : request.status} />
+        {canDecide && (
           <div className="cr-decision">
             <p>
               <strong>Your decision is needed</strong> for{" "}
-              {role.mine
-                .filter((a) => a.decision === "pending")
-                .map((a) => a.group_name || a.group_id)
-                .join(", ")}
+              {role.pending.map((a) => a.group_name || a.group_id).join(", ")}
               . Read the SQL below first.
             </p>
             <div className="actions">
               <button className="btn btn-danger-quiet" onClick={() => setDialog("reject")}>
                 Reject…
               </button>
-              <button className="btn btn-primary" disabled={!sql || mismatched} onClick={() => setDialog("approve")}>
+              <button className="btn btn-primary" disabled={!canApprove} onClick={() => setDialog("approve")}>
                 Approve…
               </button>
             </div>
@@ -211,6 +220,7 @@ export function ChangeRequestPage({ databaseId }) {
           <h2>{request.operation === "rollback" ? "SQL down to run" : "SQL to run"}</h2>
           <span className="mono">PostgreSQL</span>
         </div>
+        {request.batch && <p>Batch execution · attribute: <strong>{request.batch.batch_attribute}</strong> · size: <strong>{request.batch.batch_size}</strong></p>}
         <Integrity value={integrity} />
         {definition.error ? (
           <ErrorBox error={definition.error} />
@@ -219,6 +229,11 @@ export function ChangeRequestPage({ databaseId }) {
         ) : (
           <SQL value={sql} />
         )}
+        {request.compensation_sql_hash && definition.migration && <>
+          <h3>Approved compensation SQL down</h3>
+          <Integrity value={downIntegrity} />
+          <SQL value={downSql} />
+        </>}
       </section>
 
       <section className="panel">
@@ -232,7 +247,7 @@ export function ChangeRequestPage({ databaseId }) {
         <DecisionDialog
           kind={dialog}
           onClose={() => setDialog(null)}
-          onSubmit={act({ approve: approveChangeRequest, reject: rejectChangeRequest, cancel: cancelChangeRequest }[dialog])}
+          onSubmit={submitDecision}
         />
       )}
     </>

@@ -1,7 +1,8 @@
 import { date, requestHref, viewerId } from "../../migration/api.js";
-import { OPERATION_LABEL, namesFrom } from "../../migration/changeRequests.js";
+import { OPERATION_LABEL } from "../../migration/changeRequests.js";
 import { ErrorBox } from "../../migration/components.jsx";
 import { ApprovalMeter, RequestBadge, Who } from "./ChangeRequestParts.jsx";
+import { namesFrom } from "./NamesFrom.jsx";
 
 // Change requests of a database, or of one migration. `list` is the result of
 // useChangeRequestList, so a caller that also needs the data (to disable a button while a
@@ -29,7 +30,7 @@ export function ChangeRequestList({ list, databaseId, title = "Change requests",
             <thead>
               <tr>
                 <th scope="col">Request</th>
-                <th scope="col">Status</th>
+                <th scope="col">Request status</th>
                 <th scope="col">Approvals</th>
                 <th scope="col">Requested by</th>
                 <th scope="col">Submitted</th>
@@ -45,6 +46,7 @@ export function ChangeRequestList({ list, databaseId, title = "Change requests",
                   </td>
                   <td>
                     <RequestBadge status={r.status} />
+                    {r.batch && <small>Batch · View job for verified progress</small>}
                     {r.queue_position ? (
                       <small>{r.queue_position === 1 ? "Next to run" : `#${r.queue_position} in queue`}</small>
                     ) : null}
@@ -58,7 +60,7 @@ export function ChangeRequestList({ list, databaseId, title = "Change requests",
                   <td>{date(r.created_at)}</td>
                   <td>
                     <a className="cr-link" href={requestHref(databaseId, r.id)}>
-                      View →
+                      View job →
                     </a>
                   </td>
                 </tr>

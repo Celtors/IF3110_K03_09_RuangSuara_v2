@@ -5,8 +5,8 @@ import { api, apiWithSessionRetry, databaseBase, viewerId } from "./api.js";
 //   Draft -> Pending review -> Approved -> Pending (Queue) -> Running -> Success / Failed
 //
 // "Draft" is the migration's own state. A change request exists per execution
-// (apply, rollback or roll forward) and is approved by the leader of every group
-// that has access to the database.
+// (apply, rollback or roll forward) and is approved by every group that has access
+// to the database. Only a group's leader may decide for it.
 
 export const OPERATION_LABEL = {
   apply: "Apply",
@@ -14,34 +14,37 @@ export const OPERATION_LABEL = {
   forward: "Roll forward",
 };
 
-export const STATUS_LABEL = {
-  pending_review: "Pending review",
-  approved: "Approved",
-  queued: "In queue",
-  running: "Running",
-  succeeded: "Success",
-  failed: "Failed",
-  unknown: "Unresolved",
-  rejected: "Rejected",
-  cancelled: "Cancelled",
+// Both the approval API and job API use this vocabulary (legacy aliases included).
+export const STATUS = {
+  pending_review: { label: "Pending review", badge: "pending_review", live: true, open: true },
+  approved: { label: "Approved", badge: "approved", live: true, open: true },
+  queued: { label: "In queue", badge: "queued", live: true, open: true },
+  running: { label: "Running", badge: "running", live: true, open: true, blocks: true },
+  completed: { label: "Completed", badge: "succeeded" },
+  succeeded: { label: "Success", badge: "succeeded" },
+  failed: { label: "Failed", badge: "failed", recoverable: true },
+  partial: { label: "Partial", badge: "unknown", open: true, blocks: true, recoverable: true },
+  unresolved: { label: "Unresolved (awaiting recovery)", badge: "unknown", open: true, blocks: true },
+  unknown: { label: "Unresolved", badge: "unknown", open: true, blocks: true },
+  reverted: { label: "Reverted", badge: "succeeded" },
+  partially_reverted: { label: "Partially reverted", badge: "unknown", open: true, blocks: true },
+  rejected: { label: "Rejected", badge: "rejected" },
+  cancelled: { label: "Cancelled", badge: "cancelled" },
 };
-
-// Requests that still block a new request for the same migration and operation.
-const OPEN = ["pending_review", "approved", "queued", "running", "unknown"];
-// Requests whose status can still change by itself, so screens keep refreshing.
-const LIVE = ["pending_review", "approved", "queued", "running", "unknown"];
-export const isOpen = (status) => OPEN.includes(status);
-export const isLive = (status) => LIVE.includes(status);
+export const STATUS_LABEL = Object.fromEntries(Object.entries(STATUS).map(([key, value]) => [key, value.label]));
+export const isOpen = (status) => Boolean(STATUS[status]?.open);
+export const isLive = (status) => Boolean(STATUS[status]?.live);
 
 const requestsBase = (database) => `${databaseBase(database)}/change-requests`;
 const requestPath = (database, id) => `${requestsBase(database)}/${encodeURIComponent(id)}`;
 
-export async function submitChangeRequest(database, migrationId, operation) {
+export async function submitChangeRequest(database, migrationId, operation, options = {}) {
   const data = await apiWithSessionRetry(requestsBase(database), "POST", {
     migration_id: migrationId,
     operation,
+    ...options,
   });
-  return data.change_request;
+  return { ...data.change_request, job_id: data.job_id ?? data.change_request?.id };
 }
 
 export async function listChangeRequests(database, { migrationId = "", status = "", limit = 0 } = {}) {
@@ -67,7 +70,7 @@ export const approveChangeRequest = decide("approve");
 export const rejectChangeRequest = decide("reject");
 export const cancelChangeRequest = decide("cancel");
 
-// Requests, across all databases, waiting for the signed-in user's decision.
+// Requests, across all databases, waiting on a group the signed-in user leads.
 export async function pendingApprovals() {
   const data = await api("/api/change-requests/pending-approval");
   return data.change_requests ?? [];
@@ -76,7 +79,8 @@ export async function pendingApprovals() {
 // What the signed-in user may do with a request. The server enforces every rule again;
 // this only decides which buttons to show.
 export function viewerRole(request, userId = viewerId()) {
-  const mine = (request.approvals ?? []).filter((a) => a.required_leader_id === userId);
+  // The server marks the approvals addressed to a group the signed-in user leads.
+  const mine = (request.approvals ?? []).filter((a) => a.mine);
   const isRequester = Boolean(userId) && request.requested_by === userId;
   return {
     isRequester,

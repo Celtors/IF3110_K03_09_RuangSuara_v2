@@ -8,16 +8,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Approvers decides whose approval a change request needs.
+
 type Approvers interface {
-	// RequiredApprovers returns every group with ViewOnly or ViewEdit access to the
-	// database, with the leader of each. A Blocked group is not a reviewer. A group
-	// without a leader is returned with an empty LeaderID so the caller can refuse.
 	RequiredApprovers(ctx context.Context, databaseID string) ([]RequiredApprover, error)
 }
 
-// PlatformApprovers reads group policies and leaders from the platform database,
-// the same database that holds the migration storage.
+
 type PlatformApprovers struct{ Pool *pgxpool.Pool }
 
 func (p PlatformApprovers) RequiredApprovers(ctx context.Context, databaseID string) ([]RequiredApprover, error) {

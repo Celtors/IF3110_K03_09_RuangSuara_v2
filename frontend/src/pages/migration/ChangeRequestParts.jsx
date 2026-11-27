@@ -1,8 +1,8 @@
 import { date } from "../../migration/api.js";
-import { STATUS_LABEL, shortId, trackFor } from "../../migration/changeRequests.js";
+import { STATUS, STATUS_LABEL, shortId, trackFor } from "../../migration/changeRequests.js";
 
 export function RequestBadge({ status }) {
-  return <span className={`badge ${status}`}>{STATUS_LABEL[status] ?? status}</span>;
+  return <span className={`badge ${STATUS[status]?.badge ?? "badge-off"}`}>{STATUS_LABEL[status] ?? status}</span>;
 }
 
 export function DecisionBadge({ decision }) {
@@ -61,36 +61,42 @@ export function ApprovalMeter({ request }) {
   );
 }
 
-export function ApprovalsTable({ approvals, me }) {
+export function ApprovalsTable({ approvals, requestStatus }) {
   return (
     <div className="table-scroll" role="region" aria-label="Required approvals" tabIndex={0}>
       <table className="table">
         <thead>
           <tr>
             <th scope="col">Group</th>
-            <th scope="col">Leader</th>
+            <th scope="col">Group leader or reviewer</th>
             <th scope="col">Decision</th>
             <th scope="col">Decided</th>
             <th scope="col">Comment</th>
           </tr>
         </thead>
         <tbody>
-          {approvals.map((a) => (
-            <tr key={a.id} className={a.required_leader_id === me ? "mine" : undefined}>
-              <td>
-                <strong>{a.group_name || a.group_id}</strong>
-              </td>
-              <td>
-                {a.leader_username || shortId(a.required_leader_id)}
-                {a.required_leader_id === me && <small>You are this group’s leader</small>}
-              </td>
-              <td>
-                <DecisionBadge decision={a.decision} />
-              </td>
-              <td>{date(a.decided_at)}</td>
-              <td className="cr-comment">{a.comment || "—"}</td>
-            </tr>
-          ))}
+          {approvals.map((a) => {
+            const pending = a.decision === "pending";
+            const userId = pending ? a.required_leader_id : a.decided_by;
+            const canDecide = requestStatus === "pending_review" && pending && a.mine;
+            const name = a.leader_username || shortId(userId);
+            return (
+              <tr key={a.id} className={canDecide ? "mine" : undefined}>
+                <td><strong>{a.group_name || a.group_id}</strong></td>
+                <td>
+                  {pending && !userId ? (
+                    <span className="muted">No eligible leader assigned</span>
+                  ) : (
+                    <span title={userId || undefined}>{name}</span>
+                  )}
+                  {canDecide && <small>You can decide for this group</small>}
+                </td>
+                <td><DecisionBadge decision={a.decision} /></td>
+                <td>{date(a.decided_at)}</td>
+                <td className="cr-comment">{a.comment || "—"}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

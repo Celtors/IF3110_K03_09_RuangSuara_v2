@@ -10,17 +10,19 @@
 --   * "Draft" is dmp_migration.definitions.state = 'draft' (unchanged).
 --   * Every execution (apply, rollback, forward) needs its own change request,
 --     because rollback/forward are operations on a migration, not new definitions.
---   * A request needs one approval from the leader of EACH group that has
---     ViewOnly or ViewEdit access to the target database (a single group means
---     a single approval). The approver set is snapshotted at submit time by the
---     application; this schema stores and enforces it.
+--   * A request needs one approval from EACH group that has ViewOnly or ViewEdit
+--     access to the target database (a single group means a single approval). Only the
+--     group's leader may decide it; ordinary members may not. A group without a leader
+--     still has a pending approval, which waits until a leader is assigned and approves.
+--     The approver set is snapshotted at submit time by the application; this schema
+--     stores and enforces it.
 --   * The queue is the set of requests with status = 'queued', ordered per
 --     target database. It lives here, not in a separate database, so state
 --     changes, constraints and locks share one transaction.
 --
 -- Not enforced here (application responsibility):
---   * Computing the required groups/leaders at submit time.
---   * Re-validating permissions, leaders and sql_hash right before running.
+--   * Computing the required groups at submission and checking live leadership at decision time.
+--   * Re-validating permissions, required groups and sql_hash before execution.
 --   * Self-approval rules (an author who is also a leader).
 --   * The per-database advisory lock used by Repository.lock().
 
@@ -42,14 +44,14 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_requests (
     sql_hash      text NOT NULL CHECK (sql_hash ~ '^[0-9a-f]{64}$'),
     requested_by  text NOT NULL,
     status        text NOT NULL DEFAULT 'pending_review' CHECK (status IN (
-                      'pending_review',  -- waiting for group leaders
-                      'approved',        -- every required leader approved
+                      'pending_review',  -- waiting for the required groups
+                      'approved',        -- every required group approved
                       'queued',          -- waiting for its turn on the target database
                       'running',
                       'succeeded',
                       'failed',
                       'unknown',         -- outcome unresolved; mirrors attempts.status
-                      'rejected',        -- a leader rejected it
+                      'rejected',        -- a group reviewer rejected it
                       'cancelled')),     -- withdrawn before it started running
     attempt_id    text REFERENCES dmp_migration.attempts(id),   -- set once execution begins
     reject_reason text NOT NULL DEFAULT '',   -- reviewer's reason (rejected) or requester's note (cancelled)
@@ -118,7 +120,7 @@ CREATE INDEX IF NOT EXISTS change_requests_migration
 ON dmp_migration.change_requests(migration_id, created_at DESC);
 
 -- ---------------------------------------------------------------------------
--- Approvals: one row per required group, naming the leader who must decide
+-- Approvals: one row per required group; only the group's leader may decide
 -- ---------------------------------------------------------------------------
 -- group_id / leader ids are plain text (like author_user_id), with no foreign
 -- keys into the access-control tables, so this schema stays independent of them.
@@ -127,10 +129,10 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_request_approvals (
     request_id         text NOT NULL REFERENCES dmp_migration.change_requests(id) ON DELETE CASCADE,
     group_id           text NOT NULL,
     group_name         text NOT NULL DEFAULT '',   -- snapshot, groups can be renamed or deleted
-    required_leader_id text NOT NULL,        -- leader of the group when the request was submitted
+    required_leader_id text NOT NULL,        -- leader of the group when submitted, '' if none; display only
     leader_username    text NOT NULL DEFAULT '',   -- snapshot for display
     decision           text NOT NULL DEFAULT 'pending' CHECK (decision IN ('pending','approved','rejected')),
-    decided_by         text,                 -- normally = required_leader_id; differs if an admin overrides
+    decided_by         text,                 -- the group leader who decided
     decided_at         timestamptz,
     comment            text NOT NULL DEFAULT '',
     created_at         timestamptz NOT NULL DEFAULT now(),
@@ -142,9 +144,10 @@ ALTER TABLE dmp_migration.change_request_approvals
     ADD COLUMN IF NOT EXISTS group_name text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS leader_username text NOT NULL DEFAULT '';
 
--- "My pending approvals" inbox for a leader.
-CREATE INDEX IF NOT EXISTS approvals_leader_pending
-ON dmp_migration.change_request_approvals(required_leader_id)
+-- The inbox matches approvals by group using current leadership.
+DROP INDEX IF EXISTS dmp_migration.approvals_leader_pending;
+CREATE INDEX IF NOT EXISTS approvals_group_pending
+ON dmp_migration.change_request_approvals(group_id, request_id)
 WHERE decision = 'pending';
 
 -- ---------------------------------------------------------------------------
@@ -196,7 +199,7 @@ BEGIN
             OR EXISTS (SELECT 1 FROM dmp_migration.change_request_approvals a
                        WHERE a.request_id = OLD.id AND a.decision <> 'approved')
         ) THEN
-            RAISE EXCEPTION 'change request % needs an approval from every required group leader', OLD.id
+            RAISE EXCEPTION 'change request % needs an approval from every required group', OLD.id
                 USING ERRCODE = 'check_violation';
         END IF;
     END IF;
@@ -217,7 +220,7 @@ BEGIN
     IF NEW.request_id IS DISTINCT FROM OLD.request_id
     OR NEW.group_id IS DISTINCT FROM OLD.group_id
     OR NEW.required_leader_id IS DISTINCT FROM OLD.required_leader_id THEN
-        RAISE EXCEPTION 'approval % cannot change its request, group or required leader', OLD.id
+        RAISE EXCEPTION 'approval % cannot change its request or group', OLD.id
             USING ERRCODE = 'check_violation';
     END IF;
     IF OLD.decision <> 'pending' THEN

@@ -36,8 +36,6 @@ var allRequestStatuses = map[RequestStatus]bool{
 	RequestSucceeded: true, RequestFailed: true, RequestUnknown: true, RequestRejected: true, RequestCancelled: true,
 }
 
-// Approval is one group's required decision on a change request. The leader and
-// group names are snapshots taken when the request was submitted.
 type Approval struct {
 	ID               string     `json:"id"`
 	RequestID        string     `json:"-"`
@@ -45,13 +43,13 @@ type Approval struct {
 	GroupName        string     `json:"group_name"`
 	RequiredLeaderID string     `json:"required_leader_id"`
 	LeaderUsername   string     `json:"leader_username"`
-	Decision         string     `json:"decision"` // pending, approved or rejected
+	Mine             bool       `json:"mine"`
+	Decision         string     `json:"decision"`
 	DecidedBy        *string    `json:"decided_by"`
 	DecidedAt        *time.Time `json:"decided_at"`
 	Comment          string     `json:"comment"`
 }
 
-// RequestEvent is one entry of a request's append-only audit trail.
 type RequestEvent struct {
 	ID        int64           `json:"id"`
 	Event     string          `json:"event"`
@@ -60,9 +58,7 @@ type RequestEvent struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
-// ChangeRequest asks to run one operation (apply, rollback or forward) of a
-// migration. It must be approved by the leader of every group with access to the
-// database before it is queued and executed.
+
 type ChangeRequest struct {
 	Batch                   *BatchSpec `json:"batch,omitempty"`
 	CompensationSQLHash     string     `json:"compensation_sql_hash,omitempty"`
@@ -85,13 +81,11 @@ type ChangeRequest struct {
 	QueuedAt                *time.Time    `json:"queued_at"`
 	StartedAt               *time.Time    `json:"started_at"`
 	CompletedAt             *time.Time    `json:"completed_at"`
-	// QueuePosition is 1 for the request that runs next on its database; nil unless queued.
 	QueuePosition *int64         `json:"queue_position"`
 	Approvals     []Approval     `json:"approvals"`
 	Events        []RequestEvent `json:"events,omitempty"`
 }
 
-// SubmitRequest is the body of POST /api/databases/:id/change-requests.
 type SubmitRequest struct {
 	BatchAttribute string    `json:"batch_attribute,omitempty"`
 	BatchSize      int       `json:"batch_size,omitempty"`
@@ -100,22 +94,21 @@ type SubmitRequest struct {
 	Operation      Operation `json:"operation"`
 }
 
-// DecisionBody is the optional body of approve/reject/cancel. Reject requires a comment.
+
 type DecisionBody struct {
 	Comment string `json:"comment"`
 }
 
-// RequiredApprover is a group that has access to a database and the leader who must
-// approve on its behalf.
+
 type RequiredApprover struct {
 	GroupID        string
 	GroupName      string
-	LeaderID       string // empty when the group has no leader
+	LeaderID       string
 	LeaderUsername string
 	LeaderActive   bool
 }
 
-// QueuedRequest is the part of a request the worker needs to run it.
+
 type QueuedRequest struct {
 	startedAt               time.Time
 	submissionCorrelationID string

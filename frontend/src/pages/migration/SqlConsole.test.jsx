@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import userEvent from "@testing-library/user-event";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 
 const { call } = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("../../migration/api.js", () => ({
@@ -44,15 +44,37 @@ describe("SqlConsole", () => {
     expect(await screen.findByText("Bob")).toBeInTheDocument();
   });
   it("shows backend errors with details", async () => {
-    call.mockRejectedValue(Object.assign(new Error("syntax error"), { code: "invalid_sql", details: { execution_time_ms: 1 } }));
+    const backendError = Object.assign(new Error("syntax error"), {
+      code: "invalid_sql",
+      details: {
+        execution_time_ms: 1,
+        postgres_code: "42601",
+        position: 1,
+      },
+    });
+    let rejectQuery;
+    call.mockImplementationOnce(() => new Promise((_, reject) => {
+      rejectQuery = reject;
+    }));
     const user = userEvent.setup();
     render(<SqlConsole databaseId="db-1" canEdit />);
     await user.type(screen.getByLabelText("SQL statement"), "SELEC");
     await user.click(screen.getByRole("button", { name: "Execute" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("syntax error");
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(call).toHaveBeenCalledWith("/api/databases/db-1/query", "POST", { query: "SELEC" });
+    expect(screen.getByRole("button", { name: "Running…" })).toBeDisabled();
+
+    await act(async () => {
+      rejectQuery(backendError);
+    });
+    const panel = within(screen.getByRole("region", { name: "Execution error" }));
+    expect(panel.getByRole("alert")).toHaveTextContent("syntax error");
+    expect(panel.getByText("invalid_sql")).toBeVisible();
+    expect(panel.getByText("SQLSTATE 42601")).toBeVisible();
+    expect(panel.getByText("at character 1")).toBeVisible();
+    expect(panel.getByText("1 ms")).toBeVisible();
     expect(screen.getByRole("status")).toHaveTextContent("Last run failed");
-    expect(screen.getByText("invalid_sql")).toBeVisible();
-    expect(screen.getByText("1 ms")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Execute" })).toBeEnabled();
   });
   it("Clear empties the editor and the result", async () => {
     call.mockResolvedValue(rowsResult);

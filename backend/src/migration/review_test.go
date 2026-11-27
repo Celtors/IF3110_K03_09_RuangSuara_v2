@@ -36,8 +36,11 @@ func TestCheckApprovers(t *testing.T) {
 		wantInMsg string
 	}{
 		{"nobody has access", nil, "conflict", "nobody can approve"},
-		{"group without a leader", []RequiredApprover{ok, {GroupID: "g2", GroupName: "analysts"}}, "conflict", "analysts"},
-		{"inactive leader", []RequiredApprover{{GroupID: "g2", GroupName: "analysts", LeaderID: "u2", LeaderUsername: "dave"}}, "conflict", "dave"},
+		// A missing or inactive leader does not block a submission: the approval stays pending
+		// until a leader is assigned and decides it.
+		{"group without a leader", []RequiredApprover{ok, {GroupID: "g2", GroupName: "analysts"}}, "", ""},
+		{"only group has no leader", []RequiredApprover{{GroupID: "g2", GroupName: "analysts"}}, "", ""},
+		{"inactive leader", []RequiredApprover{{GroupID: "g2", GroupName: "analysts", LeaderID: "u2", LeaderUsername: "dave"}}, "", ""},
 		{"single team with a leader", []RequiredApprover{ok}, "", ""},
 		{"several teams, all led", []RequiredApprover{ok, {GroupID: "g2", GroupName: "analysts", LeaderID: "u2", LeaderUsername: "bob", LeaderActive: true}}, "", ""},
 	}

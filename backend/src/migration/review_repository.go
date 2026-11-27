@@ -13,10 +13,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Every write to the workflow tables goes through this file. Status changes are
-// additionally checked by triggers in review.sql, so an application bug cannot,
-// for example, queue a request that is missing an approval.
-
 const requestSelect = `SELECT r.id,r.database_id,r.migration_id,d.name,r.operation,r.sql_hash,r.requested_by,r.status,
  r.attempt_id,r.reject_reason,r.result_code,r.result_message,r.created_at,r.updated_at,r.approved_at,r.queued_at,
  r.started_at,r.completed_at,r.submission_correlation_id,
@@ -46,7 +42,6 @@ func addEvent(ctx context.Context, tx pgx.Tx, requestID, event, actor string, de
 	return err
 }
 
-// insertRequest stores the request, its required approvals and the "submitted" event atomically.
 func (r *Repository) insertRequest(ctx context.Context, q ChangeRequest, approvers []RequiredApprover) (ChangeRequest, error) {
 	conn, release, err := r.lock(ctx, q.DatabaseID)
 	if err != nil {
@@ -161,9 +156,19 @@ func (r *Repository) queryRequests(ctx context.Context, where string, args ...an
 }
 
 func (r *Repository) approvalsFor(ctx context.Context, requestIDs []string) (map[string][]Approval, error) {
-	rows, err := r.Pool.Query(ctx, `SELECT id,request_id,group_id,group_name,required_leader_id,leader_username,
- decision,decided_by,decided_at,comment
- FROM dmp_migration.change_request_approvals WHERE request_id = ANY($1) ORDER BY group_name,id`, requestIDs)
+	// The leader columns stored on an approval are a snapshot from submit time and go stale
+	// when a group's leadership changes. A pending approval is shown with the group's
+	// current leader, who is the one that may decide it; a decided approval is shown with
+	// the person who actually decided, so the record stays accurate.
+	rows, err := r.Pool.Query(ctx, `SELECT a.id,a.request_id,a.group_id,a.group_name,
+ CASE WHEN a.decision='pending' THEN COALESCE(leader.id,'') ELSE COALESCE(a.decided_by,a.required_leader_id) END,
+ CASE WHEN a.decision='pending' THEN COALESCE(leader.username,'')
+      ELSE COALESCE(du.username,CASE WHEN a.decided_by IS NULL OR a.decided_by=a.required_leader_id THEN a.leader_username ELSE '' END) END,
+ COALESCE(leader.id,''), a.decision,a.decided_by,a.decided_at,a.comment
+ FROM dmp_migration.change_request_approvals a
+ LEFT JOIN (`+currentGroupLeaders+`) leader ON leader.group_id::text=a.group_id
+ LEFT JOIN users du ON du.id::text=a.decided_by
+ WHERE a.request_id = ANY($1) ORDER BY a.group_name,a.id`, requestIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +177,7 @@ func (r *Repository) approvalsFor(ctx context.Context, requestIDs []string) (map
 	for rows.Next() {
 		var a Approval
 		if err = rows.Scan(&a.ID, &a.RequestID, &a.GroupID, &a.GroupName, &a.RequiredLeaderID, &a.LeaderUsername,
-			&a.Decision, &a.DecidedBy, &a.DecidedAt, &a.Comment); err != nil {
+			&a.currentLeaderID, &a.Decision, &a.DecidedBy, &a.DecidedAt, &a.Comment); err != nil {
 			return nil, err
 		}
 		out[a.RequestID] = append(out[a.RequestID], a)
@@ -214,8 +219,8 @@ func (r *Repository) GetRequest(ctx context.Context, db, id string) (ChangeReque
 	return q, err
 }
 
-// decide records the caller's decision on every approval they owe. It returns true
-// when this decision completed the review and moved the request into the queue.
+// decide records the caller's decision for each required group they currently lead.
+// It returns true when this decision completed review and queued the request.
 func (r *Repository) decide(ctx context.Context, db, id, user string, approve bool, comment string, forbidSelf bool) (_ bool, resultErr error) {
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
@@ -256,22 +261,24 @@ func (r *Repository) decide(ctx context.Context, db, id, user string, approve bo
 	if !approve {
 		decision = "rejected"
 	}
-	tag, err := tx.Exec(ctx, `UPDATE dmp_migration.change_request_approvals
+	// Keep the leadership, membership and account rows stable until the decision commits.
+	tag, err := tx.Exec(ctx, `UPDATE dmp_migration.change_request_approvals a
  SET decision=$3,decided_by=$2,decided_at=now(),comment=$4
- WHERE request_id=$1 AND required_leader_id=$2 AND decision='pending'`, id, user, decision, comment)
+ WHERE a.request_id=$1 AND a.decision='pending'
+ AND EXISTS (`+leaderForApproval+` $2 FOR SHARE OF gl, ug, u)`, id, user, decision, comment)
 	if err != nil {
 		return false, err
 	}
 	if tag.RowsAffected() == 0 {
 		var owes bool
-		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_request_approvals
- WHERE request_id=$1 AND required_leader_id=$2)`, id, user).Scan(&owes); err != nil {
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_request_approvals a
+ WHERE a.request_id=$1 AND EXISTS (`+leaderForApproval+` $2))`, id, user).Scan(&owes); err != nil {
 			return false, err
 		}
 		if owes {
-			return false, fault("conflict", "You have already decided on this change request")
+			return false, fault("conflict", "Your group's approval for this change request has already been decided")
 		}
-		return false, fault("forbidden", "You are not a required approver for this change request")
+		return false, fault("forbidden", "Only the leader of a group this request is waiting on can decide it")
 	}
 
 	if !approve {
@@ -519,7 +526,6 @@ func (r *Repository) attemptFor(ctx context.Context, conn rowQuerier, q InFlight
 	return
 }
 
-// InFlightRequest is a request the worker had started but not finished.
 type InFlightRequest struct {
 	submissionCorrelationID string
 	queueTrace              telemetry.TraceContext
@@ -532,8 +538,6 @@ type InFlightRequest struct {
 	StartedAt               time.Time
 }
 
-// inFlight lists requests that are unresolved or have been running for longer than any
-// live execution could (so their worker must have stopped).
 func (r *Repository) inFlight(ctx context.Context, orphanAfter time.Duration) ([]InFlightRequest, error) {
 	rows, err := r.Pool.Query(ctx, `SELECT id,database_id,migration_id,operation,requested_by,status,started_at,
  submission_correlation_id,traceparent,tracestate
@@ -556,8 +560,6 @@ func (r *Repository) inFlight(ctx context.Context, orphanAfter time.Duration) ([
 	return out, rows.Err()
 }
 
-// blockedQueues lists databases whose queue head waits on an unresolved attempt,
-// with the user to reconcile as.
 func (r *Repository) blockedQueues(ctx context.Context) ([]QueuedRequest, error) {
 	rows, err := r.Pool.Query(ctx, `SELECT DISTINCT ON (r.database_id) r.id,r.database_id,r.migration_id,r.operation,
  r.sql_hash,r.requested_by,r.submission_correlation_id,r.traceparent,r.tracestate

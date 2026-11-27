@@ -3,7 +3,7 @@ import { api, session, href, workspaceHref, databaseBase } from "./api.js";
 import { titles } from "./navigation.js";
 import { replaceUrl, useRoute } from "./router.js";
 import { ErrorBox } from "./components.jsx";
-import { useAccessibleDatabases } from "./useAccessibleDatabases.js"
+import { useAccessibleDatabases } from "./useAccessibleDatabases.js";
 import { usePendingApprovals } from "./useChangeRequests.js";
 import { ChangeRequestPage } from "../pages/migration/ChangeRequestPage.jsx";
 import { Editor } from "../pages/migration/Editor.jsx";
@@ -26,7 +26,7 @@ const tabTitles = {
   ],
   approvals: [
     "Approvals",
-    "Changes waiting for your decision as a group leader, across every database you lead.",
+    "Changes waiting for your decision as a group leader.",
   ],
   plan: titles["query-plan"],
 };
@@ -282,7 +282,14 @@ export function MigrationApp() {
                       <ErrorBox error="Select a migration from history." />
                     ))}
                   {page === "schema-diff" && <SchemaDiff canEdit={historyData.can_edit} />}
-                  {page === "change-request" && <ChangeRequestPage databaseId={databaseId} />}
+                  {page === "change-request" && (
+                    <ChangeRequestPage
+                      databaseId={databaseId}
+                      requestId={route.request}
+                      canEdit={historyData.can_edit}
+                      onDecision={approvals.reload}
+                    />
+                  )}
                 </Fragment>
               )}
             </>

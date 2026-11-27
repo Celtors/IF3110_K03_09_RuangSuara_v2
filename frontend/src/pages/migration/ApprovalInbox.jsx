@@ -1,10 +1,10 @@
 import { date, requestHref, viewerId } from "../../migration/api.js";
-import { OPERATION_LABEL } from "../../migration/changeRequests.js";
+import { OPERATION_LABEL, viewerRole } from "../../migration/changeRequests.js";
 import { ErrorBox } from "../../migration/components.jsx";
-import { namesFrom } from "../../migration/changeRequests.js";
 import { Who } from "./ChangeRequestParts.jsx";
+import { namesFrom } from "./NamesFrom.jsx";
 
-// Requests, across every database, that wait for the signed-in user as a group leader.
+// Requests across databases that wait on a group the signed-in user leads.
 // `approvals` comes from usePendingApprovals in MigrationApp, which also drives the sidebar count.
 export function ApprovalInbox({ approvals, databases = [] }) {
   const me = viewerId();
@@ -18,7 +18,7 @@ export function ApprovalInbox({ approvals, databases = [] }) {
           <h2>
             Waiting for your approval <span className="badge badge-off count">{items.length}</span>
           </h2>
-          <p>You are the leader of a group with access to these databases. Open a request to read its SQL and decide.</p>
+          <p>Open a request to review its SQL and decide for the groups you lead.</p>
         </div>
         <button className="btn" onClick={reload} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}
@@ -47,8 +47,7 @@ export function ApprovalInbox({ approvals, databases = [] }) {
                   </td>
                   <td>{nameOf(r.database_id)}</td>
                   <td>
-                    {r.approvals
-                      .filter((a) => a.required_leader_id === me && a.decision === "pending")
+                    {viewerRole(r, me).pending
                       .map((a) => a.group_name || a.group_id)
                       .join(", ") || "—"}
                   </td>
