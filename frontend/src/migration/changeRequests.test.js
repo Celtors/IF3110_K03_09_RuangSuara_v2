@@ -1,18 +1,24 @@
 import { describe, it, expect } from "vitest";
 import { approvalProgress, isOpen, shortId, sha256Hex, sqlFor, trackFor, viewerRole } from "./changeRequests.js";
 
-const approval = (leader, decision = "pending") => ({ required_leader_id: leader, decision, group_name: leader });
+// `mine` is set by the server for approvals addressed to a group the viewer belongs to.
+const approval = (group, decision = "pending", mine = false) => ({ group_id: group, decision, group_name: group, mine });
 const request = (over = {}) => ({
   id: "r1", status: "pending_review", operation: "apply", requested_by: "carol",
-  approvals: [approval("alice"), approval("bob")], ...over,
+  approvals: [approval("analysts", "pending", true), approval("engineers")], ...over,
 });
 
 describe("viewerRole", () => {
-  it("lets a leader with a pending approval decide", () => {
+  it("lets a member of a group with a pending approval decide, leader or not", () => {
     expect(viewerRole(request(), "alice").canDecide).toBe(true);
+    expect(viewerRole(request(), "alice").mine).toHaveLength(1);
   });
-  it("does not let a leader decide twice or after the request left review", () => {
-    const decided = request({ approvals: [approval("alice", "approved"), approval("bob")] });
+  it("does not let someone outside the waiting groups decide", () => {
+    const outsider = request({ approvals: [approval("analysts"), approval("engineers")] });
+    expect(viewerRole(outsider, "dave").canDecide).toBe(false);
+  });
+  it("does not let a group decide twice or after the request left review", () => {
+    const decided = request({ approvals: [approval("analysts", "approved", true), approval("engineers")] });
     expect(viewerRole(decided, "alice").canDecide).toBe(false);
     expect(viewerRole(request({ status: "queued" }), "alice").canDecide).toBe(false);
   });

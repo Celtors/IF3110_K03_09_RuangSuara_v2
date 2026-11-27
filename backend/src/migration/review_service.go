@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -23,13 +22,10 @@ import (
 type Review struct {
 	Service   *Service
 	Approvers Approvers
-	// ForbidSelfApproval stops a leader from deciding on a request they submitted.
-	// Off by default because a single-team database whose leader submits a change
-	// would otherwise never be approvable. Set MIGRATION_FORBID_SELF_APPROVAL=true to enable.
 	ForbidSelfApproval bool
 
 	wake     chan struct{}
-	inflight sync.Map // request id -> struct{}, requests this process is running
+	inflight sync.Map
 }
 
 func NewReview(s *Service) *Review {
@@ -44,7 +40,7 @@ func NewReview(s *Service) *Review {
 	return r
 }
 
-// notify wakes the worker without blocking.
+
 func (r *Review) notify() {
 	select {
 	case r.wake <- struct{}{}:
@@ -63,7 +59,7 @@ func sqlHash(sql string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// rawSQL is the SQL an operation runs, without validating the migration.
+
 func rawSQL(m Migration, op Operation) string {
 	if op == OperationRollback {
 		return m.SQLDown
@@ -71,9 +67,7 @@ func rawSQL(m Migration, op Operation) string {
 	return m.SQLUp
 }
 
-// requestSQL checks that op can be requested for m in its current state and returns the
-// SQL it would run. Ordering rules (latest-first rollback, apply order) are enforced
-// again when the request runs, because other migrations can change before then.
+
 func requestSQL(m Migration, op Operation) (string, error) {
 	switch op {
 	case OperationApply:
@@ -107,20 +101,34 @@ func requestSQL(m Migration, op Operation) (string, error) {
 	return sql, nil
 }
 
-// checkApprovers refuses a submission nobody could approve.
+
 func checkApprovers(approvers []RequiredApprover) error {
 	if len(approvers) == 0 {
 		return fault("conflict", "No group has access to this database, so nobody can approve a change to it")
 	}
-	for _, a := range approvers {
-		if a.LeaderID == "" {
-			return fault("conflict", fmt.Sprintf("Group %q has no leader assigned. Ask an administrator to assign one", a.GroupName))
-		}
-		if !a.LeaderActive {
-			return fault("conflict", fmt.Sprintf("The leader of group %q (%s) is inactive. Ask an administrator to assign a new leader", a.GroupName, a.LeaderUsername))
+	return nil
+}
+
+func (r *Review) markMine(ctx context.Context, user string, requests ...*ChangeRequest) error {
+	groups, err := r.repo().groupsOf(ctx, user)
+	if err != nil {
+		return err
+	}
+	for _, q := range requests {
+		for i := range q.Approvals {
+			q.Approvals[i].Mine = groups[q.Approvals[i].GroupID]
 		}
 	}
 	return nil
+}
+
+// one reads a request back and marks the viewer's approvals.
+func (r *Review) one(ctx context.Context, user, db, id string) (ChangeRequest, error) {
+	q, err := r.repo().GetRequest(ctx, db, id)
+	if err != nil {
+		return q, err
+	}
+	return q, r.markMine(ctx, user, &q)
 }
 
 func faultInfo(err error) (code, message string) {
@@ -131,7 +139,7 @@ func faultInfo(err error) (code, message string) {
 	return "internal_error", "The migration operation could not be completed"
 }
 
-// Submit creates a change request and asks the leader of every group with access to approve it.
+// Submit creates a change request and asks every group with access to approve it.
 // It needs Edit permission, like running the migration directly did.
 func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) (ChangeRequest, error) {
 	db = canonicalDatabaseID(db)
@@ -169,19 +177,21 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 		return ChangeRequest{}, err
 	}
 
-	return r.repo().insertRequest(ctx, ChangeRequest{
+	q, err := r.repo().insertRequest(ctx, ChangeRequest{
 		ID: newID(), DatabaseID: db, MigrationID: m.ID, Operation: in.Operation,
 		SQLHash: sqlHash(sql), RequestedBy: user, submissionCorrelationID: telemetry.CorrelationID(ctx),
 	}, approvers)
+	if err != nil {
+		return q, err
+	}
+	return q, r.markMine(ctx, user, &q)
 }
 
-// Decide records the caller's approval or rejection. The caller must be a required
-// leader of the request. When the last required leader approves, the request is queued.
+
 func (r *Review) Decide(ctx context.Context, user, db, id string, approve bool, comment string) (ChangeRequest, error) {
 	db = canonicalDatabaseID(db)
 	ctx = migrationContext(ctx, user, db, "")
 	ctx = telemetry.With(ctx, telemetry.ID("job_id", id))
-	// A leader blocked from the database (for example through another group) cannot decide.
 	if err := r.Service.authorize(ctx, user, db, View); err != nil {
 		return ChangeRequest{}, err
 	}
@@ -194,7 +204,6 @@ func (r *Review) Decide(ctx context.Context, user, db, id string, approve bool, 
 	}
 
 	if approve {
-		// Never approve SQL that no longer matches what was submitted.
 		q, err := r.repo().GetRequest(ctx, db, id)
 		if err != nil {
 			return ChangeRequest{}, err
@@ -215,7 +224,7 @@ func (r *Review) Decide(ctx context.Context, user, db, id string, approve bool, 
 	if queued {
 		r.notify()
 	}
-	return r.repo().GetRequest(ctx, db, id)
+	return r.one(ctx, user, db, id)
 }
 
 // Cancel withdraws a request before it starts running. Only its submitter can cancel it.
@@ -234,7 +243,7 @@ func (r *Review) Cancel(ctx context.Context, user, db, id, reason string) (Chang
 		return ChangeRequest{}, err
 	}
 	slog.InfoContext(ctx, "approval.cancelled", "status", "cancelled")
-	return r.repo().GetRequest(ctx, db, id)
+	return r.one(ctx, user, db, id)
 }
 
 // Get returns one request with approvals and audit events.
@@ -243,7 +252,7 @@ func (r *Review) Get(ctx context.Context, user, db, id string) (ChangeRequest, e
 	if err := r.Service.authorize(ctx, user, db, View); err != nil {
 		return ChangeRequest{}, err
 	}
-	return r.repo().GetRequest(ctx, db, id)
+	return r.one(ctx, user, db, id)
 }
 
 // List returns a database's requests, newest first, optionally filtered.
@@ -258,12 +267,20 @@ func (r *Review) List(ctx context.Context, user, db, migrationID, status string,
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	return r.repo().queryRequests(ctx, `WHERE r.database_id=$1 AND ($2::text='' OR r.migration_id=$2::text)
+	out, err := r.repo().queryRequests(ctx, `WHERE r.database_id=$1 AND ($2::text='' OR r.migration_id=$2::text)
  AND ($3::text='' OR r.status=$3::text) ORDER BY r.created_at DESC,r.seq DESC LIMIT $4`, db, migrationID, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	ptrs := make([]*ChangeRequest, len(out))
+	for i := range out {
+		ptrs[i] = &out[i]
+	}
+	return out, r.markMine(ctx, user, ptrs...)
 }
 
-// PendingApprovals lists the requests, across all databases, that are waiting for this
-// user's decision and that they may still see.
+// PendingApprovals lists the requests, across all databases, that are waiting on a group
+// this user belongs to or leads, and that they may still see.
 func (r *Review) PendingApprovals(ctx context.Context, user string) ([]ChangeRequest, error) {
 	if user == "" || r.Service.Access == nil {
 		return nil, fault("unauthenticated", "A validated session is required")
@@ -273,7 +290,7 @@ func (r *Review) PendingApprovals(ctx context.Context, user string) ([]ChangeReq
 	}
 	all, err := r.repo().queryRequests(ctx, `WHERE r.status='pending_review' AND EXISTS (
  SELECT 1 FROM dmp_migration.change_request_approvals a
- WHERE a.request_id=r.id AND a.required_leader_id=$1 AND a.decision='pending')
+ WHERE a.request_id=r.id AND a.decision='pending' AND `+memberOfGroup("$1")+`)
  ORDER BY r.created_at LIMIT 200`, user)
 	if err != nil {
 		return nil, err
@@ -294,5 +311,9 @@ func (r *Review) PendingApprovals(ctx context.Context, user string) ([]ChangeReq
 			out = append(out, q)
 		}
 	}
-	return out, nil
+	ptrs := make([]*ChangeRequest, len(out))
+	for i := range out {
+		ptrs[i] = &out[i]
+	}
+	return out, r.markMine(ctx, user, ptrs...)
 }

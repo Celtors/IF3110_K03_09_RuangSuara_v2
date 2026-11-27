@@ -223,7 +223,7 @@ export function Editor({ current, canEdit }) {
               placeholder="October release"
             />
             <div className="alert notice">
-              Submitting asks the leader of every group with access to{" "}
+              Submitting asks every group with access to{" "}
               <strong>{database}</strong> to approve this SQL. Once approved it
               runs from the queue. Failed transactions roll back. Uncertain
               outcomes require reconciliation.

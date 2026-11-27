@@ -26,7 +26,7 @@ const tabTitles = {
   ],
   approvals: [
     "Approvals",
-    "Changes waiting for your decision as a group leader, across every database you lead.",
+    "Changes waiting for your decision as a group member, across every database your groups can access.",
   ],
   plan: titles["query-plan"],
 };

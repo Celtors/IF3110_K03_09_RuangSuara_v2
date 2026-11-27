@@ -57,10 +57,10 @@ func RegisterRoutes(router gin.IRouter, s *Service) {
 	g.POST("/migrations", save)
 	g.PATCH("/migrations/:migrationId", save)
 	g.POST("/migrations/:migrationId/execute", func(c *gin.Context) {
-		// Every execution needs approval from the leader of each group with access, so direct
+		// Every execution needs approval from each group with access, so direct
 		// execution is closed. MIGRATION_ALLOW_DIRECT_EXECUTE=true restores it for local development only.
 		if os.Getenv("MIGRATION_ALLOW_DIRECT_EXECUTE") != "true" {
-			respond(c, nil, fault("approval_required", "Submit a change request; it runs after every required group leader approves"))
+			respond(c, nil, fault("approval_required", "Submit a change request; it runs after every required group approves"))
 			return
 		}
 		a, e := s.Execute(c.Request.Context(), c.GetString("migration_user"), c.Param("id"), c.Param("migrationId"))

@@ -5,8 +5,8 @@ import { api, apiWithSessionRetry, databaseBase, viewerId } from "./api.js";
 //   Draft -> Pending review -> Approved -> Pending (Queue) -> Running -> Success / Failed
 //
 // "Draft" is the migration's own state. A change request exists per execution
-// (apply, rollback or roll forward) and is approved by the leader of every group
-// that has access to the database.
+// (apply, rollback or roll forward) and is approved by every group that has access
+// to the database. Any member of a group may decide for it.
 
 export const OPERATION_LABEL = {
   apply: "Apply",
@@ -67,7 +67,7 @@ export const approveChangeRequest = decide("approve");
 export const rejectChangeRequest = decide("reject");
 export const cancelChangeRequest = decide("cancel");
 
-// Requests, across all databases, waiting for the signed-in user's decision.
+// Requests, across all databases, waiting on a group the signed-in user belongs to.
 export async function pendingApprovals() {
   const data = await api("/api/change-requests/pending-approval");
   return data.change_requests ?? [];
@@ -76,7 +76,8 @@ export async function pendingApprovals() {
 // What the signed-in user may do with a request. The server enforces every rule again;
 // this only decides which buttons to show.
 export function viewerRole(request, userId = viewerId()) {
-  const mine = (request.approvals ?? []).filter((a) => a.required_leader_id === userId);
+  // The server marks the approvals addressed to a group the signed-in user belongs to.
+  const mine = (request.approvals ?? []).filter((a) => a.mine);
   const isRequester = Boolean(userId) && request.requested_by === userId;
   return {
     isRequester,

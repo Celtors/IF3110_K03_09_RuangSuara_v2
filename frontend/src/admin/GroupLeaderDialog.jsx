@@ -3,9 +3,9 @@ import { api } from '../api/endpoints'
 import { useResource } from '../api/useResource'
 import Modal from '../components/Modal'
 
-// Choose the leader of a group. The leader approves, on behalf of the group, every database
-// change that touches a database the group can access, so it has to be a person in the group:
-// the list offers the members only. Opened by admins with edit access; the server refuses anyone
+// Choose the leader of a group. The leader is the group's named contact for database changes
+// (any member can approve them), so it has to be a person in the group: the list offers the
+// members only. Opened by admins with edit access; the server refuses anyone
 // else.
 export default function GroupLeaderDialog({ group, onClose, onSaved }) {
   const fetchMembers = useCallback(() => api.usersOfGroup(group.id), [group.id])
@@ -45,9 +45,9 @@ export default function GroupLeaderDialog({ group, onClose, onSaved }) {
           {group.leader_name ? (
             <>Current leader: <strong>{group.leader_name}</strong>.</>
           ) : (
-            'This group has no leader yet. Until it has one, a change to a database it can access cannot be submitted for approval.'
+            'This group has no leader yet. Its members can still approve changes to databases it can access.'
           )}{' '}
-          The leader approves database changes on behalf of the whole group.
+          The leader is shown as the group's contact on change requests.
         </p>
         {group.leader_name && !loading && !error && !current && (
           <p className="alert alert-error" role="alert">

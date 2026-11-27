@@ -68,7 +68,7 @@ export function Details({ current: m, canEdit }) {
             <div>
               <h2>Run this migration</h2>
               <p>
-                Every execution needs approval from the leader of each group with access to this database, then runs from the
+                Every execution needs approval from each group with access to this database, then runs from the
                 queue.
               </p>
             </div>
