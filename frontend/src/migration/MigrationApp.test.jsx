@@ -27,7 +27,7 @@ const migration = { id: "m1", name: "Add students", description: "", state: "app
 const queryResult = (value) => ({ columns: ["v"], column_types: ["text"], rows: [[value]], row_count: 1, has_result_set: true, truncated: false, execution_time_ms: 1 });
 
 function setup({ url = "?database=db-1", databases = DBS, listError } = {}) {
-  navigate(`/migrations/index.html${url}`, { replace: true });
+  navigate(`/migrations${url}`, { replace: true });
   nav.database = new URLSearchParams(url).get("database") ?? "";
   mocks.session.mockResolvedValue({ csrf_token: "t" });
   mocks.api.mockImplementation(async (path, method = "GET") => {

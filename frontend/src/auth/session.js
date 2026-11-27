@@ -1,8 +1,9 @@
 import { api } from '../api/endpoints'
+import { matchPath } from '../paths'
 
-export const LOGIN_PAGE = '/login.html'
-export const ADMIN_PAGE = '/admin/users.html'
-export const HOME_PAGE = '/home.html'
+export const LOGIN_PAGE = '/login'
+export const ADMIN_PAGE = '/admin/users'
+export const HOME_PAGE = '/home'
 
 // The session lives in an HttpOnly cookie that JavaScript cannot read, so the server is the
 // only source of truth: every page asks /session-manager/me who is signed in and whether
@@ -29,7 +30,14 @@ export async function logout() {
   }
 }
 
-// Only same-site absolute paths are accepted as a post-login destination.
-export function safeNext(raw) {
-  return raw && raw.startsWith('/') && !raw.startsWith('//') && !raw.startsWith('/\\') ? raw : ADMIN_PAGE
+// Where to go after signing in. A ?next= destination is honoured only when it is a page of this
+// app (same-site path, nothing the server answers itself) and the user may open it; otherwise
+// admins land on the admin console and everyone else on the home page.
+export function landingFor(me, rawNext) {
+  const ok = rawNext && rawNext.startsWith('/') && !rawNext.startsWith('//') && !rawNext.startsWith('/\\')
+  if (ok) {
+    const route = matchPath(rawNext.split(/[?#]/)[0])
+    if (route && route.name !== 'login' && route.name !== 'root' && (route.name !== 'admin' || me.admin)) return rawNext
+  }
+  return me.admin ? ADMIN_PAGE : HOME_PAGE
 }

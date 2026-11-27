@@ -50,22 +50,25 @@ export async function apiWithSessionRetry(path, method, body) {
     }
   }
 }
+// /migrations for the workspace home, /migrations/<page> for the rest.
+const migrationPath = (page) => (page === "index" ? "/migrations" : `/migrations/${page}`);
+
 export function href(page, database, id) {
   const q = new URLSearchParams({ database });
   if (id) q.set("id", id);
-  return `/migrations/${page}.html?${q}`;
+  return `${migrationPath(page)}?${q}`;
 }
 
 // URL of a change request page. It uses ?request= because ?id= is a migration id.
 export function requestHref(database, request) {
-  return `/migrations/change-request.html?${new URLSearchParams({ database, request })}`;
+  return `${migrationPath("change-request")}?${new URLSearchParams({ database, request })}`;
 }
 
-// URL of a workspace tab: index.html hosts the whole workspace; ?tab= selects it.
+// URL of a workspace tab: /migrations hosts the whole workspace; ?tab= selects it.
 export function workspaceHref(tab, database) {
   const q = new URLSearchParams({ tab });
   if (database) q.set("database", database);
-  return `/migrations/index.html?${q}`;
+  return `${migrationPath("index")}?${q}`;
 }
 
 export function date(value) {

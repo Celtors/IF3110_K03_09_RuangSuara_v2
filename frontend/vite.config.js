@@ -1,50 +1,37 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
-import { fileURLToPath } from 'node:url'
+import { matchPath } from './src/paths.js'
 
-const page = (file) => fileURLToPath(new URL(file, import.meta.url))
-
-// Multi-page app: every HTML file below is its own page with its own entry script, and moving
-// between them is a normal link / full page load. The one exception is the migration app,
-// which is a single-page app: migrations/index.html is its only entry and a client-side
-// router (src/migration/router.js) shows the page named in the URL.
+// Single-page app: index.html is the only HTML entry and src/router.js shows the screen named
+// in the URL (/login, /admin/users, /migrations/details?...; the old .html names still work). The
+// server has to answer every one of them with the same shell. Production does that in the Go
+// router (backend/src/internal/app/router.go); this plugin does it for `vite` and `vite preview`.
 //
 // The backend (Gin, :8080) issues an HttpOnly `ssid` cookie but its CORS setup does
 // not allow credentials, so the browser talks to it through this proxy and every
 // request stays same-origin.
 const backend = process.env.VITE_BACKEND_URL || 'http://localhost:8080'
 
-// The migration app keeps its /migrations/<page>.html URLs, so every one of them (opened
-// directly or refreshed) must get the same shell. Production does this in the Go router.
-const MIGRATION_PAGE = /^\/migrations\/(?:(?:history|editor|details|schema-diff|query-plan|change-request)\.html)?(\?.*)?$/
-const migrationShell = {
-  name: 'migration-spa-fallback',
-  configureServer: (server) => server.middlewares.use(rewriteMigrationPage),
-  configurePreviewServer: (server) => server.middlewares.use(rewriteMigrationPage),
-}
-function rewriteMigrationPage(req, _res, next) {
-  const m = MIGRATION_PAGE.exec(req.url ?? '')
-  if (m) req.url = '/migrations/index.html' + (m[1] ?? '')
+function serveShell(req, _res, next) {
+  const [pathname, query = ''] = (req.url ?? '').split('?')
+  if (matchPath(pathname) && pathname !== '/') req.url = '/index.html' + (query ? `?${query}` : '')
   next()
+}
+const spaShell = {
+  name: 'spa-shell',
+  // Braces, not an expression body: a hook that returns a function is run by Vite as a "post"
+  // hook, and `use()` returns the connect app itself.
+  configureServer(server) {
+    server.middlewares.use(serveShell)
+  },
+  configurePreviewServer(server) {
+    server.middlewares.use(serveShell)
+  },
 }
 
 export default defineConfig({
-  plugins: [react(), migrationShell],
-  appType: 'mpa',
-  build: {
-    rollupOptions: {
-      input: {
-        index: page('./index.html'),
-        login: page('./login.html'),
-        home: page('./home.html'),
-        users: page('./admin/users.html'),
-        groups: page('./admin/groups.html'),
-        databases: page('./admin/databases.html'),
-        policies: page('./admin/policies.html'),
-        migrationHome: page('./migrations/index.html'),
-      },
-    },
-  },
+  plugins: [react(), spaShell],
+  appType: 'spa',
   server: {
     proxy: {
       '/api': { target: backend },

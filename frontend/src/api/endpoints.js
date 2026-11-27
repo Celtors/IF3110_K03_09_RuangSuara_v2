@@ -29,6 +29,9 @@ export const api = {
   deleteGroup: (id) => http.delete(`${CP}/groups`, { id }),
 
   groupsOfUser: (id) => http.get(`${CP}/users/groups?id=${encodeURIComponent(id)}`),
+  // Admin only (and only admins with edit access). The leader of a group approves its database changes.
+  // The list of groups already carries each group's leader as `leader_name`.
+  setGroupLeader: (user_id, group_id) => http.post(`${CP}/groups/leader`, { user_id, group_id }),
   usersOfGroup: (id) => http.get(`${CP}/groups/users?id=${encodeURIComponent(id)}`),
   addMember: (user_id, group_id) => http.post(`${CP}/groups/users`, { user_id, group_id }),
   removeMember: (user_id, group_id) => http.delete(`${CP}/groups/users`, { user_id, group_id }),

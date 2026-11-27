@@ -103,6 +103,7 @@ p { margin: 0; }
 .badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600; }
 .badge-ok { background: var(--ok-bg); color: var(--ok); }
 .badge-off { background: var(--off-bg); color: var(--muted); }
+.badge-warn { background: color-mix(in srgb, var(--amber) 20%, var(--surface)); color: var(--ink); }
 
 /* login */
 .login { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }

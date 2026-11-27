@@ -1,18 +1,15 @@
-import { LOGIN_PAGE, logout } from '../auth/session'
+import { useSession } from '../auth/session-context'
 import ToastProvider from '../components/ToastProvider'
 
 const NAV = [
-  { key: 'users', href: '/admin/users.html', label: 'Users' },
-  { key: 'groups', href: '/admin/groups.html', label: 'Groups' },
-  { key: 'databases', href: '/admin/databases.html', label: 'Database connections' },
-  { key: 'policies', href: '/admin/policies.html', label: 'Database access' },
+  { key: 'users', href: '/admin/users', label: 'Users' },
+  { key: 'groups', href: '/admin/groups', label: 'Groups' },
+  { key: 'databases', href: '/admin/databases', label: 'Database connections' },
+  { key: 'policies', href: '/admin/policies', label: 'Database access' },
 ]
 
 export default function AdminShell({ active, username, access, children }) {
-  async function signOut() {
-    await logout()
-    window.location.assign(LOGIN_PAGE)
-  }
+  const { signOut } = useSession()
 
   return (
     <ToastProvider>
@@ -20,7 +17,7 @@ export default function AdminShell({ active, username, access, children }) {
         <aside className="sidebar">
           <span className="brand-mark">RuangSuara</span>
           <nav aria-label="Admin sections">
-            <a className="nav-link" href="/migrations/">Migrations</a>
+            <a className="nav-link" href="/migrations">Migrations</a>
             {NAV.map((n) => (
               <a
                 key={n.key}
