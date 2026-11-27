@@ -210,9 +210,15 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 	}
 
 	q, err := r.repo().insertRequest(ctx, ChangeRequest{
-		ID: newID(), DatabaseID: db, MigrationID: m.ID, Operation: in.Operation,
-		Batch: batch, CompensationSQLHash: downHash,
-		SQLHash: sqlHash(sql), RequestedBy: user, submissionCorrelationID: telemetry.CorrelationID(ctx),
+		ID:                      newID(),
+		DatabaseID:              db,
+		MigrationID:             m.ID,
+		Operation:               in.Operation,
+		Batch:                   batch,
+		CompensationSQLHash:     downHash,
+		SQLHash:                 sqlHash(sql),
+		RequestedBy:             user,
+		submissionCorrelationID: telemetry.CorrelationID(ctx),
 	}, approvers)
 	if err != nil {
 		return q, err

@@ -517,8 +517,10 @@ describe("Overview navigation", () => {
 
     for (const name of ["Migrations", "SQL console", "Query plans"]) {
       await user.click(navLink(name));
-      expect(needDatabase()).toBeInTheDocument();
-      expect(screen.getByRole("alert")).toHaveTextContent("not accessible to you");
+      await waitFor(() => {
+        expect(needDatabase()).toBeInTheDocument();
+        expect(screen.getByRole("alert")).toHaveTextContent("not accessible to you");
+      });
     }
 
     expect(
@@ -1468,9 +1470,10 @@ describe("Approval workflow", () => {
       await screen.findByRole("link", { name: "Review →" }),
     );
 
-    expect(
-      await screen.findByText("Your decision is needed"),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("Your decision is needed")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Approve…" })).toBeEnabled();
+    });
 
     await user.click(
       screen.getByRole("button", { name: "Approve…" }),
@@ -1566,7 +1569,7 @@ describe("Migration recovery and compensation", () => {
       viewer,
     });
 
-    await screen.findByRole("heading", { name: "Required approvals" });
+    await waitFor(() => expect(fieldValue("Committed rows")).toHaveTextContent("200"));
 
     expect(
       jobPanel().queryByRole("button", { name: "Resume" }),
@@ -1586,7 +1589,7 @@ describe("Migration recovery and compensation", () => {
       },
     });
 
-    await screen.findByRole("heading", { name: "Required approvals" });
+    await waitFor(() => expect(fieldValue("Committed rows")).toHaveTextContent("200"));
 
     expect(
       jobPanel().queryByRole("button", { name: "Resume" }),
@@ -1694,13 +1697,11 @@ describe("Migration recovery and compensation", () => {
       dialog.getByRole("button", { name: "Compensate" }),
     );
 
-    const alert = await dialog.findByRole("alert");
-
-    expect(alert).toHaveTextContent("Approved down SQL is unavailable");
-
-    expect(alert).toHaveTextContent(
-      "A new corrective migration is required",
-    );
+    await waitFor(() => {
+      const alert = within(screen.getByRole("dialog")).getByRole("alert");
+      expect(alert).toHaveTextContent("Approved down SQL is unavailable");
+      expect(alert).toHaveTextContent("A new corrective migration is required");
+    });
   });
 
   it("offers continuation for interrupted compensation", async () => {

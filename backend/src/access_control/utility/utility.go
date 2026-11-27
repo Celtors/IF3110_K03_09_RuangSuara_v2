@@ -1,8 +1,8 @@
 package utility
 
 import (
-	"crypto/sha256"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 
 	"golang.org/x/crypto/bcrypt"
@@ -30,7 +30,7 @@ func CryptoRandString(length int) (string, error) {
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
-	
+
 	for i, b := range bytes {
 		bytes[i] = charset[b%byte(len(charset))]
 	}
