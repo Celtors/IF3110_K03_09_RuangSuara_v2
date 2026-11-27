@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"os"
 	"strconv"
@@ -60,7 +60,8 @@ func loadConsoleLimits(getenv func(string) string) consoleLimits {
 }
 
 // consolePermission resolves the caller's real permission exactly once.
-func (s *Service) consolePermission(ctx context.Context, user, db string) (Permission, error) {
+func (s *Service) consolePermission(ctx context.Context, user, db string) (_ Permission, resultErr error) {
+	defer func() { authorizationOutcome(ctx, View, resultErr) }()
 	if user == "" || s.Access == nil {
 		return NoAccess, fault("unauthenticated", "A validated session is required")
 	}
@@ -90,6 +91,7 @@ func (s *Service) consolePermission(ctx context.Context, user, db string) (Permi
 func (s *Service) Query(ctx context.Context, user, db, sql string) (QueryResult, error) {
 	result := QueryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}}
 	db = canonicalDatabaseID(db)
+	ctx = migrationContext(ctx, user, db, "")
 	permission, err := s.consolePermission(ctx, user, db)
 	if err != nil {
 		return result, err
@@ -106,17 +108,14 @@ func (s *Service) Query(ctx context.Context, user, db, sql string) (QueryResult,
 		return result, err
 	}
 	result, err = runConsoleQuery(ctx, pool, s.Repository.Pool, permission, sql, limits)
-	outcome := "ok"
 	if err != nil {
-		outcome = "error"
-		var f *Fault
-		if errors.As(err, &f) {
-			outcome = f.Code
-		}
+		code, _ := faultInfo(err)
+		slog.WarnContext(ctx, "database.console", "status", "failed", "reason", code,
+			"access_mode", result.AccessMode, "statement_kind", kind, "duration_ms", result.ExecutionTimeMS)
+	} else {
+		slog.InfoContext(ctx, "database.console", "status", "succeeded",
+			"access_mode", result.AccessMode, "statement_kind", kind, "duration_ms", result.ExecutionTimeMS)
 	}
-	// Audit trail without SQL text or credentials.
-	log.Printf("sql_console user=%s database=%s access=%s statement=%s outcome=%s ms=%.2f",
-		user, db, result.AccessMode, kind, outcome, result.ExecutionTimeMS)
 	return result, err
 }
 
@@ -166,7 +165,7 @@ func runConsoleQuery(ctx context.Context, pool, platform *pgxpool.Pool, permissi
 	if err != nil {
 		return result, fault("database_unavailable", "Target connection unavailable before SQL execution")
 	}
-	defer rollback(tx) // no-op after Commit; rolls back every failure path
+	defer rollback(ctx, tx) // no-op after Commit; rolls back every failure path
 
 	statementMS := strconv.FormatInt(limits.Timeout.Milliseconds(), 10)
 	idleMS := strconv.FormatInt((limits.Timeout + 5*time.Second).Milliseconds(), 10)

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +13,7 @@ import (
 	accesscontrol "backend/access_control"
 	databasemanagement "backend/database_management"
 	"backend/internal/app"
+	"backend/internal/telemetry"
 	"backend/migration"
 
 	"github.com/gin-contrib/cors"
@@ -21,10 +22,12 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(telemetry.NewHandler(os.Stdout)))
+	gin.SetMode(gin.ReleaseMode)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx); err != nil {
-		log.Print(err)
+		slog.ErrorContext(ctx, "application.stopped", "status", "failed", "error", err.Error())
 		os.Exit(1)
 	}
 }
@@ -32,9 +35,14 @@ func main() {
 func run(ctx context.Context) error {
 	var repository *migration.Repository
 	if dsn := accesscontrol.PlatformDSN(); dsn != "" {
-		pool, err := pgxpool.New(ctx, dsn)
+		config, err := pgxpool.ParseConfig(dsn)
 		if err != nil {
 			return errors.New("invalid platform database configuration")
+		}
+		config.ConnConfig.Tracer = telemetry.PostgresTracer{Scope: "platform"}
+		pool, err := pgxpool.NewWithConfig(ctx, config)
+		if err != nil {
+			return errors.New("could not open platform database pool")
 		}
 		defer pool.Close()
 		repository = &migration.Repository{Pool: pool}
@@ -45,7 +53,7 @@ func run(ctx context.Context) error {
 			return errors.New("could not initialize Migration platform storage")
 		}
 	} else {
-		log.Print("PLATFORM_DATABASE_URL is unset; Migration storage is unavailable")
+		slog.WarnContext(ctx, "migration.storage", "status", "unavailable")
 	}
 
 	service, closeDependencies, err := migration.MigrationService(ctx, repository)
@@ -100,7 +108,7 @@ func run(ctx context.Context) error {
 		case <-serverDone:
 		}
 	}()
-	log.Printf("Shared backend listening at %s", addr)
+	slog.InfoContext(ctx, "application.starting", "status", "started")
 	err = server.ListenAndServe()
 	close(serverDone)
 	// Shutdown drains active requests before the deferred pool closures run.
@@ -112,8 +120,8 @@ func run(ctx context.Context) error {
 }
 
 func newRouter(service *migration.Service, assets string) (*gin.Engine, func(), error) {
-	router := gin.Default()
-	router.Use(cors.Default())
+	router := gin.New()
+	router.Use(telemetry.HTTP, cors.Default())
 	platform, err := accesscontrol.SetupAccessControl(router)
 	if err != nil {
 		return nil, nil, err

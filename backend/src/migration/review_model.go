@@ -60,24 +60,25 @@ type RequestEvent struct {
 // migration. It must be approved by the leader of every group with access to the
 // database before it is queued and executed.
 type ChangeRequest struct {
-	ID            string        `json:"id"`
-	DatabaseID    string        `json:"database_id"`
-	MigrationID   string        `json:"migration_id"`
-	MigrationName string        `json:"migration_name"`
-	Operation     Operation     `json:"operation"`
-	SQLHash       string        `json:"sql_hash"`
-	RequestedBy   string        `json:"requested_by"`
-	Status        RequestStatus `json:"status"`
-	AttemptID     *string       `json:"attempt_id"`
-	RejectReason  string        `json:"reject_reason,omitempty"`
-	ResultCode    string        `json:"result_code,omitempty"`
-	ResultMessage string        `json:"result_message,omitempty"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
-	ApprovedAt    *time.Time    `json:"approved_at"`
-	QueuedAt      *time.Time    `json:"queued_at"`
-	StartedAt     *time.Time    `json:"started_at"`
-	CompletedAt   *time.Time    `json:"completed_at"`
+	submissionCorrelationID string
+	ID                      string        `json:"id"`
+	DatabaseID              string        `json:"database_id"`
+	MigrationID             string        `json:"migration_id"`
+	MigrationName           string        `json:"migration_name"`
+	Operation               Operation     `json:"operation"`
+	SQLHash                 string        `json:"sql_hash"`
+	RequestedBy             string        `json:"requested_by"`
+	Status                  RequestStatus `json:"status"`
+	AttemptID               *string       `json:"attempt_id"`
+	RejectReason            string        `json:"reject_reason,omitempty"`
+	ResultCode              string        `json:"result_code,omitempty"`
+	ResultMessage           string        `json:"result_message,omitempty"`
+	CreatedAt               time.Time     `json:"created_at"`
+	UpdatedAt               time.Time     `json:"updated_at"`
+	ApprovedAt              *time.Time    `json:"approved_at"`
+	QueuedAt                *time.Time    `json:"queued_at"`
+	StartedAt               *time.Time    `json:"started_at"`
+	CompletedAt             *time.Time    `json:"completed_at"`
 	// QueuePosition is 1 for the request that runs next on its database; nil unless queued.
 	QueuePosition *int64         `json:"queue_position"`
 	Approvals     []Approval     `json:"approvals"`
@@ -107,10 +108,11 @@ type RequiredApprover struct {
 
 // QueuedRequest is the part of a request the worker needs to run it.
 type QueuedRequest struct {
-	ID          string
-	DatabaseID  string
-	MigrationID string
-	Operation   Operation
-	SQLHash     string
-	RequestedBy string
+	submissionCorrelationID string
+	ID                      string
+	DatabaseID              string
+	MigrationID             string
+	Operation               Operation
+	SQLHash                 string
+	RequestedBy             string
 }

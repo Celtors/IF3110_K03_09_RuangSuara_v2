@@ -2,8 +2,11 @@ package migration
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
+
+	"backend/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 )
@@ -116,8 +119,12 @@ func requireSession(s *Service) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		ctx := telemetry.With(c.Request.Context(), telemetry.ID("actor_id", user),
+			telemetry.ID("migration_id", c.Param("migrationId")), telemetry.ID("job_id", c.Param("requestId")))
+		c.Request = c.Request.WithContext(ctx)
 		if c.Request.Method != http.MethodGet {
 			if err = s.Access.CSRF(c.Request); err != nil {
+				slog.WarnContext(ctx, "authorization.csrf", "status", "denied")
 				respond(c, nil, fault("csrf_failed", "CSRF token or request origin is invalid"))
 				c.Abort()
 				return

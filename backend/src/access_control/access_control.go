@@ -1,18 +1,21 @@
 package accesscontrol
 
 import (
+	"context"
 	"errors"
 	"os"
 	"time"
 
-	dbmanagement "backend/database_management"
-
 	controlpanel "backend/access_control/control_panel"
 	sessionmanager "backend/access_control/session_manager"
+	dbmanagement "backend/database_management"
+	"backend/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // PlatformDSN supplies one platform database configuration to every module.
@@ -29,7 +32,9 @@ func PlatformDSN() string {
 
 func SetupAccessControl(r *gin.Engine) (*gorm.DB, error) {
 	dsn := PlatformDSN()
-	access_control_db, db_err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	access_control_db, db_err := gorm.Open(postgres.New(postgres.Config{
+		DSN: dsn, OptionOpenDB: []stdlib.OptionOpenDB{telemetry.TraceStdlib("platform")},
+	}), &gorm.Config{Logger: logger.Discard})
 	if db_err != nil {
 		return nil, errors.New("could not open platform database")
 	}
@@ -43,90 +48,53 @@ func SetupAccessControl(r *gin.Engine) (*gorm.DB, error) {
 	}
 	dbmanagement.RegisterRoutes(r, access_control_db)
 	admin := r.Group("/admin-control-panel", dbmanagement.PlatformAdminMiddlewares(access_control_db)...)
+	withPlatform := func(handler func(*gin.Context, *gorm.DB)) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			handler(c, access_control_db.WithContext(context.WithoutCancel(c.Request.Context())))
+		}
+	}
 
-	admin.POST("/users", func(c *gin.Context) {
-		controlpanel.CreateUserRequest(c, access_control_db)
-	})
+	admin.POST("/users", withPlatform(controlpanel.CreateUserRequest))
 
-	admin.GET("/users", func(c *gin.Context) {
-		controlpanel.GetAllUsersRequest(c, access_control_db)
-	})
+	admin.GET("/users", withPlatform(controlpanel.GetAllUsersRequest))
 
-	admin.PATCH("/users", func(c *gin.Context) {
-		controlpanel.UpdateUserRequest(c, access_control_db)
-	})
+	admin.PATCH("/users", withPlatform(controlpanel.UpdateUserRequest))
 
-	admin.DELETE("/users", func(c *gin.Context) {
-		controlpanel.DeleteUserRequest(c, access_control_db)
-	})
+	admin.DELETE("/users", withPlatform(controlpanel.DeleteUserRequest))
 
-	admin.POST("/groups", func(c *gin.Context) {
-		controlpanel.CreateGroupRequest(c, access_control_db)
-	})
+	admin.POST("/groups", withPlatform(controlpanel.CreateGroupRequest))
 
-	admin.GET("/groups", func(c *gin.Context) {
-		controlpanel.GetAllGroupsRequest(c, access_control_db)
-	})
+	admin.GET("/groups", withPlatform(controlpanel.GetAllGroupsRequest))
 
-	admin.PATCH("/groups", func(c *gin.Context) {
-		controlpanel.UpdateGroupRequest(c, access_control_db)
-	})
+	admin.PATCH("/groups", withPlatform(controlpanel.UpdateGroupRequest))
 
-	admin.DELETE("/groups", func(c *gin.Context) {
-		controlpanel.DeleteGroupRequest(c, access_control_db)
-	})
+	admin.DELETE("/groups", withPlatform(controlpanel.DeleteGroupRequest))
 
-	admin.POST("/users/groups", func(c *gin.Context) {
-		controlpanel.AddUserToGroup(c, access_control_db)
-	})
+	admin.POST("/users/groups", withPlatform(controlpanel.AddUserToGroup))
 
-	admin.GET("/users/groups", func(c *gin.Context) {
-		controlpanel.GetGroupsFromUserRequest(c, access_control_db)
-	})
+	admin.GET("/users/groups", withPlatform(controlpanel.GetGroupsFromUserRequest))
 
-	admin.DELETE("/users/groups", func(c *gin.Context) {
-		controlpanel.RemoveUserFromGroup(c, access_control_db)
-	})
+	admin.DELETE("/users/groups", withPlatform(controlpanel.RemoveUserFromGroup))
 
-	admin.POST("/groups/users", func(c *gin.Context) {
-		controlpanel.AddUserToGroup(c, access_control_db)
-	})
+	admin.POST("/groups/users", withPlatform(controlpanel.AddUserToGroup))
 
-	admin.GET("/groups/users", func(c *gin.Context) {
-		controlpanel.GetUsersFromGroupRequest(c, access_control_db)
-	})
+	admin.GET("/groups/users", withPlatform(controlpanel.GetUsersFromGroupRequest))
 
-	admin.DELETE("/groups/users", func(c *gin.Context) {
-		controlpanel.RemoveUserFromGroup(c, access_control_db)
-	})
+	admin.DELETE("/groups/users", withPlatform(controlpanel.RemoveUserFromGroup))
 
-	admin.GET("/groups/leader", func(c *gin.Context) {
-		controlpanel.GetGroupLeader(c, access_control_db)
-	})
+	admin.GET("/groups/leader", withPlatform(controlpanel.GetGroupLeader))
 
-	admin.POST("/groups/leader", func(c *gin.Context) {
-		controlpanel.SetGroupLeader(c, access_control_db)
-	})
+	admin.POST("/groups/leader", withPlatform(controlpanel.SetGroupLeader))
 
-	admin.GET("/databases", func(c *gin.Context) {
-		controlpanel.GetAllDatabasesRequest(c, access_control_db)
-	})
+	admin.GET("/databases", withPlatform(controlpanel.GetAllDatabasesRequest))
 
-	admin.POST("/policy", func(c *gin.Context) {
-		controlpanel.AddGroupPolicyRequest(c, access_control_db)
-	})
+	admin.POST("/policy", withPlatform(controlpanel.AddGroupPolicyRequest))
 
-	admin.GET("/policy", func(c *gin.Context) {
-		controlpanel.GetPoliciesRequest(c, access_control_db)
-	})
+	admin.GET("/policy", withPlatform(controlpanel.GetPoliciesRequest))
 
-	admin.PATCH("/policy", func(c *gin.Context) {
-		controlpanel.UpdateGroupPolicyRequest(c, access_control_db)
-	})
+	admin.PATCH("/policy", withPlatform(controlpanel.UpdateGroupPolicyRequest))
 
-	admin.DELETE("/policy", func(c *gin.Context) {
-		controlpanel.RemoveGroupPolicyRequest(c, access_control_db)
-	})
+	admin.DELETE("/policy", withPlatform(controlpanel.RemoveGroupPolicyRequest))
 
 	r.POST("session-manager/login", func(c *gin.Context) {
 		sessionmanager.LoginRequest(c, access_control_db)

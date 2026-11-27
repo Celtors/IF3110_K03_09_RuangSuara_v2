@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -15,33 +16,7 @@ import (
 // Authentication and authorization fail closed.
 func RegisterRoutes(router gin.IRouter, s *Service) {
 	g := router.Group("/api/databases/:id")
-	g.Use(func(c *gin.Context) {
-		if s.Access == nil {
-			respond(c, nil, fault("unauthenticated", "Authentication is not configured"))
-			c.Abort()
-			return
-		}
-		user, err := s.Access.Identity(c)
-		if err != nil || user == "" {
-			var f *Fault
-			if errors.As(err, &f) && f.Code == "authorization_unavailable" {
-				respond(c, nil, f)
-			} else {
-				respond(c, nil, fault("unauthenticated", "A validated session is required"))
-			}
-			c.Abort()
-			return
-		}
-		if c.Request.Method != http.MethodGet {
-			if err = s.Access.CSRF(c.Request); err != nil {
-				respond(c, nil, fault("csrf_failed", "CSRF token or request origin is invalid"))
-				c.Abort()
-				return
-			}
-		}
-		c.Set("migration_user", user)
-		c.Next()
-	})
+	g.Use(requireSession(s))
 	g.GET("/migration-history", func(c *gin.Context) {
 		hideRollback := false
 		if value, present := c.GetQuery("hide_rollback"); present {
@@ -162,5 +137,7 @@ func respond(c *gin.Context, data any, err error) {
 	if !ok {
 		status = 500
 	}
+	slog.WarnContext(c.Request.Context(), "migration.request_failed", "status", "failed",
+		"reason", f.Code, "route", c.FullPath())
 	c.JSON(status, gin.H{"error": f, "data": data})
 }
