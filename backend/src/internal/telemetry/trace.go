@@ -39,8 +39,10 @@ func Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (con
 	metadata, _ := ctx.Value(metadataKey{}).([]slog.Attr)
 	for _, attr := range metadata {
 		switch attr.Key {
-		case "database_id", "migration_id", "job_id", "blocked_job_id", "attempt_id", "operation":
+		case "database_id", "migration_id", "job_id", "blocked_job_id", "attempt_id", "execution_id", "operation", "batch_action":
 			opts = append(opts, trace.WithAttributes(attribute.String(attr.Key, attr.Value.String())))
+		case "batch_number":
+			opts = append(opts, trace.WithAttributes(attribute.Int64(attr.Key, attr.Value.Int64())))
 		}
 	}
 	return otel.Tracer("backend").Start(ctx, name, opts...)

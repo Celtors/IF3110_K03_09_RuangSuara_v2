@@ -48,8 +48,24 @@ func addEvent(ctx context.Context, tx pgx.Tx, requestID, event, actor string, de
 
 // insertRequest stores the request, its required approvals and the "submitted" event atomically.
 func (r *Repository) insertRequest(ctx context.Context, q ChangeRequest, approvers []RequiredApprover) (ChangeRequest, error) {
+	conn, release, err := r.lock(ctx, q.DatabaseID)
+	if err != nil {
+		return q, err
+	}
+	defer release()
 	ctx = telemetry.With(ctx, telemetry.ID("job_id", q.ID))
-	tx, err := r.Pool.Begin(ctx)
+
+	// Save takes the same lock before checking for open requests.
+	m, err := scanMigration(conn.QueryRow(ctx, `SELECT `+definitionColumns+`
+ FROM dmp_migration.definitions WHERE database_id=$1 AND id=$2`, q.DatabaseID, q.MigrationID), false)
+	if err != nil {
+		return q, err
+	}
+	if sqlHash(rawSQL(m, q.Operation)) != q.SQLHash ||
+		(q.CompensationSQLHash != "" && (m.Irreversible || sqlHash(m.SQLDown) != q.CompensationSQLHash)) {
+		return q, fault("conflict", "Migration SQL changed during submission")
+	}
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return q, err
 	}
@@ -470,13 +486,15 @@ func (r *Repository) finishRequest(ctx context.Context, id string, status Reques
 	return nil
 }
 
-// attemptFor finds the execution attempt of a request that started at startedAt.
-// Only one attempt can be unresolved per database, so the match is unambiguous.
-func (r *Repository) attemptFor(ctx context.Context, q InFlightRequest) (id, status, code, message string, err error) {
-	err = r.Pool.QueryRow(ctx, `SELECT id,status,postgres_error_code,error_message
- FROM dmp_migration.attempts
- WHERE migration_id=$1 AND operation=$2 AND started_at >= $3
- ORDER BY started_at DESC,id DESC LIMIT 1`, q.MigrationID, q.Operation, q.StartedAt).Scan(&id, &status, &code, &message)
+// attemptFor prefers the durable link and falls back to the attempt created
+// during this claim if the worker stopped before linking it.
+func (r *Repository) attemptFor(ctx context.Context, conn rowQuerier, q InFlightRequest) (id, status, code, message string, err error) {
+	err = conn.QueryRow(ctx, `SELECT a.id,a.status,a.postgres_error_code,a.error_message
+ FROM dmp_migration.change_requests r JOIN dmp_migration.attempts a
+ ON a.id=r.attempt_id OR (r.attempt_id IS NULL AND a.database_id=r.database_id
+     AND a.migration_id=r.migration_id AND a.operation=r.operation AND a.started_at>=r.started_at)
+ WHERE r.id=$1
+ ORDER BY a.started_at DESC,a.id DESC LIMIT 1`, q.ID).Scan(&id, &status, &code, &message)
 	if isNoRows(err) {
 		return "", "", "", "", nil
 	}

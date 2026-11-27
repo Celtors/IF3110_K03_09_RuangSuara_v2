@@ -121,6 +121,7 @@ type QueuedRequest struct {
 	submissionCorrelationID string
 	queueTrace              telemetry.TraceContext
 	claimSpan               trace.SpanContext
+	reloaded                bool
 	ID                      string
 	DatabaseID              string
 	MigrationID             string

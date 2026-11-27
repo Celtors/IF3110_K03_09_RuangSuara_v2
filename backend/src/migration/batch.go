@@ -2,7 +2,6 @@ package migration
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -10,8 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"backend/internal/telemetry"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Batch SQL is deliberately narrow: one integer-column UPDATE with an explicit
@@ -137,11 +140,25 @@ func batchIntent(ctx context.Context, c *pgxpool.Conn, id, intent string) error 
 	return err
 }
 func targetProgress(ctx context.Context, c *pgxpool.Conn, id string, p *batchProgress) error {
-	err := c.QueryRow(ctx, `SELECT completed,committed_rows,cursor,reverted,done,scope_count FROM dmp_batch.jobs WHERE id=$1`, id).Scan(&p.Batches, &p.Rows, &p.Cursor, &p.Reverted, &p.Done, &p.ScopeCount)
+	progress := *p
+	err := c.QueryRow(ctx, `SELECT completed,committed_rows,cursor,reverted,done,scope_count FROM dmp_batch.jobs WHERE id=$1`, id).
+		Scan(&progress.Batches, &progress.Rows, &progress.Cursor, &progress.Reverted, &progress.Done, &progress.ScopeCount)
 	if err == nil {
-		p.ScopeReady = true
+		progress.ScopeReady = true
+		*p = progress
 	}
 	return err
+}
+
+func batchCheckpoint(ctx context.Context, p batchProgress, kind, status string, started time.Time) {
+	elapsed := time.Since(started).Milliseconds()
+	trace.SpanFromContext(ctx).AddEvent("batch.checkpoint_verified", trace.WithAttributes(
+		attribute.String("checkpoint_kind", kind), attribute.String("outcome", status),
+		attribute.Int64("committed_batches", p.Batches), attribute.Int64("committed_rows", p.Rows),
+		attribute.Int64("reverted_batches", p.Reverted), attribute.Int64("duration_ms", elapsed)))
+	slog.InfoContext(ctx, "batch.checkpoint_verified", "checkpoint_kind", kind, "status", status,
+		"committed_batches", p.Batches, "committed_rows", p.Rows, "reverted_batches", p.Reverted,
+		"duration_ms", elapsed)
 }
 func configureBatchTx(ctx context.Context, tx pgx.Tx, b batchStatement) error {
 	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout='30s'; SET LOCAL lock_timeout='5s'; SET LOCAL search_path=pg_catalog`); err != nil {
@@ -176,7 +193,14 @@ func initBatchScope(ctx context.Context, c *pgxpool.Conn, id string, b batchStat
 
 // Run one transaction, including the durable checkpoint. Only the selected keys
 // enter Go memory. Only the changed column image and row version are kept in PostgreSQL for conflict detection.
-func runBatchTx(ctx context.Context, c *pgxpool.Conn, id, sql string, b batchStatement, p batchProgress, undo bool) error {
+func runBatchTx(ctx context.Context, c *pgxpool.Conn, id, sql string, b batchStatement, p batchProgress, undo bool) (resultErr error) {
+	ctx, span := telemetry.Start(ctx, "batch.transaction")
+	defer telemetry.EndSpan(span)
+	outcome := "failed"
+	defer func() {
+		span.SetAttributes(attribute.String("outcome", outcome))
+		traceMigrationError(span, resultErr)
+	}()
 	tx, err := c.Begin(ctx)
 	if err != nil {
 		return err
@@ -233,47 +257,51 @@ func runBatchTx(ctx context.Context, c *pgxpool.Conn, id, sql string, b batchSta
 		if err != nil {
 			return err
 		}
-		return tx.Commit(ctx)
-	}
-	join := ` FROM ` + b.relation() + ` t JOIN dmp_batch.scope s ON t.` + quote(b.cursor) + `=s.key WHERE s.job_id=$1 AND s.key=ANY($2::bigint[])`
-	image, xmin := "before_row", "before_xmin"
-	if undo {
-		image, xmin = "after_row", "after_xmin"
-	}
-	var count int64
-	if err = tx.QueryRow(ctx, `SELECT count(*)`+join+` AND jsonb_build_array(t.`+quote(b.column)+`)=s.`+image+` AND t.xmin::text=s.`+xmin, id, keys).Scan(&count); err != nil {
-		return err
-	}
-	if count != int64(len(keys)) {
-		return fault("conflict", "Original rows changed or disappeared; batch cannot safely proceed")
-	}
-	tag, err := tx.Exec(ctx, sql, keys)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != int64(len(keys)) {
-		return fault("conflict", "Batch affected unexpected number of rows")
-	}
-	if undo {
-		if err = tx.QueryRow(ctx, `SELECT count(*)`+join+` AND jsonb_build_array(t.`+quote(b.column)+`)=s.before_row`, id, keys).Scan(&count); err != nil {
+	} else {
+		join := ` FROM ` + b.relation() + ` t JOIN dmp_batch.scope s ON t.` + quote(b.cursor) + `=s.key WHERE s.job_id=$1 AND s.key=ANY($2::bigint[])`
+		image, xmin := "before_row", "before_xmin"
+		if undo {
+			image, xmin = "after_row", "after_xmin"
+		}
+		var count int64
+		if err = tx.QueryRow(ctx, `SELECT count(*)`+join+` AND jsonb_build_array(t.`+quote(b.column)+`)=s.`+image+` AND t.xmin::text=s.`+xmin, id, keys).Scan(&count); err != nil {
 			return err
 		}
 		if count != int64(len(keys)) {
-			return fault("conflict", "Approved down SQL did not restore the original rows")
+			return fault("conflict", "Original rows changed or disappeared; batch cannot safely proceed")
 		}
-		_, err = tx.Exec(ctx, `UPDATE dmp_batch.jobs SET reverted=reverted+1 WHERE id=$1`, id)
-	} else {
-		_, err = tx.Exec(ctx, `UPDATE dmp_batch.scope s SET batch_no=$3,after_row=jsonb_build_array(t.`+quote(b.column)+`),after_xmin=t.xmin::text FROM `+b.relation()+` t WHERE s.job_id=$1 AND s.key=ANY($2::bigint[]) AND t.`+quote(b.cursor)+`=s.key`, id, keys, p.Batches+1)
-		if err == nil {
-			_, err = tx.Exec(ctx, `UPDATE dmp_batch.jobs SET completed=completed+1,committed_rows=committed_rows+$2,cursor=$3 WHERE id=$1`, id, len(keys), keys[len(keys)-1])
+		tag, err := tx.Exec(ctx, sql, keys)
+		if err != nil {
+			return err
+		}
+		span.SetAttributes(attribute.Int64("rows_affected", tag.RowsAffected()))
+		if tag.RowsAffected() != int64(len(keys)) {
+			return fault("conflict", "Batch affected unexpected number of rows")
+		}
+		if undo {
+			if err = tx.QueryRow(ctx, `SELECT count(*)`+join+` AND jsonb_build_array(t.`+quote(b.column)+`)=s.before_row`, id, keys).Scan(&count); err != nil {
+				return err
+			}
+			if count != int64(len(keys)) {
+				return fault("conflict", "Approved down SQL did not restore the original rows")
+			}
+			_, err = tx.Exec(ctx, `UPDATE dmp_batch.jobs SET reverted=reverted+1 WHERE id=$1`, id)
+		} else {
+			_, err = tx.Exec(ctx, `UPDATE dmp_batch.scope s SET batch_no=$3,after_row=jsonb_build_array(t.`+quote(b.column)+`),after_xmin=t.xmin::text FROM `+b.relation()+` t WHERE s.job_id=$1 AND s.key=ANY($2::bigint[]) AND t.`+quote(b.cursor)+`=s.key`, id, keys, p.Batches+1)
+			if err == nil {
+				_, err = tx.Exec(ctx, `UPDATE dmp_batch.jobs SET completed=completed+1,committed_rows=committed_rows+$2,cursor=$3 WHERE id=$1`, id, len(keys), keys[len(keys)-1])
+			}
+		}
+		if err != nil {
+			return err
 		}
 	}
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	span.AddEvent("checkpoint_written")
+	err = tx.Commit(ctx)
+	outcome = telemetry.CommitOutcome(err)
+	return err
 }
-func retryBatchTransaction(run func() error, verified func() bool, delay func(time.Duration)) error {
+func retryBatchTransaction(ctx context.Context, run func() error, verified func() bool, delay func(time.Duration)) error {
 	var err error
 	for tries := 0; tries < 3; tries++ {
 		err = run()
@@ -281,9 +309,12 @@ func retryBatchTransaction(run func() error, verified func() bool, delay func(ti
 			return err
 		}
 		if !verified() {
-			return errors.New("checkpoint requires reconciliation")
+			return fault("indeterminate", "Checkpoint requires reconciliation before retry")
 		}
-		delay(time.Duration(tries+1) * 250 * time.Millisecond)
+		backoff := time.Duration(tries+1) * 250 * time.Millisecond
+		slog.LogAttrs(ctx, slog.LevelWarn, "batch.retry", append(telemetry.ErrorAttrs(err),
+			slog.Int("retry_number", tries+1), slog.Int64("delay_ms", backoff.Milliseconds()))...)
+		delay(backoff)
 	}
 	return err
 }
@@ -298,42 +329,77 @@ func transientBatch(err error) bool {
 // Both locks are session locks. The platform request stays running even when
 // paused, so a process crash does not free the logical database reservation.
 // The target lock must be acquired before trusting a missing checkpoint.
-func (r *Review) processBatch(ctx context.Context, q QueuedRequest) {
+func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome string, err error) {
+	ctx, span := telemetry.Start(ctx, "batch.execute")
+	defer telemetry.EndSpan(span)
+	start := time.Now()
+	var p batchProgress
+	defer func() {
+		span.SetAttributes(attribute.String("outcome", outcome),
+			attribute.Int64("committed_batches", p.Batches), attribute.Int64("committed_rows", p.Rows),
+			attribute.Int64("reverted_batches", p.Reverted))
+		traceMigrationError(span, err)
+		if outcome == "stale" || outcome == "lock_unavailable" {
+			return
+		}
+		level := slog.LevelInfo
+		if err != nil || outcome == "failed" || outcome == "paused" || outcome == "partially_reverted" || outcome == "unresolved" {
+			level = slog.LevelWarn
+		}
+		slog.LogAttrs(ctx, level, "batch.execution", append(telemetry.ErrorAttrs(err),
+			slog.String("status", outcome), slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+			slog.Int64("committed_batches", p.Batches), slog.Int64("committed_rows", p.Rows),
+			slog.Int64("reverted_batches", p.Reverted))...)
+	}()
+
 	c, release, err := r.repo().lock(ctx, q.DatabaseID)
 	if err != nil {
-		return
+		return "lock_unavailable", err
 	}
 	defer release()
-	p, err := loadBatch(ctx, c, q.ID)
+	p, err = loadBatch(ctx, c, q.ID)
 	if err != nil {
-		return
+		return "record_failed", err
 	}
 	var status string
 	var attemptID *string
-	if err = c.QueryRow(ctx, `SELECT status,attempt_id FROM dmp_migration.change_requests WHERE id=$1`, q.ID).Scan(&status, &attemptID); err != nil || status != "running" || p.State == "paused" {
-		return
+	var startedAt *time.Time
+	if err = c.QueryRow(ctx, `SELECT status,attempt_id,started_at FROM dmp_migration.change_requests WHERE id=$1`,
+		q.ID).Scan(&status, &attemptID, &startedAt); err != nil {
+		return "record_failed", err
 	}
+	if status != "running" || startedAt == nil || !startedAt.Equal(q.startedAt) || p.State == "paused" {
+		return "stale", nil
+	}
+	ctx = telemetry.With(ctx, slog.String("batch_action", p.Action))
+	span.SetAttributes(attribute.String("batch_action", p.Action))
+	if attemptID != nil {
+		ctx = attemptContext(ctx, Attempt{ID: *attemptID})
+		span.SetAttributes(attribute.String("attempt_id", *attemptID))
+	}
+	slog.InfoContext(ctx, "batch.started", "status", p.State, "reloaded", q.reloaded)
 	// Any bookkeeping error after an intent leaves the durable request locked.
-	pause := func(state string, e error) {
+	pause := func(state string, e error) (string, error) {
 		if state == "paused" && p.Intent != "" {
 			state = "unresolved"
 		}
 		code, msg := faultInfo(e)
 		if code == "internal_error" {
-			msg = "Batch transaction or bookkeeping failed; inspect target logs"
-			slog.WarnContext(ctx, "batch.failure", "job_id", q.ID, "sqlstate", postgresCode(e))
+			msg = "Batch transaction or bookkeeping failed"
 		}
-		_, _ = c.Exec(ctx, `UPDATE dmp_migration.batch_jobs SET state=$2,error_message=$3,updated_at=now() WHERE id=$1`, q.ID, state, msg)
+		if _, writeErr := c.Exec(ctx, `UPDATE dmp_migration.batch_jobs SET state=$2,error_message=$3,updated_at=now() WHERE id=$1`,
+			q.ID, state, msg); writeErr != nil {
+			return "record_failed", writeErr
+		}
+		return state, e
 	}
 	m, err := r.repo().Get(ctx, q.DatabaseID, q.MigrationID)
 	if err != nil {
-		pause("unresolved", err)
-		return
+		return pause("unresolved", err)
 	}
 	b, err := parseBatch(m.SQLUp, BatchSpec{p.Attribute, p.Size})
 	if err != nil {
-		pause("paused", err)
-		return
+		return pause("paused", err)
 	}
 	undo := p.Action == "compensate"
 	sql := m.SQLUp
@@ -341,19 +407,16 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) {
 		sql = m.SQLDown
 		down, e := parseBatch(sql, BatchSpec{p.Attribute, p.Size})
 		if e != nil || down != b || m.Irreversible || sqlHash(sql) != p.DownHash || !inverseBatchSQL(m.SQLUp, sql, BatchSpec{p.Attribute, p.Size}) {
-			pause("paused", fault("conflict", "No approved compatible down SQL"))
-			return
+			return pause("paused", fault("conflict", "No approved compatible down SQL"))
 		}
 	}
 	pool, err := r.Service.connection(ctx, q.DatabaseID)
 	if err != nil {
-		pause("unresolved", err)
-		return
+		return pause("unresolved", err)
 	}
 	target, err := pool.Acquire(ctx)
 	if err != nil {
-		pause("unresolved", err)
-		return
+		return pause("unresolved", err)
 	}
 	defer target.Release()
 	var locked bool
@@ -361,7 +424,7 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) {
 		if err != nil {
 			_ = target.Conn().Close(ctx)
 		}
-		return
+		return "lock_unavailable", err
 	}
 	defer func() {
 		clean, cancel := cleanupContext(ctx)
@@ -372,21 +435,18 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) {
 		}
 	}()
 	if err = ensureTargetIsNotPlatform(ctx, target, c); err != nil {
-		pause("unresolved", err)
-		return
+		return pause("unresolved", err)
 	}
 	identity, err := targetIdentity(ctx, target.Conn())
 	if err != nil {
-		pause("unresolved", err)
-		return
+		return pause("unresolved", err)
 	}
 	if p.Identity != "" && p.Identity != identity {
-		pause("unresolved", fault("indeterminate", "Target identity changed"))
-		return
+		return pause("unresolved", fault("indeterminate", "Target identity changed"))
 	}
 	if p.Identity == "" {
 		if _, err = c.Exec(ctx, `UPDATE dmp_migration.batch_jobs SET target_identity=$2 WHERE id=$1`, q.ID, identity); err != nil {
-			return
+			return "record_failed", err
 		}
 	}
 	// Create the ordinary attempt before touching the target; recover a crash
@@ -394,105 +454,148 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) {
 	var a Attempt
 	if attemptID == nil {
 		var old string
-		err = c.QueryRow(ctx, `SELECT id FROM dmp_migration.attempts WHERE database_id=$1 AND migration_id=$2 AND status='running'`, q.DatabaseID, q.MigrationID).Scan(&old)
+		err = c.QueryRow(ctx, `SELECT id FROM dmp_migration.attempts
+ WHERE database_id=$1 AND migration_id=$2 AND operation='apply' AND status='running' AND started_at >= $3`,
+			q.DatabaseID, q.MigrationID, q.startedAt).Scan(&old)
 		if isNoRows(err) {
 			ok, code, msg, e := r.revalidate(ctx, q)
 			if e != nil || !ok {
 				if e == nil {
 					e = fault(code, msg)
 				}
-				if mirrorBatch(ctx, c, q.ID, p, "failed", e.Error()) == nil {
-					_ = r.repo().finishRequest(ctx, q.ID, RequestFailed, "authorization_failed", e.Error(), "")
+				_, message := faultInfo(e)
+				if err = mirrorBatch(ctx, c, q.ID, p, "failed", message); err != nil {
+					return "record_failed", err
 				}
-				return
+				if err = r.repo().finishRequest(ctx, q.ID, RequestFailed, "authorization_failed", message, "", q.startedAt); err != nil {
+					return "record_failed", err
+				}
+				return "failed", e
 			}
 			if _, _, err = prepareExecution(ctx, c, m, OperationApply); err != nil {
-				if mirrorBatch(ctx, c, q.ID, p, "failed", err.Error()) == nil {
-					_ = r.repo().finishRequest(ctx, q.ID, RequestFailed, "execution_failed", err.Error(), "")
+				_, message := faultInfo(err)
+				if e = mirrorBatch(ctx, c, q.ID, p, "failed", message); e != nil {
+					return "record_failed", e
 				}
-				return
+				if e = r.repo().finishRequest(ctx, q.ID, RequestFailed, "execution_failed", message, "", q.startedAt); e != nil {
+					return "record_failed", e
+				}
+				return "failed", err
 			}
 			a, err = beginAttempt(ctx, c, m, q.RequestedBy, OperationApply, m.SQLUp, nil)
 			old = a.ID
 		}
 		if err != nil {
-			pause("unresolved", err)
-			return
+			return pause("unresolved", err)
 		}
 		attemptID = &old
 		if _, err = c.Exec(ctx, `UPDATE dmp_migration.change_requests SET attempt_id=$2 WHERE id=$1`, q.ID, old); err != nil {
-			return
+			return "record_failed", err
 		}
+		ctx = attemptContext(ctx, Attempt{ID: old, migrationVersion: a.migrationVersion})
+		span.SetAttributes(attribute.String("attempt_id", old))
+		slog.InfoContext(ctx, "migration.attempt_started", "status", "running")
 	}
 	a = Attempt{ID: *attemptID, MigrationID: q.MigrationID, DatabaseID: q.DatabaseID, Operation: OperationApply}
-	var attemptStatus string
-	if err = c.QueryRow(ctx, `SELECT status FROM dmp_migration.attempts WHERE id=$1`, a.ID).Scan(&attemptStatus); err != nil {
-		return
+	if err = c.QueryRow(ctx, `SELECT status,postgres_error_code,error_message FROM dmp_migration.attempts WHERE id=$1`, a.ID).
+		Scan(&a.Status, &a.ErrorCode, &a.Error); err != nil {
+		return "record_failed", err
 	}
 	// If platform finalization committed before the request status was saved.
-	if attemptStatus == "succeeded" || attemptStatus == "failed" {
+	if a.Status == "succeeded" || a.Status == "failed" {
 		final := RequestSucceeded
 		state := "completed"
-		if attemptStatus == "failed" {
+		code := ""
+		if a.Status == "failed" {
 			final = RequestFailed
 			state = "reverted"
 			if !undo {
 				state = "failed"
+				code = "execution_failed"
 			}
 		}
-		if mirrorBatch(ctx, c, q.ID, p, state, p.Error) == nil {
-			_ = r.repo().finishRequest(ctx, q.ID, final, "", p.Error, a.ID)
+		if err = mirrorBatch(ctx, c, q.ID, p, state, a.Error); err != nil {
+			return "record_failed", err
 		}
-		return
+		if err = r.repo().finishRequest(ctx, q.ID, final, code, a.Error, a.ID, q.startedAt); err != nil {
+			return "record_failed", err
+		}
+		return state, nil
+	}
+	finish := func(state string, cause error, message string) (string, error) {
+		result, attemptStatus, code := RequestFailed, "failed", "execution_failed"
+		if state == "completed" {
+			result, attemptStatus, code = RequestSucceeded, "succeeded", ""
+			if _, e := c.Exec(ctx, `UPDATE dmp_migration.attempts SET prepared_rows=$2 WHERE id=$1`, a.ID, p.Rows); e != nil {
+				return "record_failed", e
+			}
+		} else if state == "reverted" {
+			code = ""
+		}
+		if e := finishAttempt(ctx, c, &a, attemptStatus, postgresCode(cause), message); e != nil {
+			return "record_failed", e
+		}
+		if e := mirrorBatch(ctx, c, q.ID, p, state, message); e != nil {
+			return "record_failed", e
+		}
+		if e := r.repo().finishRequest(ctx, q.ID, result, code, message, a.ID, q.startedAt); e != nil {
+			return "record_failed", e
+		}
+		return state, cause
 	}
 	if _, err = c.Exec(ctx, `UPDATE dmp_migration.attempts SET target_identity=$2 WHERE id=$1`, a.ID, identity); err != nil {
-		return
+		return "record_failed", err
 	}
 	// Reconcile before authorization: reading evidence cannot execute new SQL.
 	if p.Intent == "" && !p.ScopeReady {
 		if _, err = target.Exec(ctx, targetBatchDDL); err != nil {
-			pause("unresolved", err)
-			return
+			return pause("unresolved", err)
 		}
 	}
 	verifiedBefore := p
+	recoveryStart := time.Now()
 	err = targetProgress(ctx, target, q.ID, &p)
 	if err == nil && (p.Batches < verifiedBefore.Batches || p.Rows < verifiedBefore.Rows || p.Reverted < verifiedBefore.Reverted || (verifiedBefore.ScopeReady && p.ScopeCount != verifiedBefore.ScopeCount)) {
-		pause("unresolved", fault("indeterminate", "Target checkpoint regressed"))
-		return
+		p = verifiedBefore
+		return pause("unresolved", fault("indeterminate", "Target checkpoint regressed"))
 	}
 	if isNoRows(err) {
 		if verifiedBefore.ScopeReady || verifiedBefore.Batches > 0 || (p.Intent != "" && p.Intent != "scope") {
-			pause("unresolved", fault("indeterminate", "Target checkpoint is missing"))
-			return
+			return pause("unresolved", fault("indeterminate", "Target checkpoint is missing"))
 		}
 		ok, code, msg, e := r.revalidate(ctx, q)
 		if e != nil || !ok {
 			if e == nil {
 				e = fault(code, msg)
 			}
-			pause("paused", e)
-			return
+			return pause("paused", e)
 		}
-		if batchIntent(ctx, c, q.ID, "scope") != nil {
-			return
+		if err = batchIntent(ctx, c, q.ID, "scope"); err != nil {
+			return "record_failed", err
 		}
-		if err = initBatchScope(ctx, target, q.ID, b); err != nil {
-			if e = targetProgress(ctx, target, q.ID, &p); isNoRows(e) {
-				message := "Scope creation failed before data execution"
-				if finishAttempt(ctx, c, &a, "failed", postgresCode(err), message) == nil && mirrorBatch(ctx, c, q.ID, p, "failed", message) == nil {
-					_ = r.repo().finishRequest(ctx, q.ID, RequestFailed, "execution_failed", message, a.ID)
-				}
-			} else {
-				pause("unresolved", err)
-			}
-			return
-		}
+		p.Intent = "scope"
+		scopeStart := time.Now()
+		initErr := initBatchScope(ctx, target, q.ID, b)
 		err = targetProgress(ctx, target, q.ID, &p)
+		if initErr != nil && isNoRows(err) {
+			return finish("failed", initErr, "Scope creation failed before data execution")
+		}
+		if err == nil {
+			state := "committed"
+			if initErr != nil {
+				state = "recovered_commit"
+			}
+			batchCheckpoint(ctx, p, "scope", state, scopeStart)
+		}
+	} else if err == nil && (p.Intent != "" || q.reloaded) {
+		state := "reconciled"
+		if p.Batches > verifiedBefore.Batches || p.Reverted > verifiedBefore.Reverted || !verifiedBefore.ScopeReady {
+			state = "recovered_commit"
+		}
+		batchCheckpoint(ctx, p, "reconciliation", state, recoveryStart)
 	}
 	if err != nil {
-		pause("unresolved", err)
-		return
+		return pause("unresolved", err)
 	}
 	for {
 		state := "running"
@@ -503,99 +606,97 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) {
 			state = "compensating"
 		}
 		if err = mirrorBatch(ctx, c, q.ID, p, state, ""); err != nil {
-			return
+			return "record_failed", err
 		}
 		p.Intent = ""
 		if (!undo && p.Done) || (undo && p.Reverted == p.Batches) {
-			result := RequestSucceeded
-			attemptResult := "succeeded"
-			state = "completed"
-			message := ""
 			if undo {
-				result = RequestFailed
-				attemptResult = "failed"
-				state = "reverted"
-				message = "Committed batches compensated"
+				return finish("reverted", nil, "Committed batches compensated")
 			}
-			if err = finishAttempt(ctx, c, &a, attemptResult, "", message); err != nil {
-				return
-			}
-			if err = mirrorBatch(ctx, c, q.ID, p, state, message); err != nil {
-				return
-			}
-			_ = r.repo().finishRequest(ctx, q.ID, result, "", message, a.ID)
-			return
+			return finish("completed", nil, "")
 		}
 		ok, code, msg, e := r.revalidate(ctx, q)
 		if e != nil || !ok {
 			if e == nil {
 				e = fault(code, msg)
 			}
-			pause("paused", e)
-			return
+			return pause("paused", e)
 		}
-		intent := fmt.Sprintf("apply:%d", p.Batches+1)
+		number := p.Batches + 1
 		if undo {
-			intent = fmt.Sprintf("compensate:%d", p.Batches-p.Reverted)
+			number = p.Batches - p.Reverted
 		}
-		if batchIntent(ctx, c, q.ID, intent) != nil {
-			return
+		batchCtx := telemetry.With(ctx, slog.Int64("batch_number", number))
+		intent := fmt.Sprintf("%s:%d", p.Action, number)
+		if err = batchIntent(batchCtx, c, q.ID, intent); err != nil {
+			return "record_failed", err
 		}
-		err = retryBatchTransaction(func() error { return runBatchTx(ctx, target, q.ID, sql, b, p, undo) }, func() bool {
+		p.Intent = intent
+		batchStart := time.Now()
+		err = retryBatchTransaction(batchCtx, func() error {
+			return runBatchTx(batchCtx, target, q.ID, sql, b, p, undo)
+		}, func() bool {
 			var verified batchProgress
-			return targetProgress(ctx, target, q.ID, &verified) == nil && verified.Batches == p.Batches && verified.Reverted == p.Reverted && verified.Done == p.Done
+			return targetProgress(batchCtx, target, q.ID, &verified) == nil &&
+				verified.Batches == p.Batches && verified.Rows == p.Rows && verified.Reverted == p.Reverted && verified.Done == p.Done
 		}, time.Sleep)
+		previous := p
+		verifyErr := targetProgress(batchCtx, target, q.ID, &p)
+		if verifyErr != nil {
+			return pause("unresolved", verifyErr)
+		}
+		kind := "batch"
+		if p.Done && !previous.Done {
+			kind = "completion"
+		}
 		if err != nil {
 			// A live connection with a verified unchanged checkpoint proves no commit;
 			// if the connection was lost leave intent intact for the next recovery.
-			previous := p
-			if e = targetProgress(ctx, target, q.ID, &p); e != nil {
-				pause("unresolved", err)
-				return
-			}
 			if p.Batches != previous.Batches || p.Reverted != previous.Reverted || p.Done != previous.Done {
+				batchCheckpoint(batchCtx, p, kind, "recovered_commit", batchStart)
 				continue
 			}
 			code, message := faultInfo(err)
 			if code == "indeterminate" {
-				pause("unresolved", err)
-				return
+				return pause("unresolved", err)
 			}
 			if code == "internal_error" {
 				message = "Batch failed (SQLSTATE " + postgresCode(err) + "); resume or compensate after correcting the cause"
 			}
 			if p.Batches == 0 && !undo {
-				if finishAttempt(ctx, c, &a, "failed", postgresCode(err), message) == nil && mirrorBatch(ctx, c, q.ID, p, "failed", message) == nil {
-					_ = r.repo().finishRequest(ctx, q.ID, RequestFailed, "execution_failed", message, a.ID)
-				}
-				return
+				return finish("failed", err, message)
 			}
-			if mirrorBatch(ctx, c, q.ID, p, "paused", message) != nil {
-				return
+			if e = mirrorBatch(ctx, c, q.ID, p, "paused", message); e != nil {
+				return "record_failed", e
 			}
-			return
+			if undo && p.Reverted > 0 {
+				return "partially_reverted", err
+			}
+			return "paused", err
 		}
-		if err = targetProgress(ctx, target, q.ID, &p); err != nil {
-			pause("unresolved", err)
-			return
-		}
+		batchCheckpoint(batchCtx, p, kind, "committed", batchStart)
 	}
 }
 
 // Running requests themselves are durable reservations. Recover them directly,
 // including after restart, without relying on an in-memory lease or clock.
 func (r *Review) nextBatch(ctx context.Context, attempted map[string]bool) (*QueuedRequest, error) {
-	rows, err := r.repo().Pool.Query(ctx, `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,r.submission_correlation_id FROM dmp_migration.change_requests r JOIN dmp_migration.batch_jobs b ON b.id=r.id WHERE r.status='running' AND b.state<>'paused' ORDER BY r.started_at`)
+	rows, err := r.repo().Pool.Query(ctx, `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,
+ r.submission_correlation_id,r.traceparent,r.tracestate,r.started_at
+ FROM dmp_migration.change_requests r JOIN dmp_migration.batch_jobs b ON b.id=r.id
+ WHERE r.status='running' AND b.state<>'paused' ORDER BY r.started_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var q QueuedRequest
-		if err = rows.Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation, &q.SQLHash, &q.RequestedBy, &q.submissionCorrelationID); err != nil {
+		if err = rows.Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation, &q.SQLHash, &q.RequestedBy,
+			&q.submissionCorrelationID, &q.queueTrace.TraceParent, &q.queueTrace.TraceState, &q.startedAt); err != nil {
 			return nil, err
 		}
 		if _, live := r.inflight.Load(q.ID); !live && !attempted[q.ID] {
+			q.reloaded = true
 			return &q, nil
 		}
 	}
@@ -607,6 +708,7 @@ func (r *Review) nextBatch(ctx context.Context, attempted map[string]bool) (*Que
 // as an apply after any reversal has begun.
 func (r *Review) batchAction(ctx context.Context, user, db, id, action string) error {
 	db = canonicalDatabaseID(db)
+	ctx = telemetry.With(migrationContext(ctx, user, db, ""), telemetry.ID("job_id", id), slog.String("batch_action", action))
 	if err := r.Service.authorize(ctx, user, db, Edit); err != nil {
 		return err
 	}
@@ -671,6 +773,7 @@ func (r *Review) batchAction(ctx context.Context, user, db, id, action string) e
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
+	slog.InfoContext(ctx, "batch.action", "status", "accepted", "committed_batches", p.Batches, "reverted_batches", p.Reverted)
 	r.notify()
 	return nil
 }

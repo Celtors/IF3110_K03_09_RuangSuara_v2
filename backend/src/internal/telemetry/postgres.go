@@ -48,7 +48,9 @@ func (t PostgresTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx
 	if query.transaction == "commit" && data.CommandTag.String() == "ROLLBACK" && err == nil {
 		err = pgx.ErrTxCommitRollback
 	}
-	query.Finish(ctx, RowCount(data.CommandTag), err)
+	var rows SQLRows
+	rows.Add(data.CommandTag)
+	query.Finish(ctx, rows, err)
 }
 
 type SQLExecution struct {
@@ -93,14 +95,14 @@ func StartSQL(ctx context.Context, scope, sql string, parameterCount int) (conte
 	return ctx, q
 }
 
-func (q SQLExecution) Finish(ctx context.Context, rows *int64, err error) {
+func (q SQLExecution) Finish(ctx context.Context, rows SQLRows, err error) {
 	event, status, level := "sql.finished", "succeeded", slog.LevelInfo
 	if err != nil {
 		status, level = "failed", slog.LevelWarn
 	}
 	switch q.transaction {
 	case "commit":
-		event, status = "transaction.commit", commitStatus(err)
+		event, status = "transaction.commit", CommitOutcome(err)
 	case "rollback":
 		event, status = "transaction.rollback", "rolled_back"
 		if err != nil {
@@ -109,21 +111,27 @@ func (q SQLExecution) Finish(ctx context.Context, rows *int64, err error) {
 	}
 	attrs := append(q.attrs, slog.String("status", status),
 		slog.Float64("duration_ms", float64(time.Since(q.start).Microseconds())/1000))
-	if rows != nil && err == nil {
-		attrs = append(attrs, slog.Int64("rows_affected", *rows))
+	if rows.Affected != nil {
+		attrs = append(attrs, slog.Int64("rows_affected", *rows.Affected))
+	}
+	if rows.Returned != nil {
+		attrs = append(attrs, slog.Int64("rows_returned", *rows.Returned))
 	}
 	slog.LogAttrs(ctx, level, event, append(attrs, ErrorAttrs(err)...)...)
 	if q.span != nil {
 		q.span.SetAttributes(attribute.String("outcome", status))
-		if rows != nil && err == nil {
-			q.span.SetAttributes(attribute.Int64("rows_affected", *rows))
+		if rows.Affected != nil {
+			q.span.SetAttributes(attribute.Int64("rows_affected", *rows.Affected))
+		}
+		if rows.Returned != nil {
+			q.span.SetAttributes(attribute.Int64("rows_returned", *rows.Returned))
 		}
 		SpanError(q.span, err)
 		q.span.End()
 	}
 }
 
-func commitStatus(err error) string {
+func CommitOutcome(err error) string {
 	if err == nil {
 		return "committed"
 	}
@@ -132,21 +140,33 @@ func commitStatus(err error) string {
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.SeverityUnlocalized != "FATAL" && pgErr.SeverityUnlocalized != "PANIC" &&
-		!strings.HasPrefix(pgErr.Code, "08") && pgErr.Code != "40003" {
+		(strings.HasPrefix(pgErr.Code, "23") || pgErr.Code == "40001" || pgErr.Code == "40P01" || pgErr.Code == "55P03") {
 		return "rolled_back"
 	}
 	return "unknown"
 }
 
-// RowCount reports counts only for commands that provide one in their tag.
-func RowCount(tag pgconn.CommandTag) *int64 {
+// SQLRows holds statement counts. A multi-statement call can count the same
+// row multiple times, and the enclosing transaction may still roll back.
+type SQLRows struct {
+	Affected, Returned *int64
+}
+
+func (rows *SQLRows) Add(tag pgconn.CommandTag) {
 	verb, _, _ := strings.Cut(tag.String(), " ")
+	var total **int64
 	switch verb {
-	case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "COPY", "FETCH", "MOVE":
-		rows := tag.RowsAffected()
-		return &rows
+	case "INSERT", "UPDATE", "DELETE", "MERGE", "COPY":
+		total = &rows.Affected
+	case "SELECT", "FETCH":
+		total = &rows.Returned
+	default:
+		return
 	}
-	return nil
+	if *total == nil {
+		*total = new(int64)
+	}
+	**total += tag.RowsAffected()
 }
 
 func sqlShape(sql string) string {
