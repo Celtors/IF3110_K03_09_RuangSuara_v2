@@ -242,3 +242,10 @@
     display: none;
   }
 }
+
+.migration-app .exec-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.875rem;
+}

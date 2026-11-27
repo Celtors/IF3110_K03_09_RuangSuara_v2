@@ -13,6 +13,9 @@ export function Editor({ current, canEdit }) {
     release_label: current?.release_label ?? "",
     sql_script:
       current?.sql_script ?? sessionStorage.getItem(draftKey(database)) ?? "",
+    sql_down: current?.sql_down ?? "",
+    irreversible: current?.irreversible ?? false,
+    irreversible_reason: current?.irreversible_reason ?? "",
   }));
   const [saved, setSaved] = useState(current);
   const [error, setError] = useState("");
@@ -28,11 +31,28 @@ export function Editor({ current, canEdit }) {
     (!saved || ["draft", "failed"].includes(saved.state));
   const dirty =
     !saved ||
-    ["name", "description", "release_label", "sql_script"].some(
+    [
+      "name",
+      "description",
+      "release_label",
+      "sql_script",
+      "sql_down",
+      "irreversible",
+      "irreversible_reason",
+    ].some(
       (k) => draft[k] !== saved[k],
     );
   const change = (key, value) => {
-    setDraft((d) => ({ ...d, [key]: value }));
+    setDraft((d) => {
+      const next = { ...d, [key]: value };
+      // The server rejects SQL down on an irreversible migration, and a reason on a
+      // reversible one, so the form never lets both be filled in.
+      if (key === "irreversible") {
+        if (value) next.sql_down = "";
+        else next.irreversible_reason = "";
+      }
+      return next;
+    });
     setMessage("");
     setConfirm(false);
   };
@@ -41,15 +61,7 @@ export function Editor({ current, canEdit }) {
     setBusy(true);
     setError("");
     try {
-      // Preserve definition fields the M1 form does not edit.
-      const payload = saved
-        ? {
-            ...draft,
-            sql_down: saved.sql_down,
-            irreversible: saved.irreversible,
-            irreversible_reason: saved.irreversible_reason,
-          }
-        : draft;
+      const payload = draft;
       const m = await api(
         saved ? `${base}/migrations/${saved.id}` : `${base}/migrations`,
         saved ? "PATCH" : "POST",
@@ -63,6 +75,9 @@ export function Editor({ current, canEdit }) {
         description: m.description,
         release_label: m.release_label,
         sql_script: m.sql_script,
+        sql_down: m.sql_down ?? "",
+        irreversible: m.irreversible ?? false,
+        irreversible_reason: m.irreversible_reason ?? "",
       });
       sessionStorage.removeItem(draftKey(database));
       setMessage("Draft saved. Review the SQL, then submit it for approval.");
@@ -121,6 +136,57 @@ export function Editor({ current, canEdit }) {
             <div className="editor-foot">
               Multiple statements · one transaction · one applied version
             </div>
+            <div className="panel-heading">
+              <h2>SQL down (rollback)</h2>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={draft.irreversible}
+                  onChange={(e) => change("irreversible", e.target.checked)}
+                  disabled={!editable || busy}
+                />{" "}
+                Irreversible
+              </label>
+            </div>
+            {draft.irreversible ? (
+              <>
+                <label htmlFor="irreversible-reason">
+                  Why this cannot be undone
+                </label>
+                <textarea
+                  className="input"
+                  id="irreversible-reason"
+                  value={draft.irreversible_reason}
+                  onChange={(e) => change("irreversible_reason", e.target.value)}
+                  readOnly={!editable || busy}
+                  maxLength={4000}
+                  required
+                  placeholder="Drops a column; the data cannot be restored by SQL down."
+                />
+                <div className="editor-foot">
+                  Irreversible migrations cannot be rolled back.
+                </div>
+              </>
+            ) : (
+              <>
+                <label className="sr-only" htmlFor="sql-down">
+                  Rollback SQL
+                </label>
+                <textarea
+                  className="input code-editor"
+                  id="sql-down"
+                  value={draft.sql_down}
+                  onChange={(e) => change("sql_down", e.target.value)}
+                  readOnly={!editable || busy}
+                  maxLength={262144}
+                  placeholder={"DROP TABLE IF EXISTS public.example;"}
+                />
+                <div className="editor-foot">
+                  Undoes the SQL script, in reverse order. Required before
+                  submitting unless the migration is irreversible.
+                </div>
+              </>
+            )}
           </section>
           <section className="panel metadata-form">
             <h2>Migration information</h2>
