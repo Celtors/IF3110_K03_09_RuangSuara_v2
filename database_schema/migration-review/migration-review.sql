@@ -44,27 +44,15 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_requests (
     sql_hash      text NOT NULL CHECK (sql_hash ~ '^[0-9a-f]{64}$'),
     requested_by  text NOT NULL,
     status        text NOT NULL DEFAULT 'pending_review' CHECK (status IN (
-<<<<<<< HEAD
                     'pending_review',  -- waiting for group leaders
                     'approved',        -- every required leader approved
                     'queued',          -- waiting for its turn on the target database
                     'running',
                     'succeeded',
                     'failed',
-                    'unknown',         -- outcome unresolved; mirrors attempts.status
+                    'unknown',         -- outcome unresolved
                     'rejected',        -- a leader rejected it
-                    'cancelled')),     -- withdrawn before it started running
-=======
-                      'pending_review',  -- waiting for the required groups
-                      'approved',        -- every required group approved
-                      'queued',          -- waiting for its turn on the target database
-                      'running',
-                      'succeeded',
-                      'failed',
-                      'unknown',         -- outcome unresolved; mirrors attempts.status
-                      'rejected',        -- a group reviewer rejected it
-                      'cancelled')),     -- withdrawn before it started running
->>>>>>> origin/spa-frontend
+                    'cancelled')),     -- withdrawn before execution
     attempt_id    text REFERENCES dmp_migration.attempts(id),   -- set once execution begins
     reject_reason text NOT NULL DEFAULT '',   -- reviewer's reason (rejected) or requester's note (cancelled)
     result_code   text NOT NULL DEFAULT '',   -- machine code of the outcome, e.g. execution_failed
@@ -85,47 +73,57 @@ CREATE TABLE IF NOT EXISTS dmp_migration.change_requests (
     CHECK (status NOT IN ('succeeded','failed','rejected','cancelled') OR completed_at IS NOT NULL)
 );
 
-<<<<<<< HEAD
 -- Upgrade earlier bootstrap schemas without discarding approval history.
 ALTER TABLE dmp_migration.change_requests
     ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS result_code text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS result_message text NOT NULL DEFAULT '';
-DO $$ DECLARE con record; BEGIN
-    FOR con IN SELECT conname FROM pg_constraint
-        WHERE conrelid='dmp_migration.change_requests'::regclass AND contype='c'
+
+DO $$
+DECLARE
+    con record;
+BEGIN
+    FOR con IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'dmp_migration.change_requests'::regclass
+            AND contype = 'c'
             AND pg_get_constraintdef(oid) LIKE '%started_at%'
             AND pg_get_constraintdef(oid) LIKE '%attempt_id%'
     LOOP
-        EXECUTE format('ALTER TABLE dmp_migration.change_requests DROP CONSTRAINT %I', con.conname);
+        EXECUTE format(
+            'ALTER TABLE dmp_migration.change_requests DROP CONSTRAINT %I',
+            con.conname
+        );
     END LOOP;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='dmp_migration.change_requests'::regclass AND conname='request_started_required') THEN
-        ALTER TABLE dmp_migration.change_requests ADD CONSTRAINT request_started_required
-            CHECK (status NOT IN ('running','succeeded','failed','unknown') OR started_at IS NOT NULL);
-        ALTER TABLE dmp_migration.change_requests ADD CONSTRAINT request_attempt_required
-            CHECK (status NOT IN ('succeeded','unknown') OR attempt_id IS NOT NULL);
-    END IF;
-=======
--- Columns the application reads and writes. CREATE TABLE IF NOT EXISTS does nothing on a
--- database that already has the table, so every column added after the first release is
--- also added here; without them every change-request query fails.
-ALTER TABLE dmp_migration.change_requests
-    ADD COLUMN IF NOT EXISTS result_code text NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS result_message text NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS submission_correlation_id text NOT NULL DEFAULT '';
 
--- Older schemas required attempt_id for 'running', but the worker sets 'running' before the
--- attempt exists (it is linked afterwards). Drop that constraint wherever it exists.
-DO $$
-DECLARE c record;
-BEGIN
-    FOR c IN SELECT conname FROM pg_constraint
-             WHERE conrelid = 'dmp_migration.change_requests'::regclass AND contype = 'c'
-               AND pg_get_constraintdef(oid) ILIKE '%started_at IS NOT NULL%AND%attempt_id IS NOT NULL%'
-    LOOP
-        EXECUTE format('ALTER TABLE dmp_migration.change_requests DROP CONSTRAINT %I', c.conname);
-    END LOOP;
->>>>>>> origin/spa-frontend
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'dmp_migration.change_requests'::regclass
+            AND conname = 'request_started_required'
+    ) THEN
+        ALTER TABLE dmp_migration.change_requests
+            ADD CONSTRAINT request_started_required
+            CHECK (
+                status NOT IN ('running', 'succeeded', 'failed', 'unknown')
+                OR started_at IS NOT NULL
+            );
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'dmp_migration.change_requests'::regclass
+            AND conname = 'request_attempt_required'
+    ) THEN
+        ALTER TABLE dmp_migration.change_requests
+            ADD CONSTRAINT request_attempt_required
+            CHECK (
+                status NOT IN ('succeeded', 'unknown')
+                OR attempt_id IS NOT NULL
+            );
+    END IF;
 END $$;
 
 -- A migration can have only one open request per operation.

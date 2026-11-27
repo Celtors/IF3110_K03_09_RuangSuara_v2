@@ -196,7 +196,7 @@ export function ChangeRequestPage({ databaseId, canEdit }) {
         <p className="cr-lead">
           Every group with access to this database must approve before the change can run. Only a group’s leader can decide for it.
         </p>
-        <ApprovalsTable approvals={request.approvals} me={me} />
+        <ApprovalsTable approvals={request.approvals}/>
         {role.canDecide && (
           <div className="cr-decision">
             <p>

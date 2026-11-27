@@ -20,8 +20,8 @@ import (
 // The queue lives in the platform database next to the migration storage, so state
 // changes, constraints and the per-database lock share one transactional boundary.
 type Review struct {
-	Service   *Service
-	Approvers Approvers
+	Service            *Service
+	Approvers          Approvers
 	ForbidSelfApproval bool
 
 	wake     chan struct{}
@@ -39,7 +39,6 @@ func NewReview(s *Service) *Review {
 	}
 	return r
 }
-
 
 func (r *Review) notify() {
 	select {
@@ -59,14 +58,12 @@ func sqlHash(sql string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-
 func rawSQL(m Migration, op Operation) string {
 	if op == OperationRollback {
 		return m.SQLDown
 	}
 	return m.SQLUp
 }
-
 
 func requestSQL(m Migration, op Operation) (string, error) {
 	switch op {
@@ -100,7 +97,6 @@ func requestSQL(m Migration, op Operation) (string, error) {
 	}
 	return sql, nil
 }
-
 
 func checkApprovers(approvers []RequiredApprover) error {
 	if len(approvers) == 0 {
@@ -214,21 +210,22 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 		return ChangeRequest{}, err
 	}
 
-<<<<<<< HEAD
-	return r.repo().insertRequest(ctx, ChangeRequest{
-		ID: newID(), DatabaseID: db, MigrationID: m.ID, Operation: in.Operation, Batch: batch, CompensationSQLHash: downHash,
-=======
 	q, err := r.repo().insertRequest(ctx, ChangeRequest{
-		ID: newID(), DatabaseID: db, MigrationID: m.ID, Operation: in.Operation,
->>>>>>> origin/spa-frontend
-		SQLHash: sqlHash(sql), RequestedBy: user, submissionCorrelationID: telemetry.CorrelationID(ctx),
+		ID:                      newID(),
+		DatabaseID:              db,
+		MigrationID:             m.ID,
+		Operation:               in.Operation,
+		Batch:                   batch,
+		CompensationSQLHash:     downHash,
+		SQLHash:                 sqlHash(sql),
+		RequestedBy:             user,
+		submissionCorrelationID: telemetry.CorrelationID(ctx),
 	}, approvers)
 	if err != nil {
 		return q, err
 	}
 	return q, r.markMine(ctx, user, &q)
 }
-
 
 func (r *Review) Decide(ctx context.Context, user, db, id string, approve bool, comment string) (ChangeRequest, error) {
 	db = canonicalDatabaseID(db)

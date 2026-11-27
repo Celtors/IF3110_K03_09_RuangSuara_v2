@@ -60,7 +60,7 @@ export function ApprovalMeter({ request }) {
   );
 }
 
-export function ApprovalsTable({ approvals, me }) {
+export function ApprovalsTable({ approvals}) {
   return (
     <div className="table-scroll" role="region" aria-label="Required approvals" tabIndex={0}>
       <table className="table">

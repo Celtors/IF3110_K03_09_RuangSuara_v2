@@ -276,7 +276,12 @@ export function MigrationApp() {
                       <ErrorBox error="Select a migration from history." />
                     ))}
                   {page === "schema-diff" && <SchemaDiff canEdit={historyData.can_edit} />}
-                  {page === "change-request" && <ChangeRequestPage databaseId={databaseId} />}
+                  {page === "change-request" && (
+                    <ChangeRequestPage
+                      databaseId={databaseId}
+                      canEdit={historyData.can_edit}
+                    />
+                  )}
                 </Fragment>
               )}
             </>

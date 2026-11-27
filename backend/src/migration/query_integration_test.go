@@ -41,8 +41,9 @@ CREATE TABLE console_it_types (i int, b bigint, n numeric(10,2), t text, f boole
 INSERT INTO console_it_types VALUES (1, 9007199254740993, 12.50, 'x', true, '2026-01-02 03:04:05+00', '2026-01-02', '{"k":1}', '11111111-1111-4111-8111-111111111111', '{1,2}', '\xdead');`
 
 // Run with a disposable PostgreSQL (docker-compose.yaml provides both):
-//   SQL_CONSOLE_TEST_TARGET_DSN=postgres://target_user:target_password@localhost:9001/target-test-db?sslmode=disable
-//   SQL_CONSOLE_TEST_PLATFORM_DSN=postgres://myuser:mypassword@localhost:9000/access-control-db?sslmode=disable
+//
+//	SQL_CONSOLE_TEST_TARGET_DSN=postgres://target_user:target_password@localhost:9001/target-test-db?sslmode=disable
+//	SQL_CONSOLE_TEST_PLATFORM_DSN=postgres://myuser:mypassword@localhost:9000/access-control-db?sslmode=disable
 func consoleTestService(t *testing.T) (*Service, *pgxpool.Pool) {
 	t.Helper()
 	targetDSN, platformDSN := os.Getenv("SQL_CONSOLE_TEST_TARGET_DSN"), os.Getenv("SQL_CONSOLE_TEST_PLATFORM_DSN")

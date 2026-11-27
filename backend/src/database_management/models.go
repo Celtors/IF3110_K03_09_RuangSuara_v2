@@ -126,7 +126,6 @@ func validateIdentifier(s string) bool {
 	return s != "" && len(s) <= 63 && !strings.ContainsRune(s, 0)
 }
 
-
 // Proses validasi database in perlu di pastikan lagi
 const (
 	DBMSPostgres = "postgres"
@@ -138,4 +137,4 @@ func normalizeDBMS(v string) string {
 	}
 	return strings.ToLower(strings.TrimSpace(v))
 }
-func validDBMS(v string) bool { v = normalizeDBMS(v); return v == DBMSPostgres}
+func validDBMS(v string) bool { v = normalizeDBMS(v); return v == DBMSPostgres }

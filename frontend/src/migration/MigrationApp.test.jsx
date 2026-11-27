@@ -91,8 +91,9 @@ const dropdown = () =>
   screen.getByRole("combobox", { name: "Database" });
 
 const navLink = (name) =>
-  within(screen.getByRole("navigation", { name: "Migration navigation" }))
-    .getByRole("link", { name, exact: true });
+  within(
+    screen.getByRole("navigation", { name: "Migration navigation" }),
+  ).getByRole("link", { name, exact: true });
 
 const needDatabase = () =>
   screen.getByRole("heading", { name: "Select a database first" });
@@ -102,6 +103,36 @@ const jobPanel = () =>
 
 const fieldValue = (name) =>
   jobPanel().getByText(name, { selector: "dt" }).nextElementSibling;
+
+async function waitForDatabaseOption(name = "Dev DB · View + Edit") {
+  await waitFor(() => {
+    expect(
+      screen.getByRole("option", { name }),
+    ).toBeInTheDocument();
+  });
+}
+
+async function waitForJobPage() {
+  await waitFor(() => {
+    expect(
+      screen.getByRole("heading", { name: "Required approvals" }),
+    ).toBeInTheDocument();
+
+    const panel = jobPanel();
+
+    expect(
+      panel.getByRole("heading", { name: "Execution job" }),
+    ).toBeInTheDocument();
+
+    expect(
+      panel.getByRole("button", { name: "Refresh status" }),
+    ).toBeEnabled();
+
+    expect(
+      panel.queryByText("Loading job status…"),
+    ).not.toBeInTheDocument();
+  });
+}
 
 const jobPath = (database = "db-1", id = "job-1") =>
   `/api/databases/${database}/jobs/${id}`;
@@ -344,7 +375,8 @@ function setup({
     }
 
     const blocker = blockers.find(
-      (item) => pathname === `${base}/jobs/${item.id}`
+      (item) =>
+        pathname === `${base}/jobs/${item.id}`
         && item.database_id === databaseId,
     );
 
@@ -401,9 +433,7 @@ describe("Overview navigation", () => {
 
     expect(navLink("Overview")).toHaveAttribute("aria-current", "page");
 
-    expect(
-      await screen.findByRole("option", { name: "Dev DB · View + Edit" }),
-    ).toBeInTheDocument();
+    await waitForDatabaseOption();
 
     expect(
       screen.getByRole("option", { name: "Prod DB · View only" }),
@@ -415,60 +445,68 @@ describe("Overview navigation", () => {
   it("shows the selected permission and existing feature cards", async () => {
     setup();
 
-    expect(
-      await screen.findByText("View + Edit", { selector: "b" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText("View + Edit", { selector: "b" }),
+      ).toBeInTheDocument();
 
-    for (const name of [
-      "Review every change",
-      "Run ad-hoc SQL",
-      "Design the next schema",
-      "Inspect before execution",
-    ]) {
-      expect(screen.getByRole("heading", { name })).toBeInTheDocument();
-    }
+      for (const name of [
+        "Review every change",
+        "Run ad-hoc SQL",
+        "Design the next schema",
+        "Inspect before execution",
+      ]) {
+        expect(
+          screen.getByRole("heading", { name }),
+        ).toBeInTheDocument();
+      }
+    });
   });
 
   it("switches workspace views through feature cards", async () => {
     setup();
     const user = userEvent.setup();
 
-    await screen.findByRole("option", { name: "Dev DB · View + Edit" });
+    await waitForDatabaseOption();
 
     await user.click(
       screen.getByRole("link", { name: /Run ad-hoc SQL/ }),
     );
 
-    expect(navLink("SQL console")).toHaveAttribute("aria-current", "page");
-    expect(window.location.search).toContain("tab=console");
-    expect(screen.getByLabelText("SQL statement")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(navLink("SQL console"))
+        .toHaveAttribute("aria-current", "page");
+
+      expect(window.location.search).toContain("tab=console");
+
+      expect(
+        screen.getByLabelText("SQL statement"),
+      ).toBeInTheDocument();
+    });
   });
 
   it("updates the selected database, migration data and URL", async () => {
     setup();
     const user = userEvent.setup();
 
-    await screen.findByRole("option", { name: "Prod DB · View only" });
+    await waitForDatabaseOption("Prod DB · View only");
+
     await user.selectOptions(dropdown(), "db-2");
 
     await waitFor(() => {
       expect(mocks.api).toHaveBeenCalledWith(
         "/api/databases/db-2/migrations",
       );
-    });
 
-    expect(window.location.search).toContain("database=db-2");
-    expect(dropdown()).toHaveValue("db-2");
+      expect(window.location.search).toContain("database=db-2");
+      expect(dropdown()).toHaveValue("db-2");
+    });
   });
 
   it("handles an empty database list", async () => {
     setup({ url: "", databases: [] });
 
-    expect(
-      await screen.findByRole("option", {
-        name: "No accessible databases",
-      }),
-    ).toBeInTheDocument();
+    await waitForDatabaseOption("No accessible databases");
 
     expect(dropdown()).toBeDisabled();
   });
@@ -476,12 +514,14 @@ describe("Overview navigation", () => {
   it("handles database listing errors and allows retry", async () => {
     setup({ url: "", listError: "Unable to load databases" });
 
-    const alert = await screen.findByRole("alert");
-
-    expect(alert).toHaveTextContent("Unable to load databases");
+    await waitFor(() => {
+      expect(screen.getByRole("alert"))
+        .toHaveTextContent("Unable to load databases");
+    });
 
     await userEvent.setup().click(
-      within(alert).getByRole("button", { name: "Try again" }),
+      within(screen.getByRole("alert"))
+        .getByRole("button", { name: "Try again" }),
     );
 
     await waitFor(() => {
@@ -497,13 +537,18 @@ describe("Overview navigation", () => {
     setup({ url: "?database=gone" });
     const user = userEvent.setup();
 
-    expect(
-      await screen.findByText(/not accessible to you/),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/not accessible to you/),
+      ).toBeInTheDocument();
+    });
 
     for (const name of ["Migrations", "SQL console", "Query plans"]) {
       await user.click(navLink(name));
-      expect(needDatabase()).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(needDatabase()).toBeInTheDocument();
+      });
     }
 
     expect(
@@ -514,11 +559,13 @@ describe("Overview navigation", () => {
   it("requires a selected database before opening SQL console", async () => {
     setup({ url: "" });
 
-    await screen.findByRole("option", { name: "Dev DB · View + Edit" });
+    await waitForDatabaseOption();
 
     await userEvent.setup().click(navLink("SQL console"));
 
-    expect(needDatabase()).toBeInTheDocument();
+    await waitFor(() => {
+      expect(needDatabase()).toBeInTheDocument();
+    });
   });
 });
 
@@ -527,7 +574,7 @@ describe("Shared database context", () => {
     setup();
     const user = userEvent.setup();
 
-    await screen.findByRole("option", { name: "Dev DB · View + Edit" });
+    await waitForDatabaseOption();
 
     expect(screen.getAllByRole("combobox")).toHaveLength(1);
 
@@ -538,112 +585,183 @@ describe("Shared database context", () => {
       "Query plans",
     ]) {
       await user.click(navLink(name));
-      expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(navLink(name)).toHaveAttribute("aria-current", "page");
+        expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+      });
     }
 
     await user.click(navLink("Overview"));
 
-    expect(dropdown()).toHaveValue("db-1");
+    await waitFor(() => {
+      expect(dropdown()).toHaveValue("db-1");
+    });
   });
 
   it("shares the database selection between migrations, SQL console and query plans", async () => {
     setup({ url: "?database=db-2" });
     const user = userEvent.setup();
 
-    await screen.findByRole("option", { name: "Prod DB · View only" });
+    await waitForDatabaseOption("Prod DB · View only");
 
     await user.click(navLink("Migrations"));
 
-    expect(await screen.findByText("Add students")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("Add students")).toBeInTheDocument();
 
-    expect(mocks.api).toHaveBeenCalledWith(
-      "/api/databases/db-2/migrations",
-    );
+      expect(mocks.api).toHaveBeenCalledWith(
+        "/api/databases/db-2/migrations",
+      );
+    });
 
     await user.click(navLink("SQL console"));
-    await user.type(screen.getByLabelText("SQL statement"), "SELECT 1");
-    await user.click(screen.getByRole("button", { name: "Execute" }));
 
-    expect(await screen.findByText("from db-2")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText("SQL statement"),
+      ).toBeInTheDocument();
+    });
 
-    expect(mocks.api).toHaveBeenCalledWith(
-      "/api/databases/db-2/query",
-      "POST",
-      { query: "SELECT 1" },
+    await user.type(
+      screen.getByLabelText("SQL statement"),
+      "SELECT 1",
     );
 
+    await user.click(
+      screen.getByRole("button", { name: "Execute" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("from db-2")).toBeInTheDocument();
+
+      expect(mocks.api).toHaveBeenCalledWith(
+        "/api/databases/db-2/query",
+        "POST",
+        { query: "SELECT 1" },
+      );
+    });
+
     await user.click(navLink("Query plans"));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Explain query" }),
+      ).toBeEnabled();
+    });
+
     await user.click(
       screen.getByRole("button", { name: "Explain query" }),
     );
 
-    expect(await screen.findByText("Plan db-2")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("Plan db-2")).toBeInTheDocument();
+    });
 
     await user.click(navLink("Overview"));
-    expect(dropdown()).toHaveValue("db-2");
+
+    await waitFor(() => {
+      expect(dropdown()).toHaveValue("db-2");
+    });
 
     await user.click(navLink("SQL console"));
-    expect(screen.getByText("from db-2")).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText("from db-2")).toBeInTheDocument();
+    });
   });
 
   it("clears results belonging to the previous database when selection changes", async () => {
     setup({ url: "?database=db-2&tab=console" });
     const user = userEvent.setup();
 
-    expect(
-      await screen.findByText(/View only: only read-only queries/),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/View only: only read-only queries/),
+      ).toBeInTheDocument();
+    });
 
-    await user.type(screen.getByLabelText("SQL statement"), "SELECT 1");
-    await user.click(screen.getByRole("button", { name: "Execute" }));
+    await user.type(
+      screen.getByLabelText("SQL statement"),
+      "SELECT 1",
+    );
 
-    await screen.findByText("from db-2");
+    await user.click(
+      screen.getByRole("button", { name: "Execute" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("from db-2")).toBeInTheDocument();
+    });
 
     await user.click(navLink("Overview"));
+
+    await waitForDatabaseOption();
+
     await user.selectOptions(dropdown(), "db-1");
     await user.click(navLink("SQL console"));
 
-    expect(screen.queryByText("from db-2")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/NOT recorded as migrations/),
+      ).toBeInTheDocument();
 
-    expect(
-      screen.getByText(/NOT recorded as migrations/),
-    ).toBeInTheDocument();
+      expect(
+        screen.queryByText("from db-2"),
+      ).not.toBeInTheDocument();
+    });
 
-    await user.type(screen.getByLabelText("SQL statement"), "SELECT 2");
-    await user.click(screen.getByRole("button", { name: "Execute" }));
-
-    expect(await screen.findByText("from db-1")).toBeInTheDocument();
-
-    expect(mocks.api).toHaveBeenCalledWith(
-      "/api/databases/db-1/query",
-      "POST",
-      { query: "SELECT 2" },
+    await user.type(
+      screen.getByLabelText("SQL statement"),
+      "SELECT 2",
     );
+
+    await user.click(
+      screen.getByRole("button", { name: "Execute" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("from db-1")).toBeInTheDocument();
+
+      expect(mocks.api).toHaveBeenCalledWith(
+        "/api/databases/db-1/query",
+        "POST",
+        { query: "SELECT 2" },
+      );
+    });
   });
 
   it("restores the selected workspace view from the URL", async () => {
     setup({ url: "?database=db-1&tab=plan" });
 
-    expect(navLink("Query plans")).toHaveAttribute("aria-current", "page");
+    expect(navLink("Query plans"))
+      .toHaveAttribute("aria-current", "page");
 
-    expect(
-      await screen.findByRole("button", { name: "Explain query" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Explain query" }),
+      ).toBeInTheDocument();
+    });
   });
 
   it("reuses the session across workspace navigation", async () => {
     setup();
     const user = userEvent.setup();
 
-    await screen.findByRole("option", { name: "Dev DB · View + Edit" });
+    await waitForDatabaseOption();
 
     await user.click(navLink("Migrations"));
-    await screen.findByText("Add students");
+
+    await waitFor(() => {
+      expect(screen.getByText("Add students")).toBeInTheDocument();
+    });
 
     await user.click(navLink("SQL console"));
     await user.click(navLink("Query plans"));
     await user.click(navLink("Approvals"));
     await user.click(navLink("Overview"));
+
+    await waitForDatabaseOption();
 
     expect(mocks.session).toHaveBeenCalledTimes(1);
   });
@@ -653,43 +771,52 @@ describe("Migration history and permissions", () => {
   it("keeps migration history and creation actions for ViewEdit databases", async () => {
     setup({ url: "?database=db-1&tab=migration" });
 
-    expect(await screen.findByText("Add students")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("Add students")).toBeInTheDocument();
 
-    expect(
-      screen.getByRole("link", { name: "+ New migration" }),
-    ).toBeInTheDocument();
+      expect(
+        screen.getByRole("link", { name: "+ New migration" }),
+      ).toBeInTheDocument();
+    });
   });
 
   it("hides migration creation actions for ViewOnly databases", async () => {
     setup({ url: "?database=db-2&tab=migration" });
 
-    await screen.findByText("Add students");
+    await waitFor(() => {
+      expect(screen.getByText("Add students")).toBeInTheDocument();
 
-    expect(
-      screen.queryByRole("link", { name: "+ New migration" }),
-    ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("link", { name: "+ New migration" }),
+      ).not.toBeInTheDocument();
+    });
   });
 
   it("opens the migration details through the SPA router", async () => {
     setup({ url: "?database=db-1&tab=migration" });
 
-    await screen.findByText("Add students");
+    await waitFor(() => {
+      expect(screen.getByText("Add students")).toBeInTheDocument();
+    });
 
     await userEvent.setup().click(
-      within(screen.getByRole("region", { name: "Migration history" }))
-        .getByRole("link", { name: "View →" }),
+      within(
+        screen.getByRole("region", { name: "Migration history" }),
+      ).getByRole("link", { name: "View →" }),
     );
 
-    expect(
-      await screen.findByRole("heading", { name: "Migration details" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByRole("heading", { name: "Migration details" }),
+      ).toBeInTheDocument();
 
-    expect(window.location.pathname).toBe("/migrations/details");
-    expect(window.location.search).toContain("id=m1");
+      expect(window.location.pathname).toBe("/migrations/details");
+      expect(window.location.search).toContain("id=m1");
 
-    expect(mocks.api).toHaveBeenCalledWith(
-      "/api/databases/db-1/migrations/m1",
-    );
+      expect(mocks.api).toHaveBeenCalledWith(
+        "/api/databases/db-1/migrations/m1",
+      );
+    });
   });
 
   it("does not offer execution actions to ViewOnly users", async () => {
@@ -698,15 +825,19 @@ describe("Migration history and permissions", () => {
       migration: { ...MIGRATION, state: "draft" },
     });
 
-    await screen.findByRole("heading", { name: "Add students" });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("heading", { name: "Add students" }),
+      ).toBeInTheDocument();
 
-    expect(
-      screen.queryByRole("button", { name: "Submit for approval" }),
-    ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Submit for approval" }),
+      ).not.toBeInTheDocument();
 
-    expect(
-      screen.queryByRole("link", { name: "Edit draft" }),
-    ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("link", { name: "Edit draft" }),
+      ).not.toBeInTheDocument();
+    });
   });
 
   it("disables execution when the migration already has an open request", async () => {
@@ -716,17 +847,19 @@ describe("Migration history and permissions", () => {
       requests: [REQUEST],
     });
 
-    expect(
-      await screen.findByText(/A change request is already open/),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/A change request is already open/),
+      ).toBeInTheDocument();
 
-    expect(
-      screen.getByRole("button", { name: "Submit for approval" }),
-    ).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: "Submit for approval" }),
+      ).toBeDisabled();
 
-    expect(
-      screen.getByRole("link", { name: "View request →" }),
-    ).toHaveAttribute("href", jobUrl());
+      expect(
+        screen.getByRole("link", { name: "View request →" }),
+      ).toHaveAttribute("href", jobUrl());
+    });
   });
 });
 
@@ -747,8 +880,14 @@ describe("Asynchronous migration submission", () => {
 
     const user = userEvent.setup();
 
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: label }),
+      ).toBeEnabled();
+    });
+
     await user.click(
-      await screen.findByRole("button", { name: label }),
+      screen.getByRole("button", { name: label }),
     );
 
     const dialog = within(screen.getByRole("dialog"));
@@ -763,9 +902,7 @@ describe("Asynchronous migration submission", () => {
       dialog.getByRole("button", { name: label }),
     );
 
-    await screen.findByRole("heading", {
-      name: "Required approvals",
-    });
+    await waitForJobPage();
 
     await waitFor(() => {
       const panel = jobPanel();
@@ -808,16 +945,30 @@ describe("Asynchronous migration submission", () => {
 
     const user = userEvent.setup();
 
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Submit for approval" }),
+      ).toBeEnabled();
+    });
+
     await user.click(
-      await screen.findByRole("button", { name: "Submit for approval" }),
+      screen.getByRole("button", { name: "Submit for approval" }),
     );
 
     const dialog = within(screen.getByRole("dialog"));
 
-    expect(dialog.queryByLabelText("Batch attribute")).not.toBeInTheDocument();
-    expect(dialog.queryByLabelText("Batch size")).not.toBeInTheDocument();
+    expect(
+      dialog.queryByLabelText("Batch attribute"),
+    ).not.toBeInTheDocument();
 
-    await user.selectOptions(dialog.getByLabelText("Execution mode"), "batch");
+    expect(
+      dialog.queryByLabelText("Batch size"),
+    ).not.toBeInTheDocument();
+
+    await user.selectOptions(
+      dialog.getByLabelText("Execution mode"),
+      "batch",
+    );
 
     await user.clear(dialog.getByLabelText("Batch attribute"));
     await user.type(dialog.getByLabelText("Batch attribute"), "id");
@@ -829,24 +980,26 @@ describe("Asynchronous migration submission", () => {
       dialog.getByRole("button", { name: "Submit for approval" }),
     );
 
-    await screen.findByRole("heading", { name: "Execution job" });
+    await waitForJobPage();
 
-    expect(mocks.api).toHaveBeenCalledWith(
-      "/api/databases/db-1/change-requests",
-      "POST",
-      {
-        migration_id: "m1",
-        operation: "apply",
-        mode: "batch",
-        batch_attribute: "id",
-        batch_size: 250,
-      },
-    );
+    await waitFor(() => {
+      expect(mocks.api).toHaveBeenCalledWith(
+        "/api/databases/db-1/change-requests",
+        "POST",
+        {
+          migration_id: "m1",
+          operation: "apply",
+          mode: "batch",
+          batch_attribute: "id",
+          batch_size: 250,
+        },
+      );
 
-    expect(jobPanel().getByText("job-1")).toBeInTheDocument();
-    expect(fieldValue("Mode")).toHaveTextContent("Batch");
-    expect(fieldValue("Batch attribute")).toHaveTextContent("id");
-    expect(fieldValue("Batch size")).toHaveTextContent("250");
+      expect(jobPanel().getByText("job-1")).toBeInTheDocument();
+      expect(fieldValue("Mode")).toHaveTextContent("Batch");
+      expect(fieldValue("Batch attribute")).toHaveTextContent("id");
+      expect(fieldValue("Batch size")).toHaveTextContent("250");
+    });
   });
 
   it("displays invalid batch configuration returned by the backend", async () => {
@@ -867,20 +1020,27 @@ describe("Asynchronous migration submission", () => {
 
     const dialog = within(screen.getByRole("dialog"));
 
-    await user.selectOptions(dialog.getByLabelText("Execution mode"), "batch");
+    await user.selectOptions(
+      dialog.getByLabelText("Execution mode"),
+      "batch",
+    );
 
     await user.click(
       dialog.getByRole("button", { name: "Submit for approval" }),
     );
 
-    expect(await dialog.findByRole("alert")).toHaveTextContent(
-      "Batch requires an identity primary key",
-    );
+    await waitFor(() => {
+      const panel = within(screen.getByRole("dialog"));
 
-    expect(dialog.getByLabelText("Batch attribute"))
-      .toHaveAttribute("aria-invalid", "true");
+      expect(panel.getByRole("alert")).toHaveTextContent(
+        "Batch requires an identity primary key",
+      );
 
-    expect(window.location.pathname).toBe("/migrations/details");
+      expect(panel.getByLabelText("Batch attribute"))
+        .toHaveAttribute("aria-invalid", "true");
+
+      expect(window.location.pathname).toBe("/migrations/details");
+    });
   });
 
   it("prevents duplicate execution submissions while a request is pending", async () => {
@@ -919,11 +1079,19 @@ describe("Asynchronous migration submission", () => {
       dialog.getByRole("button", { name: "Submit for approval" }),
     );
 
-    const busy = dialog.getByRole("button", { name: "Submitting…" });
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("dialog")).getByRole("button", {
+          name: "Submitting…",
+        }),
+      ).toBeDisabled();
+    });
 
-    expect(busy).toBeDisabled();
-
-    await user.click(busy);
+    await user.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Submitting…",
+      }),
+    );
 
     const submissions = mocks.api.mock.calls.filter(
       ([path, method]) =>
@@ -937,9 +1105,7 @@ describe("Asynchronous migration submission", () => {
       await resolveSubmission();
     });
 
-    expect(
-      await screen.findByRole("heading", { name: "Execution job" }),
-    ).toBeInTheDocument();
+    await waitForJobPage();
   });
 
   it("displays submission permission errors without navigating away", async () => {
@@ -964,13 +1130,19 @@ describe("Asynchronous migration submission", () => {
       dialog.getByRole("button", { name: "Submit for approval" }),
     );
 
-    expect(await dialog.findByRole("alert")).toHaveTextContent(
-      "Permission denied",
-    );
+    await waitFor(() => {
+      const panel = within(screen.getByRole("dialog"));
 
-    expect(window.location.pathname).toBe("/migrations/details");
-    expect(dialog.getByRole("button", { name: "Submit for approval" }))
-      .toBeEnabled();
+      expect(panel.getByRole("alert")).toHaveTextContent(
+        "Permission denied",
+      );
+
+      expect(window.location.pathname).toBe("/migrations/details");
+
+      expect(
+        panel.getByRole("button", { name: "Submit for approval" }),
+      ).toBeEnabled();
+    });
   });
 });
 
@@ -983,15 +1155,17 @@ describe("Execution job navigation and monitoring", () => {
 
     const user = userEvent.setup();
 
-    const link = await screen.findByRole("link", { name: "View job →" });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("link", { name: "View job →" }),
+      ).toHaveAttribute("href", jobUrl());
+    });
 
-    expect(link).toHaveAttribute("href", jobUrl());
+    await user.click(
+      screen.getByRole("link", { name: "View job →" }),
+    );
 
-    await user.click(link);
-
-    expect(
-      await screen.findByRole("heading", { name: "Execution job" }),
-    ).toBeInTheDocument();
+    await waitForJobPage();
 
     expect(jobPanel().getByText("job-1")).toBeInTheDocument();
 
@@ -1020,9 +1194,7 @@ describe("Execution job navigation and monitoring", () => {
       },
     });
 
-    await screen.findByRole("heading", {
-      name: "Required approvals",
-    });
+    await waitForJobPage();
 
     await waitFor(() => {
       expect(
@@ -1051,23 +1223,21 @@ describe("Execution job navigation and monitoring", () => {
       },
     });
 
-    await screen.findByRole("heading", {
-      name: "Required approvals",
-    });
+    await waitForJobPage();
 
     await waitFor(() => {
-      expect(jobPanel().getByRole("alert")).toHaveTextContent(
+      const panel = jobPanel();
+
+      expect(panel.getByRole("alert")).toHaveTextContent(
         "indeterminate: Connection lost during commit",
       );
 
       expect(
-        jobPanel().getByText(
-          /Later migrations on this database are held/,
-        ),
+        panel.getByText(/Later migrations on this database are held/),
       ).toBeInTheDocument();
 
       expect(
-        jobPanel().queryByRole("button", { name: "Resume" }),
+        panel.queryByRole("button", { name: "Resume" }),
       ).not.toBeInTheDocument();
     });
   });
@@ -1081,9 +1251,7 @@ describe("Execution job navigation and monitoring", () => {
       ),
     });
 
-    await screen.findByRole("heading", {
-      name: "Required approvals",
-    });
+    await waitForJobPage();
 
     await waitFor(() => {
       const panel = jobPanel();
@@ -1112,7 +1280,7 @@ describe("Execution job navigation and monitoring", () => {
 
     const user = userEvent.setup();
 
-    await screen.findByRole("heading", { name: "Execution job" });
+    await waitForJobPage();
 
     await waitFor(() => {
       expect(fieldValue("Committed rows")).toHaveTextContent("200");
@@ -1149,9 +1317,9 @@ describe("Execution job navigation and monitoring", () => {
         available_actions: ["resume", "compensate"],
       },
     });
-    await screen.findByRole("heading", {
-      name: "Required approvals",
-    });
+
+    await waitForJobPage();
+
     await waitFor(() => {
       const panel = jobPanel();
 
@@ -1231,9 +1399,9 @@ describe("Execution polling lifecycle", () => {
 
     await advance();
 
-    expect(jobPanel().getByText("Completed", {
-      selector: ".badge",
-    })).toBeInTheDocument();
+    expect(
+      jobPanel().getByText("Completed", { selector: ".badge" }),
+    ).toBeInTheDocument();
 
     const completedReads = jobReads();
 
@@ -1336,11 +1504,14 @@ describe("Approval workflow", () => {
       pendingApprovals: [],
     });
 
-    expect(navLink("Approvals")).toHaveAttribute("aria-current", "page");
+    expect(navLink("Approvals"))
+      .toHaveAttribute("aria-current", "page");
 
-    expect(
-      await screen.findByText("Nothing is waiting for you"),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText("Nothing is waiting for you"),
+      ).toBeInTheDocument();
+    });
   });
 
   it("opens a pending approval and submits the leader's decision", async () => {
@@ -1355,12 +1526,14 @@ describe("Approval workflow", () => {
           group_name: "Engineering",
           required_leader_id: "u1",
           decision: "pending",
+          mine: true,
         },
       ],
     };
 
     setup({
       url: "?tab=approvals",
+      viewer: "u1",
       pendingApprovals: [pendingRequest],
       request: pendingRequest,
       job: {
@@ -1374,13 +1547,27 @@ describe("Approval workflow", () => {
 
     const user = userEvent.setup();
 
+    await waitFor(() => {
+      expect(
+        screen.getByRole("link", { name: "Review →" }),
+      ).toBeInTheDocument();
+    });
+
     await user.click(
-      await screen.findByRole("link", { name: "Review →" }),
+      screen.getByRole("link", { name: "Review →" }),
     );
 
-    expect(
-      await screen.findByText("Your decision is needed"),
-    ).toBeInTheDocument();
+    await waitForJobPage();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Your decision is needed"),
+      ).toBeInTheDocument();
+
+      expect(
+        screen.getByRole("button", { name: "Approve…" }),
+      ).toBeEnabled();
+    });
 
     await user.click(
       screen.getByRole("button", { name: "Approve…" }),
@@ -1403,11 +1590,11 @@ describe("Approval workflow", () => {
         "POST",
         { comment: "Reviewed SQL" },
       );
-    });
 
-    expect(
-      await jobPanel().findByText("In queue", { selector: ".badge" }),
-    ).toBeInTheDocument();
+      expect(
+        jobPanel().getByText("In queue", { selector: ".badge" }),
+      ).toBeInTheDocument();
+    });
   });
 
   it("does not show approval decisions to an unrelated user", async () => {
@@ -1424,6 +1611,7 @@ describe("Approval workflow", () => {
             group_name: "Engineering",
             required_leader_id: "leader-1",
             decision: "pending",
+            mine: false,
           },
         ],
       },
@@ -1436,7 +1624,7 @@ describe("Approval workflow", () => {
       },
     });
 
-    await screen.findByRole("heading", { name: "Required approvals" });
+    await waitForJobPage();
 
     expect(
       screen.queryByRole("button", { name: "Approve…" }),
@@ -1452,15 +1640,19 @@ describe("Migration recovery and compensation", () => {
   it("shows recovery actions to the authorized requester", async () => {
     setup({ url: jobUrl() });
 
-    expect(
-      await screen.findByRole("button", { name: "Resume" }),
-    ).toBeInTheDocument();
+    await waitForJobPage();
 
-    expect(
-      screen.getByRole("button", {
-        name: "Compensate (revert committed batches)",
-      }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        jobPanel().getByRole("button", { name: "Resume" }),
+      ).toBeInTheDocument();
+
+      expect(
+        jobPanel().getByRole("button", {
+          name: "Compensate (revert committed batches)",
+        }),
+      ).toBeInTheDocument();
+    });
   });
 
   it.each([
@@ -1475,7 +1667,7 @@ describe("Migration recovery and compensation", () => {
       viewer,
     });
 
-    await screen.findByRole("heading", { name: "Required approvals" });
+    await waitForJobPage();
 
     expect(
       jobPanel().queryByRole("button", { name: "Resume" }),
@@ -1495,7 +1687,7 @@ describe("Migration recovery and compensation", () => {
       },
     });
 
-    await screen.findByRole("heading", { name: "Required approvals" });
+    await waitForJobPage();
 
     expect(
       jobPanel().queryByRole("button", { name: "Resume" }),
@@ -1508,10 +1700,19 @@ describe("Migration recovery and compensation", () => {
 
   it("resumes a migration from its last verified checkpoint", async () => {
     setup({ url: jobUrl() });
+
     const user = userEvent.setup();
 
+    await waitForJobPage();
+
+    await waitFor(() => {
+      expect(
+        jobPanel().getByRole("button", { name: "Resume" }),
+      ).toBeEnabled();
+    });
+
     await user.click(
-      await screen.findByRole("button", { name: "Resume" }),
+      jobPanel().getByRole("button", { name: "Resume" }),
     );
 
     const dialog = within(screen.getByRole("dialog"));
@@ -1520,29 +1721,42 @@ describe("Migration recovery and compensation", () => {
       dialog.getByText(/processing only uncommitted batches/),
     ).toBeInTheDocument();
 
-    await user.click(dialog.getByRole("button", { name: "Resume" }));
+    await user.click(
+      dialog.getByRole("button", { name: "Resume" }),
+    );
 
     await waitFor(() => {
       expect(mocks.api).toHaveBeenCalledWith(
         `${jobPath()}/resume`,
         "POST",
       );
+
+      expect(
+        jobPanel().getByText(/Execution is still processing batches/),
+      ).toBeInTheDocument();
+
+      expect(fieldValue("Committed batches")).toHaveTextContent("2");
+      expect(fieldValue("Committed rows")).toHaveTextContent("200");
     });
-
-    expect(
-      await jobPanel().findByText(/Execution is still processing batches/),
-    ).toBeInTheDocument();
-
-    expect(fieldValue("Committed batches")).toHaveTextContent("2");
-    expect(fieldValue("Committed rows")).toHaveTextContent("200");
   });
 
   it("requires confirmation before compensating committed batches", async () => {
     setup({ url: jobUrl() });
+
     const user = userEvent.setup();
 
+    await waitForJobPage();
+
+    await waitFor(() => {
+      expect(
+        jobPanel().getByRole("button", {
+          name: "Compensate (revert committed batches)",
+        }),
+      ).toBeEnabled();
+    });
+
     await user.click(
-      await screen.findByRole("button", {
+      jobPanel().getByRole("button", {
         name: "Compensate (revert committed batches)",
       }),
     );
@@ -1567,17 +1781,15 @@ describe("Migration recovery and compensation", () => {
         `${jobPath()}/compensate`,
         "POST",
       );
-    });
 
-    await waitFor(() => {
       expect(fieldValue("Reverted batches")).toHaveTextContent("2");
       expect(fieldValue("Reverted rows")).toHaveTextContent("200");
       expect(fieldValue("Remaining committed rows")).toHaveTextContent("0");
-    });
 
-    expect(
-      jobPanel().getAllByText("Reverted", { selector: ".badge" }),
-    ).toHaveLength(2);
+      expect(
+        jobPanel().getAllByText("Reverted", { selector: ".badge" }),
+      ).toHaveLength(2);
+    });
   });
 
   it("displays unsafe compensation rejection and corrective migration guidance", async () => {
@@ -1591,8 +1803,18 @@ describe("Migration recovery and compensation", () => {
 
     const user = userEvent.setup();
 
+    await waitForJobPage();
+
+    await waitFor(() => {
+      expect(
+        jobPanel().getByRole("button", {
+          name: "Compensate (revert committed batches)",
+        }),
+      ).toBeEnabled();
+    });
+
     await user.click(
-      await screen.findByRole("button", {
+      jobPanel().getByRole("button", {
         name: "Compensate (revert committed batches)",
       }),
     );
@@ -1603,18 +1825,29 @@ describe("Migration recovery and compensation", () => {
       dialog.getByRole("button", { name: "Compensate" }),
     );
 
-    const alert = await dialog.findByRole("alert");
+    await waitFor(() => {
+      const alert = within(
+        screen.getByRole("dialog"),
+      ).getByRole("alert");
 
-    expect(alert).toHaveTextContent("Approved down SQL is unavailable");
+      expect(alert).toHaveTextContent(
+        "Approved down SQL is unavailable",
+      );
 
-    expect(alert).toHaveTextContent(
-      "A new corrective migration is required",
-    );
+      expect(alert).toHaveTextContent(
+        "A new corrective migration is required",
+      );
+    });
   });
 
   it("offers continuation for interrupted compensation", async () => {
     setup({
       url: jobUrl(),
+      viewer: "u1",
+      request: {
+        ...REQUEST,
+        requested_by: "u1",
+      },
       job: {
         ...JOB,
         status: "partial",
@@ -1629,22 +1862,46 @@ describe("Migration recovery and compensation", () => {
 
     const user = userEvent.setup();
 
-    expect(
-      await screen.findByText("Partially reverted", { selector: ".badge" }),
-    ).toBeInTheDocument();
+    await waitForJobPage();
 
-    expect(fieldValue("Reverted batches")).toHaveTextContent("1");
-    expect(fieldValue("Reverted rows")).toHaveTextContent("100");
-    expect(fieldValue("Remaining committed rows")).toHaveTextContent("100");
+    await waitFor(() => {
+      const panel = jobPanel();
+
+      expect(
+        panel.getByText("Partially reverted", {
+          selector: ".badge",
+        }),
+      ).toBeInTheDocument();
+
+      expect(fieldValue("Reverted batches")).toHaveTextContent("1");
+      expect(fieldValue("Reverted rows")).toHaveTextContent("100");
+      expect(fieldValue("Remaining committed rows")).toHaveTextContent("100");
+
+      expect(
+        panel.getByRole("button", {
+          name: "Continue compensation",
+        }),
+      ).toBeEnabled();
+    });
 
     await user.click(
-      screen.getByRole("button", { name: "Continue compensation" }),
+      jobPanel().getByRole("button", {
+        name: "Continue compensation",
+      }),
     );
 
-    const dialog = within(screen.getByRole("dialog"));
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("dialog")).getByRole("button", {
+          name: "Continue compensation",
+        }),
+      ).toBeEnabled();
+    });
 
     await user.click(
-      dialog.getByRole("button", { name: "Continue compensation" }),
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Continue compensation",
+      }),
     );
 
     await waitFor(() => {
@@ -1690,22 +1947,24 @@ describe("Held migrations and database isolation", () => {
       dialog.getByRole("button", { name: "Submit for approval" }),
     );
 
-    expect(await dialog.findByRole("alert")).toHaveTextContent(
-      "Database is held by another migration",
-    );
+    await waitFor(() => {
+      const panel = within(screen.getByRole("dialog"));
 
-    const link = await dialog.findByRole("link", {
-      name: /blocking-job/,
+      expect(panel.getByRole("alert")).toHaveTextContent(
+        "Database is held by another migration",
+      );
+
+      expect(
+        panel.getByRole("link", { name: /blocking-job/ }),
+      ).toHaveAttribute(
+        "href",
+        jobUrl("db-1", "blocking-job"),
+      );
+
+      expect(
+        panel.getByText(/Possible blocking jobs on this database/),
+      ).toBeInTheDocument();
     });
-
-    expect(link).toHaveAttribute(
-      "href",
-      jobUrl("db-1", "blocking-job"),
-    );
-
-    expect(
-      dialog.getByText(/Possible blocking jobs on this database/),
-    ).toBeInTheDocument();
   });
 
   it("displays possible blockers for an accepted but queued job", async () => {
@@ -1724,27 +1983,26 @@ describe("Held migrations and database isolation", () => {
       blockers: [blocker],
     });
 
-    await screen.findByRole("heading", { name: "Execution job" });
+    await waitForJobPage();
 
     await waitFor(() => {
-      const link = jobPanel().getByRole("link", {
-        name: /blocking-job/,
-      });
+      const panel = jobPanel();
 
-      expect(link).toHaveAttribute(
+      expect(
+        panel.getByRole("link", { name: /blocking-job/ }),
+      ).toHaveAttribute(
         "href",
         jobUrl("db-1", "blocking-job"),
       );
-    });
 
-    await waitFor(() => {
       expect(
-        jobPanel().getByText("Partial", { selector: ".badge" }),
+        panel.getByText("Partial", { selector: ".badge" }),
       ).toBeInTheDocument();
 
-      expect(jobPanel().getByText("(paused)")).toBeInTheDocument();
+      expect(
+        panel.getByText("(paused)"),
+      ).toBeInTheDocument();
     });
-
   });
 
   it("does not display blockers belonging to an unrelated database", async () => {
@@ -1763,7 +2021,7 @@ describe("Held migrations and database isolation", () => {
       blockers: [blocker],
     });
 
-    await screen.findByRole("heading", { name: "Execution job" });
+    await waitForJobPage();
 
     await waitFor(() => {
       expect(mocks.api).toHaveBeenCalledWith(
@@ -1773,14 +2031,14 @@ describe("Held migrations and database isolation", () => {
       expect(mocks.api).toHaveBeenCalledWith(
         "/api/databases/db-2/change-requests?status=unknown&limit=200",
       );
+
+      expect(
+        jobPanel().queryByRole("link", { name: /blocking-job/ }),
+      ).not.toBeInTheDocument();
+
+      expect(mocks.api).not.toHaveBeenCalledWith(
+        "/api/databases/db-1/jobs/blocking-job",
+      );
     });
-
-    expect(
-      jobPanel().queryByRole("link", { name: /blocking-job/ }),
-    ).not.toBeInTheDocument();
-
-    expect(mocks.api).not.toHaveBeenCalledWith(
-      "/api/databases/db-1/jobs/blocking-job",
-    );
   });
 });

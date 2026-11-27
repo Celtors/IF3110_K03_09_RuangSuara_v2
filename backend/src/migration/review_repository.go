@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-
 const requestSelect = `SELECT r.id,r.database_id,r.migration_id,d.name,r.operation,r.sql_hash,r.requested_by,r.status,
  r.attempt_id,r.reject_reason,r.result_code,r.result_message,r.created_at,r.updated_at,r.approved_at,r.queued_at,
  r.started_at,r.completed_at,r.submission_correlation_id,
@@ -353,7 +352,6 @@ func (r *Repository) cancel(ctx context.Context, db, id, user, reason string) er
 	return tx.Commit(ctx)
 }
 
-
 const claimSQL = `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,r.submission_correlation_id
  FROM dmp_migration.change_requests r
  WHERE r.status='queued'
@@ -366,7 +364,6 @@ const claimSQL = `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_has
  ORDER BY r.queued_at,r.seq
  LIMIT 1
  FOR UPDATE OF r SKIP LOCKED`
-
 
 func (r *Repository) claim(ctx context.Context, validate func(context.Context, QueuedRequest) (bool, string, string, error)) (*QueuedRequest, error) {
 	tx, err := r.Pool.Begin(ctx)
@@ -463,7 +460,6 @@ func (r *Repository) finishRequest(ctx context.Context, id string, status Reques
 	return nil
 }
 
-
 func (r *Repository) attemptFor(ctx context.Context, q InFlightRequest) (id, status, code, message string, err error) {
 	err = r.Pool.QueryRow(ctx, `SELECT id,status,postgres_error_code,error_message
  FROM dmp_migration.attempts
@@ -475,7 +471,6 @@ func (r *Repository) attemptFor(ctx context.Context, q InFlightRequest) (id, sta
 	return
 }
 
-
 type InFlightRequest struct {
 	submissionCorrelationID string
 	ID                      string
@@ -486,7 +481,6 @@ type InFlightRequest struct {
 	Status                  RequestStatus
 	StartedAt               time.Time
 }
-
 
 func (r *Repository) inFlight(ctx context.Context, orphanAfter time.Duration) ([]InFlightRequest, error) {
 	rows, err := r.Pool.Query(ctx, `SELECT id,database_id,migration_id,operation,requested_by,status,started_at,submission_correlation_id
@@ -507,7 +501,6 @@ func (r *Repository) inFlight(ctx context.Context, orphanAfter time.Duration) ([
 	}
 	return out, rows.Err()
 }
-
 
 func (r *Repository) blockedQueues(ctx context.Context) ([]QueuedRequest, error) {
 	rows, err := r.Pool.Query(ctx, `SELECT DISTINCT ON (r.database_id) r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,r.submission_correlation_id

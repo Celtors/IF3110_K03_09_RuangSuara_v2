@@ -31,8 +31,8 @@ func (u User) AuthorizedGroupCount(database_id uuid.UUID, db *gorm.DB) int {
 
 func (u User) GetHighestAuthorization(database_id uuid.UUID, db *gorm.DB) string {
 	effects := [3]string{"Blocked", "ViewEdit", "ViewOnly"}
-	
-	for _ , value := range effects {
+
+	for _, value := range effects {
 		groups := db.Model(&GroupPolicy{}).Select("group_id").Where("database_id = ? AND effect = ?", database_id, value)
 
 		var userGroup []UserGroup
@@ -40,7 +40,7 @@ func (u User) GetHighestAuthorization(database_id uuid.UUID, db *gorm.DB) string
 
 		if len(userGroup) > 0 {
 			return value
-		} 
+		}
 	}
 
 	return "NotFound"
@@ -87,15 +87,13 @@ func (u User) GetGroupsUUID(db *gorm.DB) *[]uuid.UUID {
 }
 
 type SessionRotation struct {
-	ID uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	SessionId uuid.UUID
+	ID                  uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	SessionId           uuid.UUID
 	OldSessionTokenHash string
 	NewSessionTokenHash string
-	Status           string
-	RotatedAt time.Time
+	Status              string
+	RotatedAt           time.Time
 }
-
-
 
 type SSOSession struct {
 	ID               uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
@@ -127,7 +125,7 @@ func (session SSOSession) UpdateStatus(db *gorm.DB) {
 	}
 }
 
-func (session SSOSession) LatestRotation(db * gorm.DB) *SessionRotation {
+func (session SSOSession) LatestRotation(db *gorm.DB) *SessionRotation {
 	var rotations []SessionRotation
 	db.Model(&SessionRotation{}).Where("session_id = ?", session.ID).Order("rotated_at DESC").Find(&rotations)
 
@@ -147,14 +145,12 @@ func (session SSOSession) MarkActivity(db *gorm.DB) {
 		}
 	}
 
-	
-
 	db.Model(&SSOSession{}).Where("id = ?", session.ID).Updates(SSOSession{LastActivityAt: &t})
 }
 
 type Database struct {
 	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	Name        string    `json:"name"`
+	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -183,7 +179,7 @@ type AccessLog struct {
 
 type GroupLeader struct {
 	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	LeaderId    uuid.UUID `json:"leader_id"`
+	LeaderId  uuid.UUID `json:"leader_id"`
 	GroupId   uuid.UUID `json:"group_id"`
 	CreatedAt time.Time `json:"created_at"`
 }
