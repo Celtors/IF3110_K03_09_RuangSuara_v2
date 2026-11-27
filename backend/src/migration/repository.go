@@ -206,7 +206,9 @@ func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func()
 		return nil, nil, err
 	}
 	var ok bool
+	probeStart := time.Now()
 	err = c.QueryRow(lockCtx, `SELECT pg_try_advisory_lock(hashtextextended($1,781349))`, db).Scan(&ok)
+	telemetry.ObserveLockProbe("platform", time.Since(probeStart), ok, err)
 	if err != nil || !ok {
 		// If locking may have succeeded, close the connection to avoid leaving a lock.
 		if err != nil {
@@ -336,7 +338,7 @@ func reserveMigrationVersion(ctx context.Context, tx pgx.Tx, databaseID, migrati
 	return err
 }
 
-func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, status, code, message string) error {
+func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, mode, status, code, message string) error {
 	tx, err := c.Begin(ctx)
 	if err != nil {
 		return err
@@ -355,12 +357,13 @@ func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, statu
 	}
 
 	var completed *time.Time
+	var started time.Time
 	err = tx.QueryRow(ctx, `
  UPDATE dmp_migration.attempts
  SET status=$2,version=$3,completed_at=CASE WHEN $2='unknown' THEN NULL ELSE now() END,
      postgres_error_code=$4,error_message=$5
  WHERE id=$1 AND status IN ('running','unknown')
- RETURNING completed_at`, attempt.ID, status, successOrder, code, message).Scan(&completed)
+ RETURNING started_at,completed_at`, attempt.ID, status, successOrder, code, message).Scan(&started, &completed)
 	if err != nil {
 		return err
 	}
@@ -390,6 +393,9 @@ func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, statu
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
+	}
+	if completed != nil {
+		telemetry.ObserveCompletion(mode, string(attempt.Operation), status, completed.Sub(started))
 	}
 
 	attempt.Status = status

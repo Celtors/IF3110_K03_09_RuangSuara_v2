@@ -62,9 +62,17 @@ func HTTP(c *gin.Context) {
 		case status >= 400:
 			level, outcome = slog.LevelWarn, "rejected"
 		}
+		elapsed := time.Since(start)
+		metricRoute := route
+		if metricRoute == "" {
+			metricRoute = "unmatched"
+		}
+		statusClass := strconv.Itoa(status/100) + "xx"
+		httpRequests.WithLabelValues(method, metricRoute, statusClass).Inc()
+		httpDuration.WithLabelValues(method, metricRoute, statusClass).Observe(elapsed.Seconds())
 		slog.Log(ctx, level, "http.request", "status", outcome, "http_status", status,
 			"method", method, "route", route,
-			"duration_ms", float64(time.Since(start).Microseconds())/1000)
+			"duration_ms", float64(elapsed.Microseconds())/1000)
 	}()
 	c.Next()
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,23 +20,22 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
-	slog.SetDefault(slog.New(telemetry.NewHandler(os.Stdout)))
 	gin.SetMode(gin.ReleaseMode)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	shutdownTracing, err := telemetry.InitTracing(os.Stdout)
+	logger, shutdownTelemetry, err := telemetry.Init(ctx, os.Stdout)
+	slog.SetDefault(logger)
 	if err != nil {
 		slog.LogAttrs(ctx, slog.LevelError, "tracing.initialize", telemetry.ErrorAttrs(err)...)
 		os.Exit(1)
 	}
 	err = run(ctx)
 	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	if flushErr := shutdownTracing(flushCtx); flushErr != nil {
-		slog.LogAttrs(ctx, slog.LevelWarn, "tracing.shutdown", telemetry.ErrorAttrs(flushErr)...)
-	}
+	_ = shutdownTelemetry(flushCtx) // Init reports flush errors on its local-only sink.
 	cancel()
 	if err != nil {
 		// run returns fixed startup errors without database configuration or driver text.
@@ -143,10 +143,46 @@ func newRouter(service *migration.Service, assets string) (*gin.Engine, func(), 
 		service.Connections = provider
 	}
 	app.RegisterMigration(router, service, assets)
+	platformSQL, _ := platform.DB()
+	closeMetrics := func() {}
+	if addr := os.Getenv("METRICS_ADDR"); addr != "" {
+		registry := telemetry.NewMetricsRegistry()
+		var platformMigration *pgxpool.Pool
+		if service.Repository != nil {
+			platformMigration = service.Repository.Pool
+			service.Repository.RegisterStateMetrics(registry)
+		}
+		telemetry.RegisterPoolMetrics(registry, platformMigration, platformSQL, provider.MigrationPoolStats)
+		closeMetrics = startMetricsServer(addr, promhttp.HandlerFor(registry, promhttp.HandlerOpts{MaxRequestsInFlight: 2}))
+	}
 	return router, func() {
+		closeMetrics()
 		provider.Close()
-		if pool, err := platform.DB(); err == nil {
-			_ = pool.Close()
+		if platformSQL != nil {
+			_ = platformSQL.Close()
 		}
 	}, nil
+}
+
+func startMetricsServer(addr string, handler http.Handler) func() {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		slog.LogAttrs(context.Background(), slog.LevelWarn, "metrics.listen", telemetry.ErrorAttrs(err)...)
+		return func() {}
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", handler)
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, WriteTimeout: 5 * time.Second}
+	go func() {
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			slog.LogAttrs(context.Background(), slog.LevelWarn, "metrics.serve", telemetry.ErrorAttrs(err)...)
+		}
+	}()
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			_ = server.Close()
+		}
+	}
 }

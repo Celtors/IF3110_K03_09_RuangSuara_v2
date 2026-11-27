@@ -57,33 +57,53 @@ func CorrelationID(ctx context.Context) string {
 }
 
 func NewHandler(w io.Writer) slog.Handler {
-	return handler{slog.NewJSONHandler(w, &slog.HandlerOptions{
+	return handler{newLocalHandler(w), addMetadata}
+}
+
+func newLocalHandler(w io.Writer) slog.Handler {
+	json := slog.NewJSONHandler(w, &slog.HandlerOptions{
 		ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
 			if len(groups) == 0 && attr.Key == slog.MessageKey {
 				attr.Key = "event"
 			}
 			return attr
 		},
-	})}
+	})
+	// The OTLP bridge carries trace and span IDs in native record fields.
+	return handler{json, func(ctx context.Context, record *slog.Record) {
+		if span := trace.SpanContextFromContext(ctx); span.IsValid() {
+			record.AddAttrs(slog.String("trace_id", span.TraceID().String()), slog.String("span_id", span.SpanID().String()))
+		}
+	}}
 }
 
-type handler struct{ slog.Handler }
+type handler struct {
+	slog.Handler
+	enrich func(context.Context, *slog.Record)
+}
 
-func (h handler) Handle(ctx context.Context, record slog.Record) error {
+func (h handler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= slog.LevelInfo && h.Handler.Enabled(ctx, level)
+}
+
+func addMetadata(ctx context.Context, record *slog.Record) {
 	attrs, _ := ctx.Value(metadataKey{}).([]slog.Attr)
 	record.AddAttrs(attrs...)
-	if span := trace.SpanContextFromContext(ctx); span.IsValid() {
-		record.AddAttrs(slog.String("trace_id", span.TraceID().String()), slog.String("span_id", span.SpanID().String()))
-	}
+}
+
+func (h handler) Handle(ctx context.Context, record slog.Record) error {
+	h.enrich(ctx, &record)
 	return h.Handler.Handle(ctx, record)
 }
 
 func (h handler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return handler{h.Handler.WithAttrs(attrs)}
+	h.Handler = h.Handler.WithAttrs(attrs)
+	return h
 }
 
 func (h handler) WithGroup(name string) slog.Handler {
-	return handler{h.Handler.WithGroup(name)}
+	h.Handler = h.Handler.WithGroup(name)
+	return h
 }
 
 // ErrorAttrs reports fixed categories and SQLSTATE. Driver error text can contain

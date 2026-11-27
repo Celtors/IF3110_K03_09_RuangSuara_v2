@@ -1,0 +1,41 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: ruangsuara-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s
+
+  - name: Loki
+    uid: ruangsuara-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherType: label
+          matcherRegex: '^trace_id$'
+          datasourceUid: ruangsuara-jaeger
+          url: '$${__value.raw}'
+          urlDisplayLabel: View trace
+
+  - name: Jaeger
+    uid: ruangsuara-jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: ruangsuara-loki
+        spanStartTimeShift: '-2s'
+        spanEndTimeShift: '2s'
+        customQuery: true
+        query: '{service_name="ruangsuara-backend"} | trace_id="$${__span.traceId}"'

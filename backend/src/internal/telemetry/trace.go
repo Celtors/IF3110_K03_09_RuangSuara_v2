@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -21,17 +22,32 @@ func InitTracing(w io.Writer) (func(context.Context) error, error) {
 	if err != nil {
 		return nil, err
 	}
-	provider := sdktrace.NewTracerProvider(
-		sdktrace.WithResource(resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName("ruangsuara-backend"))),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	setExporterDiagnostics(slog.New(newLocalHandler(w)))
+	return installTracing(telemetryResource(), exporter).Shutdown, nil
+}
+
+func telemetryResource() *resource.Resource {
+	return resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName("ruangsuara-backend"))
+}
+
+func installTracing(res *resource.Resource, exporter sdktrace.SpanExporter) *sdktrace.TracerProvider {
+	opts := []sdktrace.TracerProviderOption{
+		sdktrace.WithResource(res),
 		sdktrace.WithBatcher(exporter),
-	)
+	}
+	if os.Getenv("OTEL_TRACES_SAMPLER") == "" {
+		opts = append(opts, sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	}
+	provider := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(provider)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	return provider
+}
+
+func setExporterDiagnostics(local *slog.Logger) {
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		slog.LogAttrs(context.Background(), slog.LevelWarn, "tracing.export", ErrorAttrs(err)...)
+		local.LogAttrs(context.Background(), slog.LevelWarn, "telemetry.export", ErrorAttrs(err)...)
 	}))
-	return provider.Shutdown, nil
 }
 
 // Start carries the shared operation identifiers from structured log metadata.

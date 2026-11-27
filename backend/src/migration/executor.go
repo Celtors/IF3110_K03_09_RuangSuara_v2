@@ -34,7 +34,10 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarge
 		return executionResult{Status: "failed", Message: "The target differs from the original migration target", FaultCode: "conflict"}
 	}
 	var locked bool
-	if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(781349,3)`).Scan(&locked); err != nil || !locked {
+	probeStart := time.Now()
+	err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(781349,3)`).Scan(&locked)
+	telemetry.ObserveLockProbe("target", time.Since(probeStart), locked, err)
+	if err != nil || !locked {
 		return executionResult{Status: "failed", Code: "55P03", Message: "Target migration lock is busy"}
 	}
 	var xid string

@@ -156,6 +156,17 @@ func (p *Provider) PostgreSQL(ctx context.Context, id string) (*pgxpool.Pool, er
 	return pool, nil
 }
 
+// MigrationPoolStats snapshots cached pools, which remain registered until Close.
+func (p *Provider) MigrationPoolStats() []*pgxpool.Stat {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	stats := make([]*pgxpool.Stat, 0, len(p.pools))
+	for _, pool := range p.pools {
+		stats = append(stats, pool.Stat())
+	}
+	return stats
+}
+
 // Close runs after HTTP requests drain. Pools are keyed by registration and
 // configuration, so A -> B -> A reuses A without closing an in-flight borrower.
 func (p *Provider) Close() {

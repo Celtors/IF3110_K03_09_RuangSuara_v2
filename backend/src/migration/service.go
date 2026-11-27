@@ -318,7 +318,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		if err = onBegin(ctx, attempt); err != nil {
 			clean, done := cleanupContext(ctx)
 			defer done()
-			if e := finishAttempt(clean, platformConn, &attempt, "failed", "", "Approval or attempt linking failed before SQL"); e != nil {
+			if e := finishAttempt(clean, platformConn, &attempt, "ordinary", "failed", "", "Approval or attempt linking failed before SQL"); e != nil {
 				return attempt, fault("indeterminate", "Attempt outcome could not be recorded")
 			}
 			return attempt, err
@@ -330,7 +330,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		if err != nil {
 			clean, done := cleanupContext(ctx)
 			defer done()
-			if e := finishAttempt(clean, platformConn, &attempt, "failed", "", err.Error()); e != nil {
+			if e := finishAttempt(clean, platformConn, &attempt, "ordinary", "failed", "", err.Error()); e != nil {
 				return attempt, fault("indeterminate", "Outcome could not be recorded")
 			}
 			return attempt, err
@@ -338,6 +338,11 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 	}
 	var result executionResult
 	for tries := 0; tries < 3; tries++ {
+		if tries > 0 {
+			telemetry.RecordRetry("ordinary_transaction")
+		} else if operation == OperationApply && definition.State == "failed" {
+			telemetry.RecordRetry("failed_apply")
+		}
 		result = executePostgres(ctx, pool, attempt.SQL, expectedTarget, func(xid, identity string) error {
 			_, recordErr := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3,prepared_rows=NULL WHERE id=$1`, attempt.ID, xid, identity)
 			if recordErr == nil {
@@ -366,7 +371,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 
 	clean, done := cleanupContext(ctx)
 	defer done()
-	if err = finishAttempt(clean, platformConn, &attempt, result.Status, result.Code, result.Message); err != nil {
+	if err = finishAttempt(clean, platformConn, &attempt, "ordinary", result.Status, result.Code, result.Message); err != nil {
 		return attempt, fault("indeterminate", "Target outcome could not be recorded; execution is blocked until reconciliation")
 	}
 	if result.Status == "failed" {
@@ -443,7 +448,7 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
 		}
 	}()
 	if a.TargetIdentity == "pending" && a.XID == nil {
-		if err := finishAttempt(ctx, c, &a, "failed", "interrupted", "Worker stopped before target SQL was submitted"); err != nil {
+		if err := finishAttempt(ctx, c, &a, "ordinary", "failed", "interrupted", "Worker stopped before target SQL was submitted"); err != nil {
 			return err
 		}
 		outcome = "interrupted"
@@ -477,7 +482,7 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
 			}
 			slog.InfoContext(ctx, "transaction.reconciled", "status", *status, "database_scope", "target")
 			span.SetAttributes(attribute.String("transaction.outcome", *status))
-			if err := finishAttempt(ctx, c, &a, resolved, "", "Outcome recovered from PostgreSQL transaction status"); err != nil {
+			if err := finishAttempt(ctx, c, &a, "ordinary", resolved, "", "Outcome recovered from PostgreSQL transaction status"); err != nil {
 				return err
 			}
 			outcome = "resolved"
@@ -487,7 +492,7 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
 	slog.WarnContext(ctx, "transaction.reconciled", "status", "unknown", "database_scope", "target")
 	span.SetAttributes(attribute.String("transaction.outcome", "unknown"))
 	// Do not retry automatically because the previous execution may have succeeded.
-	if err = finishAttempt(ctx, c, &a, "unknown", "", "Target outcome remains unresolved; operator investigation required"); err != nil {
+	if err = finishAttempt(ctx, c, &a, "ordinary", "unknown", "", "Target outcome remains unresolved; operator investigation required"); err != nil {
 		return err
 	}
 	return fault("indeterminate", "An unresolved execution blocks this database; reconcile after the target transaction finishes")

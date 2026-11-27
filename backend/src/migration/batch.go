@@ -123,6 +123,14 @@ type batchProgress struct {
 	Updated    time.Time `json:"updated_at"`
 }
 
+// Batches fill Size except for the last one, and compensation walks backward.
+func (p batchProgress) compensatedRows() int64 {
+	if p.Reverted == 0 {
+		return 0
+	}
+	return p.Rows - (p.Batches-p.Reverted)*int64(p.Size)
+}
+
 const batchColumns = `state,attribute,batch_size,down_hash,target_identity,committed_batches,committed_rows,cursor,reverted_batches,intent,action,error_message,scope_ready,scope_count,updated_at`
 
 func loadBatch(ctx context.Context, q interface {
@@ -304,6 +312,9 @@ func runBatchTx(ctx context.Context, c *pgxpool.Conn, id, sql string, b batchSta
 func retryBatchTransaction(ctx context.Context, run func() error, verified func() bool, delay func(time.Duration)) error {
 	var err error
 	for tries := 0; tries < 3; tries++ {
+		if tries > 0 {
+			telemetry.RecordRetry("batch_transaction")
+		}
 		err = run()
 		if err == nil || !transientBatch(err) || tries == 2 {
 			return err
@@ -420,7 +431,10 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 	}
 	defer target.Release()
 	var locked bool
-	if err = target.QueryRow(ctx, `SELECT pg_try_advisory_lock(781349,3)`).Scan(&locked); err != nil || !locked {
+	probeStart := time.Now()
+	err = target.QueryRow(ctx, `SELECT pg_try_advisory_lock(781349,3)`).Scan(&locked)
+	telemetry.ObserveLockProbe("target", time.Since(probeStart), locked, err)
+	if err != nil || !locked {
 		if err != nil {
 			_ = target.Conn().Close(ctx)
 		}
@@ -495,6 +509,9 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 		ctx = attemptContext(ctx, Attempt{ID: old, migrationVersion: a.migrationVersion})
 		span.SetAttributes(attribute.String("attempt_id", old))
 		slog.InfoContext(ctx, "migration.attempt_started", "status", "running")
+		if a.ID != "" && m.State == "failed" {
+			telemetry.RecordRetry("failed_apply")
+		}
 	}
 	a = Attempt{ID: *attemptID, MigrationID: q.MigrationID, DatabaseID: q.DatabaseID, Operation: OperationApply}
 	if err = c.QueryRow(ctx, `SELECT status,postgres_error_code,error_message FROM dmp_migration.attempts WHERE id=$1`, a.ID).
@@ -522,6 +539,9 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 		}
 		return state, nil
 	}
+	if q.reloaded && p.State != "ready" {
+		telemetry.RecordRetry("batch_reentry")
+	}
 	finish := func(state string, cause error, message string) (string, error) {
 		result, attemptStatus, code := RequestFailed, "failed", "execution_failed"
 		if state == "completed" {
@@ -532,7 +552,7 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 		} else if state == "reverted" {
 			code = ""
 		}
-		if e := finishAttempt(ctx, c, &a, attemptStatus, postgresCode(cause), message); e != nil {
+		if e := finishAttempt(ctx, c, &a, "batch", attemptStatus, postgresCode(cause), message); e != nil {
 			return "record_failed", e
 		}
 		if e := mirrorBatch(ctx, c, q.ID, p, state, message); e != nil {
@@ -597,6 +617,7 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 	if err != nil {
 		return pause("unresolved", err)
 	}
+	lastMirrored := verifiedBefore
 	for {
 		state := "running"
 		if p.Batches > 0 {
@@ -608,6 +629,11 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 		if err = mirrorBatch(ctx, c, q.ID, p, state, ""); err != nil {
 			return "record_failed", err
 		}
+		// Record new target-verified work only after the platform mirror confirms
+		// it. A reload compares against that mirror, including after an uncertain commit.
+		telemetry.RecordBatchProgress("apply", p.Batches-lastMirrored.Batches, p.Rows-lastMirrored.Rows)
+		telemetry.RecordBatchProgress("compensate", p.Reverted-lastMirrored.Reverted, p.compensatedRows()-lastMirrored.compensatedRows())
+		lastMirrored = p
 		p.Intent = ""
 		if (!undo && p.Done) || (undo && p.Reverted == p.Batches) {
 			if undo {
@@ -772,6 +798,9 @@ func (r *Review) batchAction(ctx context.Context, user, db, id, action string) e
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
+	}
+	if action == "resume" {
+		telemetry.RecordRetry("batch_resume_accepted")
 	}
 	slog.InfoContext(ctx, "batch.action", "status", "accepted", "committed_batches", p.Batches, "reverted_batches", p.Reverted)
 	r.notify()

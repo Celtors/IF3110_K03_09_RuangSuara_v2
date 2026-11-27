@@ -27,8 +27,17 @@ func TraceStdlib(scope string) stdlib.OptionOpenDB {
 type PostgresTracer struct{ Scope string }
 
 type queryKey struct{}
+type skipQueryTelemetryKey struct{}
+
+// WithoutQueryTelemetry keeps routine state scrapes out of workload logs and spans.
+func WithoutQueryTelemetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, skipQueryTelemetryKey{}, true)
+}
 
 func (t PostgresTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if ctx.Value(skipQueryTelemetryKey{}) == true {
+		return ctx
+	}
 	const maxParameterTypes = 24
 	count := 0
 	var types []string
@@ -71,6 +80,9 @@ func parameterType(value any) string {
 }
 
 func (t PostgresTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if ctx.Value(skipQueryTelemetryKey{}) == true {
+		return
+	}
 	query := ctx.Value(queryKey{}).(SQLExecution)
 	err := data.Err
 	// pgx turns a ROLLBACK command tag into ErrTxCommitRollback after this hook.

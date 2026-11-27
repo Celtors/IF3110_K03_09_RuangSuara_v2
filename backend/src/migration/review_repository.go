@@ -366,7 +366,7 @@ func (r *Repository) cancel(ctx context.Context, db, id, user, reason string) er
 // claimSQL picks the head of the queue of a database that has nothing running and no
 // unresolved attempt. Skipping locked rows lets several workers poll safely.
 const claimSQL = `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,
- r.submission_correlation_id,r.traceparent,r.tracestate
+ r.submission_correlation_id,r.traceparent,r.tracestate,r.queued_at,r.updated_at
  FROM dmp_migration.change_requests r
  WHERE r.status='queued'
    AND r.id=(SELECT q.id FROM dmp_migration.change_requests q
@@ -399,8 +399,10 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 	}()
 
 	var q QueuedRequest
+	var queuedAt, updatedAt time.Time
 	err = tx.QueryRow(ctx, claimSQL).Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation,
-		&q.SQLHash, &q.RequestedBy, &q.submissionCorrelationID, &q.queueTrace.TraceParent, &q.queueTrace.TraceState)
+		&q.SQLHash, &q.RequestedBy, &q.submissionCorrelationID, &q.queueTrace.TraceParent, &q.queueTrace.TraceState,
+		&queuedAt, &updatedAt)
 	if isNoRows(err) {
 		return nil, nil
 	}
@@ -448,6 +450,8 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 	}
 	outcome = "running"
 	q.claimSpan = claim.SpanContext()
+	// The request guard sets updated_at on requeue. Original queued_at preserves FIFO order.
+	telemetry.ObserveQueueClaim(queuedAt, updatedAt, q.startedAt)
 	slog.InfoContext(ctx, "queue.claim", "status", "running")
 	return &q, nil
 }
@@ -474,21 +478,27 @@ func (r *Repository) finishRequest(ctx context.Context, id string, status Reques
 	if len(claimTime) > 0 {
 		generation = &claimTime[0]
 	}
-	tag, err := tx.Exec(ctx, `UPDATE dmp_migration.change_requests
+	var queued time.Time
+	var completed *time.Time
+	err = tx.QueryRow(ctx, `UPDATE dmp_migration.change_requests
  SET status=$2,result_code=$3,result_message=$4,attempt_id=COALESCE(attempt_id,$5),
      completed_at=CASE WHEN $2='unknown' THEN NULL ELSE now() END
- WHERE id=$1 AND status IN ('running','unknown') AND ($6::timestamptz IS NULL OR started_at=$6)`, id, status, code, message, attempt, generation)
+ WHERE id=$1 AND status IN ('running','unknown') AND ($6::timestamptz IS NULL OR started_at=$6)
+ RETURNING queued_at,completed_at`, id, status, code, message, attempt, generation).Scan(&queued, &completed)
+	if isNoRows(err) {
+		return nil // already finished by another worker
+	}
 	if err != nil {
 		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return nil // already finished by another worker
 	}
 	if err = addEvent(ctx, tx, id, "finished", "", map[string]any{"status": status, "code": code, "message": message}); err != nil {
 		return err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
+	}
+	if completed != nil {
+		telemetry.ObserveJobCompletion(string(status), completed.Sub(queued))
 	}
 	slog.InfoContext(ctx, "queue.completed", "status", status, "reason", code)
 	return nil
