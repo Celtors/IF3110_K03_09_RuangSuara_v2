@@ -233,13 +233,13 @@ func (s *Service) Execute(ctx context.Context, user, db, id string) (Attempt, er
 // ExecuteOperation runs an operation with the caller's context, including from a worker.
 // Approval and job delivery checks belong to the caller's integration.
 func (s *Service) ExecuteOperation(ctx context.Context, user, db, id string, operation Operation) (Attempt, error) {
-	return s.executeOperation(ctx, user, db, id, operation, nil, nil)
+	return s.executeOperation(ctx, user, db, id, operation, "", nil, nil)
 }
 
 // executeOperation is ExecuteOperation with a hook. onBegin runs once the attempt has been
 // stored and before any SQL reaches the target, so the queue worker can link the attempt to
 // its change request even if the process dies mid-execution.
-func (s *Service) executeOperation(ctx context.Context, user, db, id string, operation Operation, beforeBegin func(context.Context, *pgxpool.Conn) error, onBegin func(context.Context, Attempt) error) (_ Attempt, resultErr error) {
+func (s *Service) executeOperation(ctx context.Context, user, db, id string, operation Operation, correctiveRequestID string, beforeBegin func(context.Context, *pgxpool.Conn) error, onBegin func(context.Context, Attempt) error) (_ Attempt, resultErr error) {
 	db = canonicalDatabaseID(db)
 	ctx = migrationContext(ctx, user, db, id)
 	if validOperation(operation) {
@@ -273,6 +273,19 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		return Attempt{}, err
 	}
 	platformConn, release, err := s.Repository.lock(ctx, db)
+	// The worker can retry a confirmed busy probe before either an attempt or
+	// target SQL exists. Keep the original FIFO claim throughout the wait.
+	for retry := 1; beforeBegin != nil && err == errPlatformLockBusy && retry <= 2; retry++ {
+		delay := time.Duration(retry) * 250 * time.Millisecond
+		telemetry.RecordRetry("platform_lock")
+		slog.WarnContext(ctx, "migration.retry", "status", "retrying", "reason", "platform_lock_busy", "retry_number", retry, "delay_ms", delay.Milliseconds())
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return Attempt{}, ctx.Err()
+		}
+		platformConn, release, err = s.Repository.lock(ctx, db)
+	}
 	if err != nil {
 		return Attempt{}, err
 	}
@@ -281,6 +294,10 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		if err = beforeBegin(ctx, platformConn); err != nil {
 			return Attempt{}, err
 		}
+	}
+	correction, err := correctionForExecution(ctx, platformConn, db, correctiveRequestID)
+	if err != nil {
+		return Attempt{}, err
 	}
 
 	// Resolve unfinished executions before assigning another migration version.
@@ -297,6 +314,9 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 	}
 
 	var expectedTarget string
+	if correction != nil {
+		expectedTarget = correction.identity
+	}
 	if operation != OperationApply {
 		err = platformConn.QueryRow(ctx, `
  SELECT target_identity FROM dmp_migration.attempts
@@ -342,13 +362,13 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 	}
 	var result executionResult
 	var lockRetryWait time.Duration
+	if operation == OperationApply && definition.State == "failed" {
+		telemetry.RecordRetry("failed_apply")
+		slog.InfoContext(ctx, "migration.retry", "status", "retrying", "reason", "failed_apply")
+	}
 	for tries := 0; tries < 3; tries++ {
-		if tries > 0 {
-			telemetry.RecordRetry("ordinary_transaction")
-		} else if operation == OperationApply && definition.State == "failed" {
-			telemetry.RecordRetry("failed_apply")
-		}
-		result = executePostgres(ctx, pool, platformConn, attempt.SQL, expectedTarget, func(xid, identity string) error {
+		txCtx := telemetry.With(ctx, slog.Int("transaction_number", tries+1))
+		result = executePostgres(txCtx, pool, platformConn, attempt.SQL, expectedTarget, func(xid, identity string) error {
 			if err := s.authorize(ctx, user, db, Edit); err != nil {
 				return err
 			}
@@ -361,7 +381,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		}, func(rows int64) error {
 			_, e := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET prepared_rows=$2 WHERE id=$1`, attempt.ID, rows)
 			return e
-		}, replay)
+		}, replay, correction)
 		if result.Status != "failed" || (result.Code != "40001" && result.Code != "40P01" && result.Code != "55P03") || tries == 2 {
 			break
 		}
@@ -369,9 +389,21 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 			break
 		}
 		backoffStarted := time.Now()
-		time.Sleep(time.Duration(tries+1) * 250 * time.Millisecond)
+		delay := time.Duration(tries+1) * 250 * time.Millisecond
+		reason := "transient_sqlstate"
+		if result.advisoryLockBusy {
+			reason = "target_lock_busy"
+		}
+		slog.WarnContext(ctx, "migration.retry", "status", "retrying", "reason", reason, "sqlstate", result.Code, "retry_number", tries+1, "delay_ms", delay.Milliseconds())
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+		}
 		if result.advisoryLockBusy {
 			lockRetryWait += time.Since(backoffStarted)
+		}
+		if ctx.Err() != nil {
+			break
 		}
 		if onBegin != nil {
 			if e := onBegin(ctx, attempt); e != nil {
@@ -380,6 +412,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 				break
 			}
 		}
+		telemetry.RecordRetry("ordinary_transaction")
 	}
 	if lockRetryWait > 0 {
 		telemetry.ObserveOrdinaryLockRetryWait(lockRetryWait)
@@ -436,6 +469,8 @@ func (s *Service) reconcileLocked(ctx context.Context, c *pgxpool.Conn, pool *pg
 		traceMigrationError(span, resultErr)
 	}()
 
+	// A paused running batch owns ledger-based recovery. After an atomic
+	// corrective handoff, the corrective attempt uses ordinary XID recovery.
 	var batchActive bool
 	if err := c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests r JOIN dmp_migration.batch_jobs b ON b.id=r.id WHERE r.database_id=$1 AND r.status='running')`, db).Scan(&batchActive); err != nil {
 		return err

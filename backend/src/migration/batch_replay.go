@@ -2,8 +2,12 @@ package migration
 
 import (
 	"context"
-	"github.com/jackc/pgx/v5"
+	"log/slog"
 	"regexp"
+
+	"backend/internal/telemetry"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // A completed batch's rollback and forward use the existing single-transaction
@@ -66,7 +70,8 @@ func runBatchReplay(ctx context.Context, tx pgx.Tx, sql string, r batchReplay) (
 		return 0, fault("invalid_sql", "Batch cursor predicate missing")
 	}
 	statement := sql[:pos[0]] + ` WHERE ` + quote(b.cursor) + ` IN (SELECT key FROM dmp_batch.scope WHERE job_id=$1 AND batch_no IS NOT NULL)`
-	tag, err := tx.Exec(ctx, statement, r.id)
+	sqlCtx := telemetry.With(ctx, telemetry.ID("batch_scope_id", r.id), slog.Int64("batch_key_count", total))
+	tag, err := tx.Exec(sqlCtx, statement, r.id)
 	if err != nil {
 		return 0, err
 	}

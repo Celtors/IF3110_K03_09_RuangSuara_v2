@@ -19,7 +19,7 @@ type executionResult struct {
 }
 
 // Record the transaction ID so interrupted commits can be checked later.
-func executePostgres(ctx context.Context, pool *pgxpool.Pool, platform rowQuerier, sql, expectedTarget string, recordXID func(string, string) error, recordRows func(int64) error, replay *batchReplay) executionResult {
+func executePostgres(ctx context.Context, pool *pgxpool.Pool, platform rowQuerier, sql, expectedTarget string, recordXID func(string, string) error, recordRows func(int64) error, replay *batchReplay, correction *correctionProof) executionResult {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return executionResult{Status: "failed", Message: "Target connection unavailable before SQL execution", FaultCode: "database_unavailable"}
@@ -45,6 +45,9 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, platform rowQuerie
 	telemetry.ObserveLockProbe("target", time.Since(probeStart), locked, err)
 	if err != nil || !locked {
 		return executionResult{Status: "failed", Code: "55P03", Message: "Target migration lock is busy", advisoryLockBusy: err == nil}
+	}
+	if correction != nil && !correction.matches(ctx, tx) {
+		return executionResult{Status: "failed", Message: "The original batch checkpoint could not be verified", FaultCode: "conflict"}
 	}
 	var xid string
 	if err = tx.QueryRow(ctx, `SELECT pg_catalog.pg_current_xact_id()::text`).Scan(&xid); err != nil {

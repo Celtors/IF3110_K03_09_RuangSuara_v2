@@ -79,7 +79,8 @@ ALTER TABLE dmp_migration.change_requests
     ADD COLUMN IF NOT EXISTS traceparent text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS tracestate text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS result_code text NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS result_message text NOT NULL DEFAULT '';
+    ADD COLUMN IF NOT EXISTS result_message text NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS corrects_batch_id text REFERENCES dmp_migration.change_requests(id);
 
 DO $$
 DECLARE
@@ -132,6 +133,10 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_request_per_operation
 ON dmp_migration.change_requests(migration_id, operation)
 WHERE status IN ('pending_review','approved','queued','running','unknown');
+
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_correction_per_batch
+ON dmp_migration.change_requests(corrects_batch_id)
+WHERE corrects_batch_id IS NOT NULL AND status IN ('pending_review','approved','queued','running','unknown');
 
 -- At most one request runs (or is unresolved) per target database.
 CREATE UNIQUE INDEX IF NOT EXISTS one_running_request_per_database
@@ -207,6 +212,7 @@ BEGIN
     OR NEW.operation    IS DISTINCT FROM OLD.operation
     OR NEW.sql_hash     IS DISTINCT FROM OLD.sql_hash
     OR NEW.requested_by IS DISTINCT FROM OLD.requested_by
+    OR NEW.corrects_batch_id IS DISTINCT FROM OLD.corrects_batch_id
     OR NEW.submission_correlation_id IS DISTINCT FROM OLD.submission_correlation_id THEN
         RAISE EXCEPTION 'change request % is immutable except for its status fields', OLD.id
             USING ERRCODE = 'check_violation';

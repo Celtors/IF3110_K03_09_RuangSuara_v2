@@ -19,6 +19,15 @@ beforeEach(() => {
 });
 
 describe("asynchronous submission", () => {
+  it("submits a linked correction as a normal apply", async () => {
+    render(<SubmitRequestDialog databaseId="db1" migration={migration} operation="apply"
+      correctsBatchId="partial-job" onClose={vi.fn()} />);
+    expect(screen.queryByLabelText("Execution mode")).not.toBeInTheDocument();
+    fireEvent.click(submit());
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/databases/db1/change-requests", "POST", {
+      migration_id: "m1", operation: "apply", mode: "normal", corrects_batch_id: "partial-job",
+    }));
+  });
   it.each(["apply", "rollback", "forward"])("submits %s and navigates to the returned job", async (operation) => {
     setup(operation);
     if (operation !== "apply") expect(screen.queryByLabelText("Execution mode")).not.toBeInTheDocument();

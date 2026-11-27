@@ -13,6 +13,7 @@ import (
 	"backend/internal/telemetry"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -106,22 +107,25 @@ CREATE TABLE IF NOT EXISTS dmp_batch.scope(job_id text NOT NULL REFERENCES dmp_b
 CREATE INDEX IF NOT EXISTS scope_batch ON dmp_batch.scope(job_id,batch_no,key);`
 
 type batchProgress struct {
-	State      string    `json:"status"`
-	Attribute  string    `json:"batch_attribute"`
-	Size       int       `json:"batch_size"`
-	DownHash   string    `json:"-"`
-	Identity   string    `json:"-"`
-	Batches    int64     `json:"committed_batches"`
-	Rows       int64     `json:"committed_rows"`
-	Cursor     *int64    `json:"checkpoint"`
-	Reverted   int64     `json:"reverted_batches"`
-	Intent     string    `json:"intent,omitempty"`
-	Action     string    `json:"-"`
-	Error      string    `json:"error,omitempty"`
-	Done       bool      `json:"-"`
-	ScopeReady bool      `json:"-"`
-	ScopeCount int64     `json:"scope_rows"`
-	Updated    time.Time `json:"updated_at"`
+	State              string    `json:"status"`
+	Attribute          string    `json:"batch_attribute"`
+	Size               int       `json:"batch_size"`
+	DownHash           string    `json:"-"`
+	Identity           string    `json:"-"`
+	Batches            int64     `json:"committed_batches"`
+	Rows               int64     `json:"committed_rows"`
+	Cursor             *int64    `json:"checkpoint"`
+	Reverted           int64     `json:"reverted_batches"`
+	Intent             string    `json:"intent,omitempty"`
+	Action             string    `json:"-"`
+	Error              string    `json:"error,omitempty"`
+	Done               bool      `json:"-"`
+	ScopeReady         bool      `json:"-"`
+	ScopeCount         int64     `json:"scope_rows"`
+	Updated            time.Time `json:"updated_at"`
+	CompensationUnsafe bool      `json:"-"`
+	CorrectionStarted  bool      `json:"-"`
+	ResolvedBy         *string   `json:"-"`
 }
 
 // Batches fill Size except for the last one, and compensation walks backward.
@@ -132,17 +136,69 @@ func (p batchProgress) compensatedRows() int64 {
 	return p.Rows - (p.Batches-p.Reverted)*int64(p.Size)
 }
 
-const batchColumns = `state,attribute,batch_size,down_hash,target_identity,committed_batches,committed_rows,cursor,reverted_batches,intent,action,error_message,scope_ready,scope_count,updated_at`
+const batchColumns = `state,attribute,batch_size,down_hash,target_identity,committed_batches,committed_rows,cursor,reverted_batches,intent,action,error_message,scope_ready,scope_count,updated_at,compensation_unsafe,correction_started,resolved_by`
 
 func loadBatch(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, id string) (p batchProgress, err error) {
-	err = q.QueryRow(ctx, `SELECT `+batchColumns+` FROM dmp_migration.batch_jobs WHERE id=$1`, id).Scan(&p.State, &p.Attribute, &p.Size, &p.DownHash, &p.Identity, &p.Batches, &p.Rows, &p.Cursor, &p.Reverted, &p.Intent, &p.Action, &p.Error, &p.ScopeReady, &p.ScopeCount, &p.Updated)
+	err = q.QueryRow(ctx, `SELECT `+batchColumns+` FROM dmp_migration.batch_jobs WHERE id=$1`, id).Scan(&p.State, &p.Attribute, &p.Size, &p.DownHash, &p.Identity, &p.Batches, &p.Rows, &p.Cursor, &p.Reverted, &p.Intent, &p.Action, &p.Error, &p.ScopeReady, &p.ScopeCount, &p.Updated, &p.CompensationUnsafe, &p.CorrectionStarted, &p.ResolvedBy)
 	return
 }
-func mirrorBatch(ctx context.Context, c *pgxpool.Conn, id string, p batchProgress, state, message string) error {
-	_, err := c.Exec(ctx, `UPDATE dmp_migration.batch_jobs SET state=$2,committed_batches=$3,committed_rows=$4,cursor=$5,reverted_batches=$6,intent='',error_message=$7,scope_ready=$8,scope_count=$9,updated_at=now() WHERE id=$1`, id, state, p.Batches, p.Rows, p.Cursor, p.Reverted, message, p.ScopeReady, p.ScopeCount)
+func mirrorBatch(ctx context.Context, c interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}, id string, p batchProgress, state, message string) error {
+	_, err := c.Exec(ctx, `UPDATE dmp_migration.batch_jobs SET state=$2,committed_batches=$3,committed_rows=$4,cursor=$5,reverted_batches=$6,intent='',error_message=$7,scope_ready=$8,scope_count=$9,compensation_unsafe=$10,updated_at=now() WHERE id=$1`, id, state, p.Batches, p.Rows, p.Cursor, p.Reverted, message, p.ScopeReady, p.ScopeCount, p.CompensationUnsafe)
 	return err
+}
+
+// Finalization uses only platform data and already verified target evidence.
+// If it rolls back, the next worker can read the same checkpoint and retry.
+func finalizeBatch(ctx context.Context, c *pgxpool.Conn, q QueuedRequest, p batchProgress, state, code, message string, a *Attempt, sqlstate string) error {
+	tx, err := c.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
+
+	requestStatus, attemptStatus := RequestFailed, "failed"
+	if state == "completed" {
+		requestStatus, attemptStatus = RequestSucceeded, "succeeded"
+	}
+	var attemptID string
+	var attemptRecorded func()
+	if a != nil {
+		attemptID = a.ID
+		// A legacy worker may already have committed this attempt's outcome.
+		if a.Status != "succeeded" && a.Status != "failed" {
+			if state == "completed" {
+				if _, err = tx.Exec(ctx, `UPDATE dmp_migration.attempts SET prepared_rows=$2 WHERE id=$1`, a.ID, p.Rows); err != nil {
+					return err
+				}
+			}
+			attemptRecorded, err = recordAttemptOutcome(ctx, tx, a, "batch", attemptStatus, sqlstate, message)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if err = mirrorBatch(ctx, tx, q.ID, p, state, message); err != nil {
+		return err
+	}
+	requestRecorded, err := recordRequestOutcome(ctx, tx, q.ID, requestStatus, code, message, attemptID, &q.startedAt)
+	if err != nil {
+		return err
+	}
+	if requestRecorded == nil {
+		return fault("stale_job", "Batch claim no longer matches the request")
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	if attemptRecorded != nil {
+		attemptRecorded()
+	}
+	requestRecorded()
+	return nil
 }
 func batchIntent(ctx context.Context, c *pgxpool.Conn, id, intent string) error {
 	_, err := c.Exec(ctx, `UPDATE dmp_migration.batch_jobs SET intent=$2,updated_at=now() WHERE id=$1`, id, intent)
@@ -280,9 +336,13 @@ func runBatchTx(ctx context.Context, c *pgxpool.Conn, id, sql string, b batchSta
 			return err
 		}
 		if count != int64(len(keys)) {
+			if undo {
+				return fault("unsafe_compensation", "Original rows changed or disappeared; compensation cannot safely proceed")
+			}
 			return fault("conflict", "Original rows changed or disappeared; batch cannot safely proceed")
 		}
-		tag, err := tx.Exec(ctx, sql, keys)
+		sqlCtx := telemetry.With(ctx, telemetry.ID("batch_scope_id", id), slog.Int("batch_key_count", len(keys)))
+		tag, err := tx.Exec(sqlCtx, sql, keys)
 		if err != nil {
 			return err
 		}
@@ -295,7 +355,7 @@ func runBatchTx(ctx context.Context, c *pgxpool.Conn, id, sql string, b batchSta
 				return err
 			}
 			if count != int64(len(keys)) {
-				return fault("conflict", "Approved down SQL did not restore the original rows")
+				return fault("unsafe_compensation", "Approved down SQL did not restore the original rows")
 			}
 			_, err = tx.Exec(ctx, `UPDATE dmp_batch.jobs SET reverted=reverted+1 WHERE id=$1`, id)
 		} else {
@@ -328,7 +388,7 @@ func retryBatchTransaction(ctx context.Context, run func() error, verified func(
 		}
 		backoff := time.Duration(tries+1) * 250 * time.Millisecond
 		slog.LogAttrs(ctx, slog.LevelWarn, "batch.retry", append(telemetry.ErrorAttrs(err),
-			slog.Int("retry_number", tries+1), slog.Int64("delay_ms", backoff.Milliseconds()))...)
+			slog.String("status", "retrying"), slog.Int("retry_number", tries+1), slog.Int64("delay_ms", backoff.Milliseconds()))...)
 		delay(backoff)
 	}
 	return err
@@ -399,6 +459,36 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 	if attemptID != nil {
 		ctx = attemptContext(ctx, Attempt{ID: *attemptID})
 		span.SetAttributes(attribute.String("attempt_id", *attemptID))
+	}
+	var a Attempt
+	loadAttempt := func(id string) error {
+		a = Attempt{ID: id, MigrationID: q.MigrationID, DatabaseID: q.DatabaseID, Operation: OperationApply}
+		return c.QueryRow(ctx, `SELECT status,postgres_error_code,error_message FROM dmp_migration.attempts WHERE id=$1`, id).
+			Scan(&a.Status, &a.ErrorCode, &a.Error)
+	}
+	if attemptID != nil {
+		if err = loadAttempt(*attemptID); err != nil {
+			return "record_failed", err
+		}
+		// Repair an older split finalization from the terminal attempt alone.
+		if a.Status == "succeeded" || a.Status == "failed" {
+			state, code := "completed", ""
+			if a.Status == "failed" {
+				state, code = "failed", "execution_failed"
+				if p.Action == "compensate" {
+					state, code = "reverted", ""
+				}
+			}
+			if err = finalizeBatch(ctx, c, q, p, state, code, a.Error, &a, a.ErrorCode); err != nil {
+				return "record_failed", err
+			}
+			return state, nil
+		}
+	} else if p.State == "failed" {
+		if err = finalizeBatch(ctx, c, q, p, "failed", "execution_failed", p.Error, nil, ""); err != nil {
+			return "record_failed", err
+		}
+		return "failed", nil
 	}
 	slog.InfoContext(ctx, "batch.started", "status", p.State, "reloaded", q.reloaded)
 	// Any bookkeeping error after an intent leaves the durable request locked.
@@ -487,7 +577,6 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 	}
 	// Create the ordinary attempt before touching the target; recover a crash
 	// between beginAttempt and linking by using the unique running attempt.
-	var a Attempt
 	if attemptID == nil {
 		var old string
 		err = c.QueryRow(ctx, `SELECT id FROM dmp_migration.attempts
@@ -499,20 +588,14 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 				if code == "authorization_unavailable" {
 					return "authorization_unavailable", e
 				}
-				if err = mirrorBatch(ctx, c, q.ID, p, "failed", message); err != nil {
-					return "record_failed", err
-				}
-				if err = r.repo().finishRequest(ctx, q.ID, RequestFailed, code, message, "", q.startedAt); err != nil {
+				if err = finalizeBatch(ctx, c, q, p, "failed", code, message, nil, ""); err != nil {
 					return "record_failed", err
 				}
 				return "failed", e
 			}
 			if _, _, err = prepareExecution(ctx, c, m, OperationApply); err != nil {
 				_, message := faultInfo(err)
-				if e := mirrorBatch(ctx, c, q.ID, p, "failed", message); e != nil {
-					return "record_failed", e
-				}
-				if e := r.repo().finishRequest(ctx, q.ID, RequestFailed, "execution_failed", message, "", q.startedAt); e != nil {
+				if e := finalizeBatch(ctx, c, q, p, "failed", "execution_failed", message, nil, ""); e != nil {
 					return "record_failed", e
 				}
 				return "failed", err
@@ -523,7 +606,6 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 		if err != nil {
 			return pause("unresolved", err)
 		}
-		attemptID = &old
 		if _, err = c.Exec(ctx, `UPDATE dmp_migration.change_requests SET attempt_id=$2 WHERE id=$1`, q.ID, old); err != nil {
 			return "record_failed", err
 		}
@@ -532,54 +614,18 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 		slog.InfoContext(ctx, "migration.attempt_started", "status", "running")
 		if a.ID != "" && m.State == "failed" {
 			telemetry.RecordRetry("failed_apply")
+			slog.InfoContext(ctx, "batch.retry", "status", "retrying", "reason", "failed_apply")
 		}
-	}
-	a = Attempt{ID: *attemptID, MigrationID: q.MigrationID, DatabaseID: q.DatabaseID, Operation: OperationApply}
-	if err = c.QueryRow(ctx, `SELECT status,postgres_error_code,error_message FROM dmp_migration.attempts WHERE id=$1`, a.ID).
-		Scan(&a.Status, &a.ErrorCode, &a.Error); err != nil {
-		return "record_failed", err
-	}
-	// If platform finalization committed before the request status was saved.
-	if a.Status == "succeeded" || a.Status == "failed" {
-		final := RequestSucceeded
-		state := "completed"
-		code := ""
-		if a.Status == "failed" {
-			final = RequestFailed
-			state = "reverted"
-			if !undo {
-				state = "failed"
-				code = "execution_failed"
-			}
-		}
-		if err = mirrorBatch(ctx, c, q.ID, p, state, a.Error); err != nil {
+		if err = loadAttempt(old); err != nil {
 			return "record_failed", err
 		}
-		if err = r.repo().finishRequest(ctx, q.ID, final, code, a.Error, a.ID, q.startedAt); err != nil {
-			return "record_failed", err
-		}
-		return state, nil
 	}
 	if q.reloaded && p.State != "ready" {
 		telemetry.RecordRetry("batch_reentry")
+		slog.InfoContext(ctx, "batch.retry", "status", "retrying", "reason", "batch_reentry")
 	}
-	finish := func(state string, cause error, message string) (string, error) {
-		result, attemptStatus, code := RequestFailed, "failed", "execution_failed"
-		if state == "completed" {
-			result, attemptStatus, code = RequestSucceeded, "succeeded", ""
-			if _, e := c.Exec(ctx, `UPDATE dmp_migration.attempts SET prepared_rows=$2 WHERE id=$1`, a.ID, p.Rows); e != nil {
-				return "record_failed", e
-			}
-		} else if state == "reverted" {
-			code = ""
-		}
-		if e := finishAttempt(ctx, c, &a, "batch", attemptStatus, postgresCode(cause), message); e != nil {
-			return "record_failed", e
-		}
-		if e := mirrorBatch(ctx, c, q.ID, p, state, message); e != nil {
-			return "record_failed", e
-		}
-		if e := r.repo().finishRequest(ctx, q.ID, result, code, message, a.ID, q.startedAt); e != nil {
+	finish := func(state string, cause error, code, message string) (string, error) {
+		if e := finalizeBatch(ctx, c, q, p, state, code, message, &a, postgresCode(cause)); e != nil {
 			return "record_failed", e
 		}
 		return state, cause
@@ -604,11 +650,8 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 			if code == "authorization_unavailable" {
 				return pause("unresolved", e)
 			}
-			// A missing checkpoint under the target lock settles any prior scope intent.
-			if writeErr := mirrorBatch(ctx, c, q.ID, p, "paused", message); writeErr != nil {
-				return "record_failed", writeErr
-			}
-			return "paused", e
+			// A missing checkpoint under the target lock proves no data committed.
+			return finish("failed", e, code, message)
 		}
 		if err = batchIntent(ctx, c, q.ID, "scope"); err != nil {
 			return "record_failed", err
@@ -618,7 +661,7 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 		initErr := initBatchScope(ctx, target, q.ID, b)
 		err = targetProgress(ctx, target, q.ID, &p)
 		if initErr != nil && (isNoRows(err) || postgresCode(err) == "42P01") {
-			return finish("failed", initErr, "Scope creation failed before data execution")
+			return finish("failed", initErr, "execution_failed", "Scope creation failed before data execution")
 		}
 		if err == nil {
 			state := "committed"
@@ -657,9 +700,9 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 		p.Intent = ""
 		if (!undo && p.Done) || (undo && p.Reverted == p.Batches) {
 			if undo {
-				return finish("reverted", nil, "Committed batches compensated")
+				return finish("reverted", nil, "", "Committed batches compensated")
 			}
-			return finish("completed", nil, "")
+			return finish("completed", nil, "", "")
 		}
 		number := p.Batches + 1
 		if undo {
@@ -707,8 +750,14 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 			if code == "internal_error" {
 				message = "Batch failed (SQLSTATE " + postgresCode(err) + "); resume or compensate after correcting the cause"
 			}
-			if authorizationErr == nil && p.Batches == 0 && !undo {
-				return finish("failed", err, message)
+			if undo && code == "unsafe_compensation" {
+				p.CompensationUnsafe = true
+			}
+			if p.Batches == 0 && !undo {
+				if authorizationErr == nil {
+					code = "execution_failed"
+				}
+				return finish("failed", err, code, message)
 			}
 			if e := mirrorBatch(ctx, c, q.ID, p, "paused", message); e != nil {
 				return "record_failed", e
@@ -783,19 +832,30 @@ func (r *Review) batchAction(ctx context.Context, user, db, id, action string) e
 	if status != "running" || p.State != "paused" {
 		return fault("conflict", "Only a paused, verified batch job can be resumed or compensated")
 	}
+	var correctionOpen bool
+	if err := c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests
+	 WHERE corrects_batch_id=$1 AND status IN ('pending_review','approved','queued','running','unknown'))`, id).Scan(&correctionOpen); err != nil {
+		return err
+	}
+	if correctionOpen {
+		return fault("conflict", "An open corrective request holds this batch")
+	}
 	if err := r.authorizeExecution(ctx, q); err != nil {
 		return err
 	}
+	if p.CompensationUnsafe && (action == "compensate" || p.Action == "compensate") {
+		return fault("conflict", "Compensation is unsafe. Submit a corrective migration for this batch")
+	}
 	if action == "compensate" {
 		if p.Batches == 0 || p.DownHash == "" {
-			return fault("conflict", "No committed batches or compatible approved down SQL; a corrective migration is required")
+			return fault("conflict", "No committed batches or compatible approved down SQL; the job remains reserved")
 		}
 		m, e := r.repo().Get(ctx, db, q.MigrationID)
 		if e != nil {
 			return e
 		}
 		if m.Irreversible || sqlHash(m.SQLDown) != p.DownHash {
-			return fault("conflict", "Approved down SQL is unavailable; a corrective migration is required")
+			return fault("conflict", "Approved down SQL is unavailable; the job remains reserved")
 		}
 		p.Action = "compensate"
 	}

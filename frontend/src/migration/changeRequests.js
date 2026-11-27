@@ -21,6 +21,7 @@ export const STATUS = {
   queued: { label: "In queue", badge: "queued", live: true, open: true },
   running: { label: "Running", badge: "running", live: true, open: true, blocks: true },
   completed: { label: "Completed", badge: "succeeded" },
+  corrected: { label: "Corrected", badge: "succeeded" },
   succeeded: { label: "Success", badge: "succeeded" },
   failed: { label: "Failed", badge: "failed", recoverable: true },
   partial: { label: "Partial", badge: "unknown", open: true, blocks: true, recoverable: true },

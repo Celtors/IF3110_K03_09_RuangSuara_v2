@@ -518,7 +518,7 @@ func TestAsyncRecoveryAfterAccessRevoked(t *testing.T) {
 		result := executePostgres(ctx, h.target, conn, up, "", func(xid, identity string) error {
 			_, e := conn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1`, attempt.ID, xid, identity)
 			return e
-		}, func(int64) error { return nil }, nil)
+		}, func(int64) error { return nil }, nil, nil)
 		if result.Status != "succeeded" {
 			t.Fatalf("interruption fixture did not commit: %+v", result)
 		}
@@ -546,7 +546,73 @@ func TestAsyncRecoveryAfterAccessRevoked(t *testing.T) {
 	if got := score(t, h.target, rel, 1); got != 1 {
 		t.Fatalf("recovery replayed committed SQL, score is %d", got)
 	}
+
+	// A legacy/direct attempt can exist without a linked running request.
+	h.access.mu.Lock()
+	h.access.revoked = false
+	h.access.mu.Unlock()
+	later := h.submit(t, up, `UPDATE `+rel+` SET score=score-1`, 0)
+	h.approve(t, later)
+	t.Cleanup(func() {
+		h.execPlatform(t, `UPDATE dmp_migration.change_requests SET status='cancelled',completed_at=now()
+			WHERE id=$1 AND status='queued'`, later)
+	})
+	orphan, err := h.r.Service.Save(ctx, jobEditor, h.db, "", Draft{Name: "Unlinked attempt", SQLUp: up})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, release, err := repo.lock(ctx, h.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = beginAttempt(ctx, conn, orphan, jobEditor, OperationApply, up, nil)
+	release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.access.mu.Lock()
+	h.access.revoked = true
+	h.access.mu.Unlock()
+	h.r.recoverInterrupted(ctx, DefaultWorkerConfig())
+	records, err := repo.Attempts(ctx, h.db, orphan.ID)
+	if err != nil || len(records) != 1 || records[0].Status != "failed" || records[0].ErrorCode != "interrupted" {
+		t.Fatalf("blocked queue did not recover the unlinked pre-SQL attempt: %+v, %v", records, err)
+	}
+	stored, err = h.r.Get(ctx, jobLeader, h.db, later)
+	if err != nil || stored.Status != RequestQueued || score(t, h.target, rel, 1) != 1 {
+		t.Fatalf("evidence-only recovery executed or changed the queued request: %+v, %v", stored, err)
+	}
 }
+func TestOrdinaryJobRetriesPlatformLockContention(t *testing.T) {
+	h := newJobHarness(t)
+	rel, _, _ := batchFixture(t, h.target, 2, false)
+	id := h.submit(t, `UPDATE `+rel+` SET score=score+1`, `UPDATE `+rel+` SET score=score-1`, 0)
+	h.approve(t, id)
+	_, release, err := h.r.repo().lock(t.Context(), h.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release = sync.OnceFunc(release)
+	defer release()
+	metrics := telemetry.NewMetricsRegistry()
+	retries := workflowMetric(t, metrics, "migration_retries_total", "kind", "platform_lock")
+	h.worker(t)
+	waitForDiagnostic(t, func() bool {
+		return workflowMetric(t, metrics, "migration_retries_total", "kind", "platform_lock") > max(0, retries)
+	})
+	before := h.status(t, id)
+	if before["status"] != "running" || before["completed_at"] != nil || score(t, h.target, rel, 1) != 0 {
+		t.Fatalf("contended claim executed or finished before the platform lock was released: %+v", before)
+	}
+	release()
+	h.wait(t, id, "completed", false)
+	var attempts int
+	if err = h.platform.QueryRow(t.Context(), `SELECT count(*) FROM dmp_migration.attempts WHERE database_id=$1`, h.db).
+		Scan(&attempts); err != nil || attempts != 1 || score(t, h.target, rel, 1) != 1 {
+		t.Fatalf("expected one attempt and one target update, got %d attempts: %v", attempts, err)
+	}
+}
+
 func TestBatchUnmirroredCommitRecoveryIntegration(t *testing.T) {
 	h := newJobHarness(t)
 	metrics := telemetry.NewMetricsRegistry()
@@ -618,10 +684,47 @@ func TestBatchUnmirroredCommitRecoveryIntegration(t *testing.T) {
 	if workflowMetric(t, metrics, "batch_rows_total", "action", "apply") != initialRows {
 		t.Fatal("unverified platform progress was counted")
 	}
+	// Fail the last platform write after the target has committed all work.
+	h.execPlatform(t, `ALTER TABLE dmp_migration.change_request_events ADD CONSTRAINT fixture_batch_finish
+		CHECK (request_id <> '`+id+`' OR event <> 'finished') NOT VALID`)
+	dropFailure := sync.OnceFunc(func() {
+		h.execPlatform(t, `ALTER TABLE dmp_migration.change_request_events DROP CONSTRAINT fixture_batch_finish`)
+	})
+	defer dropFailure()
+	q.reloaded = true
+	h.r.process(ctx, *q, &batchLockWaits{pending: make(map[batchLockKey]batchLockWait)})
+	var targetDone bool
+	if err = h.target.QueryRow(ctx, `SELECT done FROM dmp_batch.jobs WHERE id=$1`, id).Scan(&targetDone); err != nil || !targetDone {
+		t.Fatalf("target did not commit before the finalization failure: %v", err)
+	}
+	var attemptStatus string
+	if err = h.platform.QueryRow(ctx, `SELECT a.status FROM dmp_migration.attempts a
+		JOIN dmp_migration.change_requests r ON r.attempt_id=a.id WHERE r.id=$1`, id).Scan(&attemptStatus); err != nil || attemptStatus != "running" {
+		t.Fatalf("attempt finalization escaped the failed platform transaction: %s, %v", attemptStatus, err)
+	}
+	p := h.status(t, id)
+	if p["status"] != "partial" || p["approval_status"] != "running" || p["completed_at"] != nil {
+		t.Fatalf("job exposed a terminal state before platform finalization: %+v", p)
+	}
+	dropFailure()
+	// Also cover a legacy split write, which resembles a read that straddles
+	// the new transaction's commit.
+	h.execPlatform(t, `UPDATE dmp_migration.batch_jobs SET state='completed' WHERE id=$1`, id)
+	if p = h.status(t, id); p["status"] != "running" || p["approval_status"] != "running" || p["completed_at"] != nil {
+		t.Fatalf("job exposed a terminal state from the batch mirror alone: %+v", p)
+	}
 	h.worker(t)
-	p := h.wait(t, id, "completed", false)
-	if p["committed_rows"] != float64(5) || score(t, h.target, rel, 1) != 1 || score(t, h.target, rel, 5) != 10 {
+	p = h.wait(t, id, "completed", false)
+	if p["approval_status"] != "succeeded" || p["completed_at"] == nil || p["committed_rows"] != float64(5) ||
+		score(t, h.target, rel, 1) != 1 || score(t, h.target, rel, 5) != 10 {
 		t.Fatalf("recovery double-applied or skipped rows: %+v", p)
+	}
+	var attempts, completions int
+	if err = h.platform.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM dmp_migration.attempts WHERE migration_id=$2),
+		(SELECT count(*) FROM dmp_migration.change_request_events WHERE request_id=$1 AND event='finished')`,
+		id, q.MigrationID).Scan(&attempts, &completions); err != nil || attempts != 1 || completions != 1 {
+		t.Fatalf("expected one durable attempt and completion, got %d and %d: %v", attempts, completions, err)
 	}
 	// Rollback and forward use the original completed batch scope through the queue.
 	mustExec(t, h.target, `INSERT INTO `+rel+`(score) VALUES(20)`)
@@ -747,6 +850,125 @@ func TestCompensationJobIntegration(t *testing.T) {
 	}
 }
 
+func TestApprovedCorrectiveMigrationResolvesVerifiedPartialBatch(t *testing.T) {
+	h := newJobHarness(t)
+	ctx := t.Context()
+	repo := h.r.repo()
+	waits := &batchLockWaits{pending: make(map[batchLockKey]batchLockWait)}
+	run := func(id string) *QueuedRequest {
+		t.Helper()
+		q, err := repo.claim(ctx, h.r.revalidate)
+		if err != nil || q == nil || q.ID != id {
+			t.Fatalf("expected claim of %s, got %v: %v", id, q, err)
+		}
+		h.r.process(ctx, *q, waits)
+		return q
+	}
+	blocked := func() {
+		t.Helper()
+		if q, err := repo.claim(ctx, h.r.revalidate); err != nil || q != nil {
+			t.Fatalf("reservation allowed another claim: %v, %v", q, err)
+		}
+	}
+	rel, up, down := batchFixture(t, h.target, 5, true)
+	original := h.submit(t, up, down, 2)
+	h.approve(t, original)
+	parent := run(original)
+	mustExec(t, h.target, `UPDATE `+rel+` SET score=4 WHERE id=1`)
+	h.request(t, jobEditor, "POST", "/jobs/"+original+"/compensate", nil, 202)
+	compensate, err := h.r.nextBatch(ctx, nil)
+	if err != nil || compensate == nil || compensate.ID != original {
+		t.Fatalf("expected compensation dispatch, got %v: %v", compensate, err)
+	}
+	h.r.process(ctx, *compensate, waits)
+	if state := h.status(t, original); state["compensation_unsafe"] != true || state["corrective_available"] != true ||
+		state["committed_rows"] != float64(2) || state["reverted_rows"] != float64(0) || score(t, h.target, rel, 1) != 4 {
+		t.Fatalf("unsafe compensation did not preserve verified progress: %+v", state)
+	}
+	h.request(t, jobEditor, "POST", "/jobs/"+original+"/compensate", nil, 409)
+
+	group := h.addApprovalGroup(t, "ViewOnly", jobReviewer)
+	h.execPlatform(t, `INSERT INTO group_leaders (group_id,leader_id) VALUES ($1,$2)`, group, jobReviewer)
+	approveSecond := func(id string) {
+		h.request(t, jobReviewer, "POST", "/change-requests/"+id+"/approve", DecisionBody{}, 200)
+	}
+	later := h.submit(t, "SELECT 1", "SELECT 2", 0)
+	h.approve(t, later)
+	approveSecond(later)
+	t.Cleanup(func() {
+		h.execPlatform(t, `UPDATE dmp_migration.change_requests SET status='cancelled',completed_at=now()
+		 WHERE id=$1 AND status='queued'`, later)
+	})
+	blocked()
+
+	saveCorrection := func(sql string) SubmitRequest {
+		t.Helper()
+		m, err := h.r.Service.Save(ctx, jobEditor, h.db, "", Draft{Name: "Correct partial changes", SQLUp: sql, SQLDown: "SELECT 1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return SubmitRequest{MigrationID: m.ID, Operation: OperationApply, CorrectsBatchID: original}
+	}
+	submit := func(in SubmitRequest) string {
+		return h.request(t, jobEditor, "POST", "/change-requests", in, 201)["job_id"].(string)
+	}
+	failing := saveCorrection(`UPDATE ` + rel + ` SET score=10 WHERE id=1`)
+	h.execPlatform(t, `UPDATE dmp_migration.batch_jobs SET state='unresolved',intent='compensate:1' WHERE id=$1`, original)
+	h.request(t, jobEditor, "POST", "/change-requests", failing, 409)
+	h.execPlatform(t, `UPDATE dmp_migration.batch_jobs SET state='paused',intent='' WHERE id=$1`, original)
+	h.request(t, jobReviewer, "POST", "/change-requests", failing, 403)
+	first := submit(failing)
+	h.approve(t, first)
+	blocked() // Another group still needs to approve.
+	approveSecond(first)
+	run(first)
+	if h.status(t, first)["status"] != "failed" || h.status(t, original)["status"] != "partial" || score(t, h.target, rel, 1) != 4 {
+		t.Fatal("failed correction released the reservation or changed the target")
+	}
+	blocked()
+	if _, err := h.r.Service.Execute(ctx, jobEditor, h.db, failing.MigrationID); faultCode(err) != "conflict" {
+		t.Fatalf("direct execution bypassed the correction reservation: %v", err)
+	}
+
+	success := saveCorrection(`UPDATE ` + rel + ` SET score=score-2 WHERE id=1`)
+	second := submit(success)
+	h.approve(t, second)
+	approveSecond(second)
+	// Force the platform to lose the outcome after the corrective SQL commits.
+	h.execPlatform(t, `ALTER TABLE dmp_migration.attempts ADD CONSTRAINT fixture_corrective_outcome
+	 CHECK (migration_id <> '`+success.MigrationID+`' OR status <> 'succeeded') NOT VALID`)
+	removeFault := sync.OnceFunc(func() {
+		h.execPlatform(t, `ALTER TABLE dmp_migration.attempts DROP CONSTRAINT fixture_corrective_outcome`)
+	})
+	defer removeFault()
+	run(second)
+	if h.status(t, second)["status"] != "unresolved" || h.status(t, original)["resolved_by"] != nil || score(t, h.target, rel, 1) != 2 {
+		t.Fatal("uncertain corrective outcome released the reservation or lost the committed SQL")
+	}
+	blocked()
+	removeFault()
+	h.r.recoverInterrupted(ctx, DefaultWorkerConfig())
+	if state := h.status(t, second); state["status"] != "completed" || state["corrects_batch_id"] != original {
+		t.Fatalf("corrective outcome did not settle from the recorded transaction: %+v", state)
+	}
+	if state := h.status(t, original); state["status"] != "corrected" || state["approval_status"] != "failed" ||
+		state["resolved_by"] != second || state["committed_rows"] != float64(2) || score(t, h.target, rel, 1) != 2 {
+		t.Fatalf("resolution lost its original checkpoint or replayed the correction: %+v", state)
+	}
+	records, err := repo.Attempts(ctx, h.db, parent.MigrationID)
+	if err != nil || len(records) != 1 || records[0].Status != "failed" || records[0].SQL != up {
+		t.Fatalf("original attempt history changed: %+v, %v", records, err)
+	}
+	var targetBatches, targetRows, targetReverted int
+	if err = h.target.QueryRow(ctx, `SELECT completed,committed_rows,reverted FROM dmp_batch.jobs WHERE id=$1`, original).
+		Scan(&targetBatches, &targetRows, &targetReverted); err != nil || targetBatches != 1 || targetRows != 2 || targetReverted != 0 {
+		t.Fatalf("original target ledger changed: %d batches, %d rows, %d reverted, %v", targetBatches, targetRows, targetReverted, err)
+	}
+	h.request(t, jobEditor, "POST", "/change-requests", SubmitRequest{MigrationID: parent.MigrationID,
+		Operation: OperationApply, Mode: "batch", BatchAttribute: "id", BatchSize: 2}, 409)
+	run(later)
+}
+
 type batchRetryAccess struct {
 	ApplicationAccess
 	beforeCheck func()
@@ -816,5 +1038,38 @@ func TestBatchRetryRevalidatesRequester(t *testing.T) {
 	}
 	if score(t, h.target, rel, 1) != 1 || score(t, h.target, rel, 2) != 0 || score(t, h.target, rel, 3) != 9 {
 		t.Fatal("the target did not preserve exactly the first committed batch")
+	}
+	for _, action := range []string{"resume", "compensate"} {
+		if code := faultCode(h.r.batchAction(ctx, jobEditor, h.db, id, action)); code != "forbidden" {
+			t.Fatalf("revoked requester %s = %q, want forbidden", action, code)
+		}
+	}
+	h.execPlatform(t, "UPDATE users SET status='Active' WHERE id=$1", jobEditor)
+
+	// Once permission returns, the recorded row versions still protect against
+	// overwriting a row changed since the apply commit.
+	mustExec(t, h.target, `UPDATE `+rel+` SET score=4 WHERE id=1`)
+	if err = h.r.batchAction(ctx, jobEditor, h.db, id, "compensate"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := h.r.nextBatch(ctx, nil)
+	if err != nil || pending == nil || pending.ID != id {
+		t.Fatalf("expected authorized compensation dispatch, got %v: %v", pending, err)
+	}
+	h.r.process(ctx, *pending, &batchLockWaits{pending: make(map[batchLockKey]batchLockWait)})
+	h.r.Service.Access = h.access // Use the harness HTTP identity for status and approval requests.
+	state := h.status(t, id)
+	if state["status"] != "partial" || state["paused"] != true || state["reverted_batches"] != float64(0) ||
+		score(t, h.target, rel, 1) != 4 || !strings.Contains(fmt.Sprint(state["error"]), "cannot safely proceed") {
+		t.Fatalf("unsafe compensation changed the checkpoint or target: %+v", state)
+	}
+	later := h.submit(t, `UPDATE `+rel+` SET score=score+1`, `UPDATE `+rel+` SET score=score-1`, 0)
+	h.approve(t, later)
+	t.Cleanup(func() {
+		h.execPlatform(t, `UPDATE dmp_migration.change_requests SET status='cancelled',completed_at=now()
+			WHERE id=$1 AND status='queued'`, later)
+	})
+	if next, err := h.r.repo().claim(ctx, h.r.revalidate); err != nil || next != nil {
+		t.Fatalf("unsafe partial batch released its reservation: %v, %v", next, err)
 	}
 }

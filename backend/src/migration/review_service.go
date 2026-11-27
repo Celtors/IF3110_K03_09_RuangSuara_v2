@@ -172,6 +172,14 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 	if in.Mode != "" && in.Mode != "normal" && in.Mode != "batch" {
 		return ChangeRequest{}, fault("invalid_input", "mode must be normal or batch")
 	}
+	var corrects *string
+	if in.CorrectsBatchID != "" {
+		if len(in.CorrectsBatchID) > 200 || in.Operation != OperationApply ||
+			in.Mode == "batch" || in.BatchAttribute != "" || in.BatchSize != 0 || m.State != "draft" {
+			return ChangeRequest{}, fault("invalid_input", "A correction requires a separate draft and normal apply")
+		}
+		corrects = &in.CorrectsBatchID
+	}
 	if in.Mode == "batch" || in.BatchAttribute != "" || in.BatchSize != 0 {
 		if in.Operation != OperationApply || in.Mode == "normal" {
 			return ChangeRequest{}, fault("invalid_input", "Batch mode supports apply only")
@@ -216,6 +224,7 @@ func (r *Review) Submit(ctx context.Context, user, db string, in SubmitRequest) 
 		Operation:               in.Operation,
 		Batch:                   batch,
 		CompensationSQLHash:     downHash,
+		CorrectsBatchID:         corrects,
 		SQLHash:                 sqlHash(sql),
 		RequestedBy:             user,
 		submissionCorrelationID: telemetry.CorrelationID(ctx),

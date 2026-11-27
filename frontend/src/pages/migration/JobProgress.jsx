@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import ConfirmDialog from "../../components/ConfirmDialog.jsx";
-import { date } from "../../migration/api.js";
+import { correctiveDraftHref, date, requestHref } from "../../migration/api.js";
 import { OPERATION_LABEL } from "../../migration/changeRequests.js";
 import { isJobActive, jobStatus, possibleBlockers, recoverJob, recoveryActions } from "../../migration/jobs.js";
 import { ErrorBox } from "../../migration/components.jsx";
@@ -31,19 +31,12 @@ export function JobProgress({ databaseId, jobId, resource, canEdit, isRequester,
   const compensate = dialog === "compensate";
   async function recover() {
     if (!actions.includes(dialog)) throw new Error("This recovery action is no longer available. Refresh the job to check its status.");
-    try {
-      await recoverJob(databaseId, jobId, dialog);
-      setSubmittedJob(job);
-      refresh();
-    } catch (e) {
-      // The backend's conflict message contains the authoritative safety reason.
-      if (compensate && /corrective migration|down sql|unsafe/i.test(e.message)) {
-        throw new Error(`${e.message}${/corrective migration/i.test(e.message) ? "" : ". A new corrective migration is required."}`, { cause: e });
-      }
-      throw e;
-    }
+    await recoverJob(databaseId, jobId, dialog);
+    setSubmittedJob(job);
+    refresh();
   }
   const held = status === "unresolved" || (job?.paused && ["partial", "failed"].includes(status));
+  const correctionNeeded = job?.corrective_available || job?.open_correction_id;
   const hasScope = job?.scope_rows > 0 || ["completed", "reverted"].includes(status);
   const checkpoint = job?.last_verified_checkpoint;
   return (
@@ -62,9 +55,9 @@ export function JobProgress({ databaseId, jobId, resource, canEdit, isRequester,
         {status === "queued" && blocked.job === job && <BlockingJobs databaseId={databaseId} jobs={blocked.items} />}
         {status === "partial" && <p className="alert notice warning">Some batches have committed. {job.paused ? "Execution is paused; earlier commits are preserved." : "Execution is still processing batches."}</p>}
         {status === "unresolved" && <p className="alert notice warning">The execution outcome is uncertain. Do not retry blindly; verified recovery or reconciliation is required. Refresh status to check for reconciliation.</p>}
-        {held && <p className="alert notice warning">Later migrations on this database are held until this job is resumed, compensated or reconciled. Other databases are unaffected.</p>}
+        {held && <p className="alert notice warning">Later migrations on this database are held until the batch is recovered or its approved correction succeeds.</p>}
         {status === "partial" && active && <p>Later migrations on this database wait until this operation finishes or is recovered.</p>}
-        {job.error && <div className={`alert notice ${["completed", "reverted"].includes(status) ? "" : "error"}`} role="alert">{job.error_code && !["completed", "reverted"].includes(status) && <strong>{job.error_code}: </strong>}{job.error}</div>}
+        {job.error && status !== "corrected" && <div className={`alert notice ${["completed", "reverted"].includes(status) ? "" : "error"}`} role="alert">{job.error_code && !["completed", "reverted"].includes(status) && <strong>{job.error_code}: </strong>}{job.error}</div>}
         <dl className="details-grid">
           {[
             ["Target database", job.database_id], ["Migration", job.migration_id],
@@ -87,7 +80,10 @@ export function JobProgress({ databaseId, jobId, resource, canEdit, isRequester,
           </dl>
           {continuing && <p>Compensation stopped. The verified compensation checkpoint is preserved.</p>}
         </div>}
-        {job.paused && job.committed_batches > 0 && !job.compensation_sql_hash && <p>Compensation is unavailable without a compatible approved down SQL. A new corrective migration is required if these changes need to be reverted.</p>}
+        {correctionNeeded && <p>Compensation is unsafe or unavailable. Only an approved corrective migration linked to this batch can proceed while the reservation is held.</p>}
+        {job.corrective_available && canEdit && <p><a className="btn" href={correctiveDraftHref(databaseId, jobId)}>Create corrective migration</a></p>}
+        {job.open_correction_id && <p><a className="cr-link" href={requestHref(databaseId, job.open_correction_id)}>View corrective request</a></p>}
+        {job.resolved_by && <p>Resolved by <a className="cr-link" href={requestHref(databaseId, job.resolved_by)}>the corrective migration</a>. The original checkpoint is retained.</p>}
         {submittedJob === job && <p role="status">Recovery queued. Refreshing verified status…</p>}
         {actions.length > 0 && <div className="actions">
           {actions.includes("resume") && <button className="btn btn-primary" onClick={() => setDialog("resume")}>{continuing ? "Continue compensation" : "Resume"}</button>}

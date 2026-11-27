@@ -62,6 +62,7 @@ type RequestEvent struct {
 type ChangeRequest struct {
 	Batch                   *BatchSpec `json:"batch,omitempty"`
 	CompensationSQLHash     string     `json:"compensation_sql_hash,omitempty"`
+	CorrectsBatchID         *string    `json:"corrects_batch_id,omitempty"`
 	submissionCorrelationID string
 	ID                      string         `json:"id"`
 	DatabaseID              string         `json:"database_id"`
@@ -87,11 +88,12 @@ type ChangeRequest struct {
 }
 
 type SubmitRequest struct {
-	BatchAttribute string    `json:"batch_attribute,omitempty"`
-	BatchSize      int       `json:"batch_size,omitempty"`
-	Mode           string    `json:"mode,omitempty"`
-	MigrationID    string    `json:"migration_id"`
-	Operation      Operation `json:"operation"`
+	CorrectsBatchID string    `json:"corrects_batch_id,omitempty"`
+	BatchAttribute  string    `json:"batch_attribute,omitempty"`
+	BatchSize       int       `json:"batch_size,omitempty"`
+	Mode            string    `json:"mode,omitempty"`
+	MigrationID     string    `json:"migration_id"`
+	Operation       Operation `json:"operation"`
 }
 
 type DecisionBody struct {
@@ -117,4 +119,5 @@ type QueuedRequest struct {
 	Operation               Operation
 	SQLHash                 string
 	RequestedBy             string
+	CorrectsBatchID         *string
 }

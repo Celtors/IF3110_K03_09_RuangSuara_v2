@@ -9,3 +9,8 @@ CREATE    TABLE IF NOT EXISTS dmp_migration.batch_jobs (
     intent text NOT NULL DEFAULT '', error_message text NOT NULL DEFAULT '',
     scope_ready boolean NOT NULL DEFAULT false, scope_count bigint NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE dmp_migration.batch_jobs
+    ADD COLUMN IF NOT EXISTS compensation_unsafe boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS correction_started boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS resolved_by text REFERENCES dmp_migration.change_requests(id);

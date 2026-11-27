@@ -30,7 +30,7 @@ const COPY = {
 
 // Asks to run an operation. Nothing runs yet: every group with access to the
 // database must approve first, then the request waits its turn in the database's queue.
-export function SubmitRequestDialog({ databaseId, migration, operation, onClose, onSubmitted }) {
+export function SubmitRequestDialog({ databaseId, migration, operation, correctsBatchId, onClose, onSubmitted }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mode, setMode] = useState("normal");
@@ -55,7 +55,7 @@ export function SubmitRequestDialog({ databaseId, migration, operation, onClose,
     try {
       const request = await submitChangeRequest(databaseId, migration.id, operation, batch
         ? { mode: "batch", batch_attribute: attribute.trim(), batch_size: Number(size) }
-        : { mode: "normal" });
+        : { mode: "normal", ...(correctsBatchId ? { corrects_batch_id: correctsBatchId } : {}) });
       if (onSubmitted) onSubmitted(request);
       else navigate(requestHref(databaseId, request.job_id));
     } catch (e) {
@@ -73,7 +73,8 @@ export function SubmitRequestDialog({ databaseId, migration, operation, onClose,
       <p>
         {copy.lead} database <strong>{databaseId}</strong>. {OPERATION_LABEL[operation]} requests do not run immediately.
       </p>
-      {operation === "apply" && (
+      {correctsBatchId && <p>This correction runs as one transaction for the linked partial batch. Other jobs must wait for verified success.</p>}
+      {operation === "apply" && !correctsBatchId && (
         <div className="stack">
           <label htmlFor="execution-mode">Execution mode</label>
           <select id="execution-mode" className="input" value={mode} disabled={busy} onChange={(e) => { setMode(e.target.value); setBatchError(""); }}>

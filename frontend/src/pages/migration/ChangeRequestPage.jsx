@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { date, href, viewerId } from "../../migration/api.js";
+import { date, href, requestHref, viewerId } from "../../migration/api.js";
 import {
   OPERATION_LABEL,
   approveChangeRequest,
@@ -155,6 +155,7 @@ export function ChangeRequestPage({ databaseId, requestId, canEdit, onDecision }
         </div>
         {trackReview && <StatusTrack request={request} />}
         <Outcome request={request} />
+        {request.corrects_batch_id && <p>This request corrects <a className="cr-link" href={requestHref(databaseId, request.corrects_batch_id)}>a verified partial batch</a>.</p>}
         <dl className="details-grid">
           {[
             ["Database", request.database_id],

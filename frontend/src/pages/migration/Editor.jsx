@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { apiWithSessionRetry, href, draftKey, requestHref } from "../../migration/api.js";
+import { apiWithSessionRetry, correctiveDraftHref, href, draftKey, requestHref } from "../../migration/api.js";
 import { database, base } from "../../migration/navigation.js";
 import { ErrorBox } from "../../migration/components.jsx";
 import { isOpen } from "../../migration/changeRequests.js";
@@ -7,7 +7,7 @@ import { isUnattemptedDraft } from "../../migration/executionHistory.js";
 import { replaceUrl } from "../../migration/router.js";
 import { useChangeRequestList } from "../../migration/useChangeRequests.js";
 import { SubmitRequestDialog } from "./SubmitRequestDialog.jsx";
-export function Editor({ current, canEdit }) {
+export function Editor({ current, canEdit, correctsBatchId }) {
   const [draft, setDraft] = useState(() => ({
     name: current?.name ?? "",
     description: current?.description ?? "",
@@ -89,7 +89,7 @@ export function Editor({ current, canEdit }) {
       });
       sessionStorage.removeItem(draftKey(database));
       setMessage("Draft saved. Review the SQL, then submit it for approval.");
-      replaceUrl(href("editor", database, m.id));
+      replaceUrl(correctsBatchId ? correctiveDraftHref(database, correctsBatchId, m.id) : href("editor", database, m.id));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -99,6 +99,7 @@ export function Editor({ current, canEdit }) {
   }
   return (
     <>
+      {correctsBatchId && <p>Corrective migration for <a className="cr-link" href={requestHref(database, correctsBatchId)}>the partial batch</a>. This request requires all group approvals.</p>}
       <ErrorBox error={error} />
       <ErrorBox error={requests.error} />
       {requests.error && <button className="btn" onClick={requests.reload}>Retry change requests</button>}
@@ -275,6 +276,7 @@ export function Editor({ current, canEdit }) {
           databaseId={database}
           migration={saved}
           operation="apply"
+          correctsBatchId={correctsBatchId}
           onClose={() => setConfirm(false)}
         />
       )}

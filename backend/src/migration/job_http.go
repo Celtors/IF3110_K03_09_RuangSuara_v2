@@ -23,13 +23,27 @@ func (r *Review) jobStatus(c *gin.Context) {
 		state = "unresolved"
 	}
 	result := gin.H{"job_id": id, "database_id": db, "migration_id": q.MigrationID, "operation": q.Operation, "status": state, "approval_status": q.Status, "committed_batches": 0, "committed_rows": nil, "checkpoint": nil, "error_code": q.ResultCode, "error": q.ResultMessage, "created_at": q.CreatedAt, "updated_at": q.UpdatedAt, "started_at": q.StartedAt, "completed_at": q.CompletedAt, "available_actions": []string{}, "compensation_status": nil, "mode": "normal"}
+	if q.CorrectsBatchID != nil {
+		result["corrects_batch_id"] = q.CorrectsBatchID
+	}
 	p, e := loadBatch(ctx, r.repo().Pool, id)
 	if e == nil {
 		actions := []string{}
 		state = string(q.Status)
-		if q.Status == RequestRunning || q.Status == RequestSucceeded || q.Status == RequestFailed {
+		switch q.Status {
+		case RequestSucceeded:
+			state = "completed"
+		case RequestFailed:
+			if p.State == "reverted" {
+				state = "reverted"
+			}
+		case RequestRunning:
 			state = p.State
 			switch p.State {
+			case "completed", "reverted", "failed":
+				// The request snapshot may predate the atomic finalization commit,
+				// or an older worker may have only partly finalized the platform.
+				state = "running"
 			case "ready":
 				state = "queued"
 			case "paused":
@@ -37,7 +51,7 @@ func (r *Review) jobStatus(c *gin.Context) {
 				if p.Batches > 0 {
 					state = "partial"
 				}
-				if user == q.RequestedBy {
+				if user == q.RequestedBy && !p.CompensationUnsafe {
 					if r.Service.authorize(ctx, user, db, Edit) == nil {
 						actions = append(actions, "resume")
 						if p.Batches > 0 && p.DownHash != "" {
@@ -49,6 +63,30 @@ func (r *Review) jobStatus(c *gin.Context) {
 				state = "partial"
 			}
 		}
+		if p.CorrectionStarted && q.Status == RequestFailed {
+			state = "partial"
+			if p.ResolvedBy != nil {
+				state = "corrected"
+			}
+		}
+		if p.State == "paused" && p.ResolvedBy == nil && (p.DownHash == "" || p.CompensationUnsafe) {
+			var eligible bool
+			var open *string
+			e = r.repo().Pool.QueryRow(ctx, `SELECT EXISTS (`+eligibleCorrection+` AND p.id=$1),
+				(SELECT id FROM dmp_migration.change_requests WHERE corrects_batch_id=$1
+				AND status IN ('pending_review','approved','queued','running','unknown'))`, id).Scan(&eligible, &open)
+			if e != nil {
+				respond(c, nil, e)
+				return
+			}
+			result["corrective_available"] = eligible && open == nil
+			result["open_correction_id"] = open
+			if open != nil {
+				actions = []string{}
+			}
+		}
+		result["resolved_by"] = p.ResolvedBy
+		result["compensation_unsafe"] = p.CompensationUnsafe
 		result["mode"] = "batch"
 		result["status"] = state
 		result["committed_batches"] = p.Batches
@@ -59,7 +97,7 @@ func (r *Review) jobStatus(c *gin.Context) {
 		result["error"] = p.Error
 		result["intent"] = p.Intent
 		result["scope_rows"] = p.ScopeCount
-		result["paused"] = p.State == "paused"
+		result["paused"] = p.State == "paused" && state != "corrected"
 		result["updated_at"] = p.Updated
 		result["last_verified_checkpoint"] = gin.H{"batch_number": p.Batches, "cursor": p.Cursor}
 		if p.Error != "" {
@@ -79,7 +117,7 @@ func (r *Review) jobStatus(c *gin.Context) {
 		result["remaining_committed_rows"] = p.Rows - revertedRows
 		if p.Action == "compensate" {
 			cs := "running"
-			if p.State == "reverted" {
+			if state == "reverted" {
 				cs = "reverted"
 			} else if p.State == "paused" {
 				cs = "failed"

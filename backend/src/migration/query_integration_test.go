@@ -222,7 +222,7 @@ func TestSQLConsoleIntegration(t *testing.T) {
 		result := executePostgres(ctx, target, target, "SELECT 1", "", func(string, string) error {
 			t.Error("platform target reached XID recording")
 			return nil
-		}, nil, nil)
+		}, nil, nil, nil)
 		if result.Status != "failed" || result.FaultCode != "forbidden" {
 			t.Fatalf("platform execution: %+v", result)
 		}

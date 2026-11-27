@@ -325,7 +325,7 @@ func TestActivityLoggingThroughWorker(t *testing.T) {
 		}
 	}
 	_, loginSQL := find(map[string]any{"event": "sql.finished", "database_scope": "platform",
-		"correlation_id": login.Header().Get("X-Correlation-ID"), "query": "SELECT * FROM ? WHERE ? = $? LIMIT $? FOR UPDATE"})
+		"correlation_id": login.Header().Get("X-Correlation-ID"), "query": "SELECT * FROM ? WHERE ? = $1 LIMIT $2 FOR UPDATE"})
 	_, loginHTTP := find(map[string]any{"event": "http.request", "correlation_id": login.Header().Get("X-Correlation-ID")})
 	childOf(spanForLog(loginSQL, "db.query"), spanForLog(loginHTTP, "POST /session-manager/login"))
 	_, registrationTx := find(map[string]any{"event": "transaction.commit", "database_scope": "platform",

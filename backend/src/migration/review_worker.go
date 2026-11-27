@@ -231,7 +231,11 @@ func (r *Review) process(ctx context.Context, q QueuedRequest, lockWaits *batchL
 	slog.InfoContext(ctx, "queue.execution_started", "status", "running")
 
 	var attemptID string
-	attempt, err := r.Service.executeOperation(ctx, q.RequestedBy, q.DatabaseID, q.MigrationID, q.Operation, func(ctx context.Context, c *pgxpool.Conn) error {
+	var correctiveRequestID string
+	if q.CorrectsBatchID != nil {
+		correctiveRequestID = q.ID
+	}
+	attempt, err := r.Service.executeOperation(ctx, q.RequestedBy, q.DatabaseID, q.MigrationID, q.Operation, correctiveRequestID, func(ctx context.Context, c *pgxpool.Conn) error {
 		var valid bool
 		if e := c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests WHERE id=$1 AND status='running' AND started_at=$2 AND attempt_id IS NULL)`, q.ID, q.startedAt).Scan(&valid); e != nil {
 			return e

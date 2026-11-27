@@ -1674,11 +1674,11 @@ describe("Migration recovery and compensation", () => {
     ).toHaveLength(2);
   });
 
-  it("displays unsafe compensation rejection and corrective migration guidance", async () => {
+  it("displays unsafe compensation rejection and the retained reservation", async () => {
     setup({
       url: jobUrl(),
       recoveryError: Object.assign(
-        new Error("Approved down SQL is unavailable"),
+        new Error("Approved down SQL is unavailable; the job remains reserved"),
         { code: "conflict" },
       ),
     });
@@ -1700,7 +1700,7 @@ describe("Migration recovery and compensation", () => {
     await waitFor(() => {
       const alert = within(screen.getByRole("dialog")).getByRole("alert");
       expect(alert).toHaveTextContent("Approved down SQL is unavailable");
-      expect(alert).toHaveTextContent("A new corrective migration is required");
+      expect(alert).toHaveTextContent("the job remains reserved");
     });
   });
 

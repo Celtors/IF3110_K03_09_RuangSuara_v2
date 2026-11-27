@@ -15,10 +15,11 @@ function parse(loc) {
     database: params.get("database") ?? "",
     id: params.get("id") ?? "",
     request: params.get("request") ?? "",
+    corrects: params.get("corrects") ?? "",
     tab: params.get("tab") ?? "",
   };
   // Identity of the view: when it changes the page content starts fresh, like a page load did.
-  route.key = [route.page, route.database, route.id, route.request].join("|");
+  route.key = [route.page, route.database, route.id, route.request, route.corrects].join("|");
   return Object.freeze(route);
 }
 

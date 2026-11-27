@@ -350,27 +350,40 @@ func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, mode,
 	}
 	defer rollback(ctx, tx)
 
+	recorded, err := recordAttemptOutcome(ctx, tx, attempt, mode, status, code, message)
+	if err != nil {
+		return err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	recorded()
+	return nil
+}
+
+// Return the in-memory update and telemetry to publish after the caller commits.
+func recordAttemptOutcome(ctx context.Context, tx pgx.Tx, attempt *Attempt, mode, status, code, message string) (func(), error) {
 	var successOrder *int64
 	if status == "succeeded" {
 		var nextOrder int64
-		err = tx.QueryRow(ctx, `SELECT COALESCE(MAX(version),0)+1 FROM dmp_migration.attempts WHERE database_id=$1`,
+		err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version),0)+1 FROM dmp_migration.attempts WHERE database_id=$1`,
 			attempt.DatabaseID).Scan(&nextOrder)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		successOrder = &nextOrder
 	}
 
 	var completed *time.Time
 	var started time.Time
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
  UPDATE dmp_migration.attempts
  SET status=$2,version=$3,completed_at=CASE WHEN $2='unknown' THEN NULL ELSE now() END,
      postgres_error_code=$4,error_message=$5
  WHERE id=$1 AND status IN ('running','unknown')
  RETURNING started_at,completed_at`, attempt.ID, status, successOrder, code, message).Scan(&started, &completed)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var state string
@@ -382,7 +395,7 @@ func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, mode,
 		if attempt.Operation == OperationApply {
 			// A committed M1 attempt recovered after the upgrade may have no reserved version.
 			if err := reserveMigrationVersion(ctx, tx, attempt.DatabaseID, attempt.MigrationID); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	} else if status == "failed" && attempt.Operation == OperationApply {
@@ -393,31 +406,26 @@ func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, mode,
 		_, err = tx.Exec(ctx, `UPDATE dmp_migration.definitions SET state=$3,updated_at=now() WHERE database_id=$1 AND id=$2`,
 			attempt.DatabaseID, attempt.MigrationID, state)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return err
-	}
-	if completed != nil {
-		telemetry.ObserveCompletion(mode, string(attempt.Operation), status, completed.Sub(started))
-	}
 
-	attempt.Status = status
-	attempt.SuccessOrder = successOrder
-	attempt.Completed = completed
-	attempt.ErrorCode = code
-	attempt.Error = message
-	level := slog.LevelInfo
-	if status != "succeeded" {
-		level = slog.LevelWarn
-	}
-	attrs := []slog.Attr{slog.String("status", status)}
-	if state := telemetry.SQLStateAttr(code); state.Key != "" {
-		attrs = append(attrs, state)
-	}
-	slog.LogAttrs(ctx, level, "migration.attempt_finished", attrs...)
-	return nil
+	return func() {
+		if completed != nil {
+			telemetry.ObserveCompletion(mode, string(attempt.Operation), status, completed.Sub(started))
+		}
+		attempt.Status, attempt.SuccessOrder, attempt.Completed = status, successOrder, completed
+		attempt.ErrorCode, attempt.Error = code, message
+		level := slog.LevelInfo
+		if status != "succeeded" {
+			level = slog.LevelWarn
+		}
+		attrs := []slog.Attr{slog.String("status", status)}
+		if state := telemetry.SQLStateAttr(code); state.Key != "" {
+			attrs = append(attrs, state)
+		}
+		slog.LogAttrs(ctx, level, "migration.attempt_finished", attrs...)
+	}, nil
 }
 func rollback(ctx context.Context, tx pgx.Tx) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)

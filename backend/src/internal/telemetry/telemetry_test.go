@@ -152,7 +152,7 @@ func TestSQLLogging(t *testing.T) {
 	if len(entries) != 10 {
 		t.Fatalf("got %d SQL records", len(entries))
 	}
-	if entries[0]["event"] != "sql.started" || entries[0]["query"] != "SELECT ? , ? , ? , $? , ?" ||
+	if entries[0]["event"] != "sql.started" || entries[0]["query"] != "SELECT ? , ? , ? , $1 , ?" ||
 		entries[0]["parameter_count"] != float64(1) || entries[1]["event"] != "sql.finished" ||
 		entries[1]["database_scope"] != "target" || entries[1]["status"] != "succeeded" ||
 		entries[1]["rows_returned"] != float64(1) || entries[1]["rows_affected"] != nil || entries[1]["duration_ms"] == nil {

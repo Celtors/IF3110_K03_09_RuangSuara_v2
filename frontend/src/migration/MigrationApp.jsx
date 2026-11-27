@@ -270,7 +270,7 @@ export function MigrationApp() {
                     (id && !current ? (
                       <ErrorBox error="Migration not found" />
                     ) : (
-                      <Editor current={current} canEdit={historyData.can_edit} />
+                      <Editor current={current} canEdit={historyData.can_edit} correctsBatchId={route.corrects} />
                     ))}
                   {page === "details" &&
                     (current ? (

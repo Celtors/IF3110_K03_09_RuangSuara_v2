@@ -49,13 +49,13 @@ describe("job progress", () => {
     expect(api).toHaveBeenCalledWith("/api/databases/db1/jobs/job-123/resume", "POST");
   });
   it("confirms reverse-order compensation and displays unsafe rejection", async () => {
-    api.mockRejectedValueOnce(new Error("Approved down SQL is unavailable; a corrective migration is required"));
+    api.mockRejectedValueOnce(new Error("Approved down SQL is unavailable; the job remains reserved"));
     renderJob();
     fireEvent.click(screen.getByRole("button", { name: /Compensate \(revert/ }));
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText(/reverse order, one transaction per batch/)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "Compensate" }));
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("a corrective migration is required");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("the job remains reserved");
     expect(api).toHaveBeenCalledWith("/api/databases/db1/jobs/job-123/compensate", "POST");
   });
   it("renders partially reverted and allows continuation via resume", async () => {

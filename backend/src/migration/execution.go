@@ -80,6 +80,18 @@ func rollbackExecutionID(ctx context.Context, conn *pgxpool.Conn, definition Mig
 }
 
 func checkApplyOrder(ctx context.Context, conn *pgxpool.Conn, definition Migration) error {
+	if definition.State == "failed" {
+		var partial bool
+		err := conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.batch_jobs b
+		 JOIN dmp_migration.change_requests p ON p.id=b.id
+		 WHERE p.migration_id=$1 AND b.correction_started)`, definition.ID).Scan(&partial)
+		if err != nil {
+			return err
+		}
+		if partial {
+			return fault("conflict", "This migration retains partial writes and cannot be replayed")
+		}
+	}
 	var legacyStartedAt *time.Time
 	if definition.Version == nil {
 		var lastAttemptSQL string

@@ -40,6 +40,10 @@ export function href(page, database, id) {
   return `${migrationPath(page)}?${q}`;
 }
 
+export function correctiveDraftHref(database, batchId, draftId) {
+  return `${href("editor", database, draftId)}&corrects=${encodeURIComponent(batchId)}`;
+}
+
 // URL of a change request page. It uses ?request= because ?id= is a migration id.
 export function requestHref(database, request) {
   return `${migrationPath("change-request")}?${new URLSearchParams({ database, request })}`;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -252,8 +253,8 @@ func sqlShape(sql string) string {
 		return "[omitted: unavailable shape]"
 	}
 
-	// Emit only shared SQL syntax from the lexer vocabulary. Never copy source
-	// slices, including identifiers, literals, comments and dollar-quoted bodies.
+	// Emit shared SQL syntax and validated bind positions. Identifiers, literals,
+	// comments and dollar-quoted bodies never appear in the shape.
 	parts := make([]string, 0, min(len(scan.Tokens), maxTokens))
 	for _, token := range scan.Tokens {
 		if len(parts) == maxTokens {
@@ -264,7 +265,12 @@ func sqlShape(sql string) string {
 		case pg.Token_SQL_COMMENT, pg.Token_C_COMMENT:
 			continue
 		case pg.Token_PARAM:
-			parts = append(parts, "$?")
+			position, err := strconv.ParseUint(sql[token.Start+1:token.End], 10, 16)
+			if err == nil && position > 0 {
+				parts = append(parts, "$"+strconv.FormatUint(position, 10))
+			} else {
+				parts = append(parts, "$?")
+			}
 		case pg.Token_ASCII_40, pg.Token_ASCII_41, pg.Token_ASCII_42, pg.Token_ASCII_44,
 			pg.Token_ASCII_46, pg.Token_ASCII_59, pg.Token_ASCII_61:
 			parts = append(parts, string(rune(kind)))

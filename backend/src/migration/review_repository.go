@@ -15,9 +15,10 @@ import (
 
 const requestSelect = `SELECT r.id,r.database_id,r.migration_id,d.name,r.operation,r.sql_hash,r.requested_by,r.status,
  r.attempt_id,r.reject_reason,r.result_code,r.result_message,r.created_at,r.updated_at,r.approved_at,r.queued_at,
- r.started_at,r.completed_at,r.submission_correlation_id,
+ r.started_at,r.completed_at,r.submission_correlation_id,r.corrects_batch_id,
  CASE WHEN r.status='queued' THEN (SELECT count(*)+1 FROM dmp_migration.change_requests q
-   WHERE q.database_id=r.database_id AND q.status='queued' AND (q.queued_at,q.seq)<(r.queued_at,r.seq)) END
+   WHERE q.database_id=r.database_id AND q.status='queued' AND (q.queued_at,q.seq)<(r.queued_at,r.seq)
+     AND (r.corrects_batch_id IS NULL OR q.corrects_batch_id IS NOT NULL)) END
  FROM dmp_migration.change_requests r
  JOIN dmp_migration.definitions d ON d.id=r.migration_id `
 
@@ -25,7 +26,7 @@ func scanRequest(row pgx.Row) (ChangeRequest, error) {
 	var q ChangeRequest
 	err := row.Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.MigrationName, &q.Operation, &q.SQLHash, &q.RequestedBy, &q.Status,
 		&q.AttemptID, &q.RejectReason, &q.ResultCode, &q.ResultMessage, &q.CreatedAt, &q.UpdatedAt, &q.ApprovedAt, &q.QueuedAt,
-		&q.StartedAt, &q.CompletedAt, &q.submissionCorrelationID, &q.QueuePosition)
+		&q.StartedAt, &q.CompletedAt, &q.submissionCorrelationID, &q.CorrectsBatchID, &q.QueuePosition)
 	return q, err
 }
 
@@ -68,6 +69,17 @@ func (r *Repository) insertRequest(ctx context.Context, q ChangeRequest, approve
 	if _, _, err := prepareExecution(ctx, conn, m, q.Operation); err != nil {
 		return q, err
 	}
+	if q.CorrectsBatchID != nil {
+		var allowed bool
+		err = conn.QueryRow(ctx, `SELECT EXISTS (`+eligibleCorrection+` AND p.id=$1 AND p.database_id=$2 AND p.migration_id<>$3)`,
+			*q.CorrectsBatchID, q.DatabaseID, q.MigrationID).Scan(&allowed)
+		if err != nil {
+			return q, err
+		}
+		if !allowed || m.State != "draft" {
+			return q, fault("conflict", "A correction requires a separate draft and a verified partial batch with unsafe compensation")
+		}
+	}
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return q, err
@@ -75,11 +87,14 @@ func (r *Repository) insertRequest(ctx context.Context, q ChangeRequest, approve
 	defer rollback(ctx, tx)
 
 	_, err = tx.Exec(ctx, `INSERT INTO dmp_migration.change_requests
- (id,database_id,migration_id,operation,sql_hash,requested_by,submission_correlation_id)
- VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		q.ID, q.DatabaseID, q.MigrationID, q.Operation, q.SQLHash, q.RequestedBy, q.submissionCorrelationID)
+ (id,database_id,migration_id,operation,sql_hash,requested_by,submission_correlation_id,corrects_batch_id)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		q.ID, q.DatabaseID, q.MigrationID, q.Operation, q.SQLHash, q.RequestedBy, q.submissionCorrelationID, q.CorrectsBatchID)
 	if err != nil {
 		if postgresCode(err) == "23505" {
+			if q.CorrectsBatchID != nil {
+				return q, fault("conflict", "The batch already has an open correction or the draft has an open apply request")
+			}
 			return q, fault("conflict", "This migration already has an open change request for the same operation")
 		}
 		return q, err
@@ -97,9 +112,13 @@ func (r *Repository) insertRequest(ctx context.Context, q ChangeRequest, approve
 			return q, err
 		}
 	}
-	if err = addEvent(ctx, tx, q.ID, "submitted", q.RequestedBy, map[string]any{
+	detail := map[string]any{
 		"operation": q.Operation, "sql_hash": q.SQLHash, "required_groups": len(approvers),
-	}); err != nil {
+	}
+	if q.CorrectsBatchID != nil {
+		detail["corrects_batch_id"] = *q.CorrectsBatchID
+	}
+	if err = addEvent(ctx, tx, q.ID, "submitted", q.RequestedBy, detail); err != nil {
 		return q, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -374,19 +393,29 @@ func (r *Repository) cancel(ctx context.Context, db, id, user, reason string) er
 // Both claimSQL and the queue metrics use this predicate with r as the queued request.
 const queuedDatabaseBlocked = `(
     EXISTS (SELECT 1 FROM dmp_migration.change_requests x
-            WHERE x.database_id=r.database_id AND x.status IN ('running','unknown'))
+            WHERE x.database_id=r.database_id AND x.status IN ('running','unknown')
+              AND x.id IS DISTINCT FROM r.corrects_batch_id)
     OR EXISTS (SELECT 1 FROM dmp_migration.attempts t
-               WHERE t.database_id=r.database_id AND t.status IN ('running','unknown'))
+               WHERE t.database_id=r.database_id AND t.status IN ('running','unknown')
+                 AND NOT EXISTS (SELECT 1 FROM dmp_migration.change_requests p
+                                 WHERE p.id=r.corrects_batch_id AND p.attempt_id=t.id))
+    OR EXISTS (SELECT 1 FROM dmp_migration.batch_jobs b JOIN dmp_migration.change_requests p ON p.id=b.id
+               WHERE p.database_id=r.database_id AND b.correction_started AND b.resolved_by IS NULL
+                 AND b.id IS DISTINCT FROM r.corrects_batch_id)
+    OR (r.corrects_batch_id IS NOT NULL AND NOT EXISTS (` + eligibleCorrection + `
+        AND p.id=r.corrects_batch_id AND p.database_id=r.database_id))
 )`
 
-// claimSQL picks the head of the queue of a database that has nothing running and no
-// unresolved attempt. Skipping locked rows lets several workers poll safely.
+// Normal work keeps FIFO order. Only the linked correction can pass a partial
+// batch's reservation. Skipping locked rows lets several workers poll safely.
 const claimSQL = `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,
- r.submission_correlation_id,r.traceparent,r.tracestate,r.queued_at,r.updated_at
+ r.submission_correlation_id,r.traceparent,r.tracestate,r.queued_at,r.updated_at,r.corrects_batch_id
  FROM dmp_migration.change_requests r
  WHERE r.status='queued'
    AND r.id=(SELECT q.id FROM dmp_migration.change_requests q
-             WHERE q.database_id=r.database_id AND q.status='queued' ORDER BY q.queued_at,q.seq LIMIT 1)
+             WHERE q.database_id=r.database_id AND q.status='queued'
+               AND (r.corrects_batch_id IS NULL OR q.corrects_batch_id IS NOT NULL)
+             ORDER BY q.queued_at,q.seq LIMIT 1)
    AND NOT ` + queuedDatabaseBlocked + `
  ORDER BY r.queued_at,r.seq
  LIMIT 1
@@ -415,7 +444,7 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 	var queuedAt, updatedAt time.Time
 	err = tx.QueryRow(ctx, claimSQL).Scan(&q.ID, &q.DatabaseID, &q.MigrationID, &q.Operation,
 		&q.SQLHash, &q.RequestedBy, &q.submissionCorrelationID, &q.queueTrace.TraceParent, &q.queueTrace.TraceState,
-		&queuedAt, &updatedAt)
+		&queuedAt, &updatedAt, &q.CorrectsBatchID)
 	if isNoRows(err) {
 		return nil, nil
 	}
@@ -448,6 +477,14 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 		return nil, nil
 	}
 
+	var transferred func()
+	if q.CorrectsBatchID != nil {
+		transferred, err = transferCorrection(ctx, tx, q)
+		if err != nil || transferred == nil {
+			outcome = "contended"
+			return nil, err
+		}
+	}
 	if err = tx.QueryRow(ctx, `UPDATE dmp_migration.change_requests SET status='running',started_at=now() WHERE id=$1 RETURNING started_at`, q.ID).Scan(&q.startedAt); err != nil {
 		if postgresCode(err) == "23505" { // another worker started this database first
 			outcome = "contended"
@@ -460,6 +497,9 @@ func (r *Repository) claim(ctx context.Context, validate func(context.Context, Q
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+	if transferred != nil {
+		transferred()
 	}
 	outcome = "running"
 	q.claimSpan = claim.SpanContext()
@@ -483,38 +523,65 @@ func (r *Repository) finishRequest(ctx context.Context, id string, status Reques
 	}
 	defer rollback(ctx, tx)
 
-	var attempt *string
-	if attemptID != "" {
-		attempt = &attemptID
-	}
 	var generation *time.Time
 	if len(claimTime) > 0 {
 		generation = &claimTime[0]
 	}
-	var queued time.Time
-	var completed *time.Time
-	err = tx.QueryRow(ctx, `UPDATE dmp_migration.change_requests
- SET status=$2,result_code=$3,result_message=$4,attempt_id=COALESCE(attempt_id,$5),
-     completed_at=CASE WHEN $2='unknown' THEN NULL ELSE now() END
- WHERE id=$1 AND status IN ('running','unknown') AND ($6::timestamptz IS NULL OR started_at=$6)
- RETURNING queued_at,completed_at`, id, status, code, message, attempt, generation).Scan(&queued, &completed)
-	if isNoRows(err) {
-		return nil // already finished by another worker
-	}
-	if err != nil {
-		return err
-	}
-	if err = addEvent(ctx, tx, id, "finished", "", map[string]any{"status": status, "code": code, "message": message}); err != nil {
+	recorded, err := recordRequestOutcome(ctx, tx, id, status, code, message, attemptID, generation)
+	if err != nil || recorded == nil {
 		return err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
-	if completed != nil {
-		telemetry.ObserveJobCompletion(string(status), completed.Sub(queued))
-	}
-	slog.InfoContext(ctx, "queue.completed", "status", status, "reason", code)
+	recorded()
 	return nil
+}
+
+// A nil callback means the request no longer matches this claim.
+func recordRequestOutcome(ctx context.Context, tx pgx.Tx, id string, status RequestStatus, code, message, attemptID string, generation *time.Time) (func(), error) {
+	var attempt *string
+	if attemptID != "" {
+		attempt = &attemptID
+	}
+	var queued time.Time
+	var completed *time.Time
+	var corrects *string
+	err := tx.QueryRow(ctx, `UPDATE dmp_migration.change_requests
+ SET status=$2,result_code=$3,result_message=$4,attempt_id=COALESCE(attempt_id,$5),
+     completed_at=CASE WHEN $2='unknown' THEN NULL ELSE now() END
+ WHERE id=$1 AND status IN ('running','unknown') AND ($6::timestamptz IS NULL OR started_at=$6)
+ RETURNING queued_at,completed_at,corrects_batch_id`, id, status, code, message, attempt, generation).Scan(&queued, &completed, &corrects)
+	if isNoRows(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err = addEvent(ctx, tx, id, "finished", "", map[string]any{"status": status, "code": code, "message": message}); err != nil {
+		return nil, err
+	}
+	if corrects != nil && status == RequestSucceeded {
+		tag, err := tx.Exec(ctx, `UPDATE dmp_migration.batch_jobs SET resolved_by=$2,updated_at=now()
+		 WHERE id=$1 AND correction_started AND resolved_by IS NULL AND EXISTS (
+		   SELECT 1 FROM dmp_migration.attempts a JOIN dmp_migration.change_requests c ON c.attempt_id=a.id
+		   WHERE c.id=$2 AND a.status='succeeded')`, *corrects, id)
+		if err != nil {
+			return nil, err
+		}
+		if tag.RowsAffected() != 1 {
+			return nil, fault("conflict", "Corrective success could not be linked to its reserved partial batch")
+		}
+		if err = addEvent(ctx, tx, *corrects, "corrected", "", map[string]any{"corrective_request_id": id}); err != nil {
+			return nil, err
+		}
+	}
+	return func() {
+		if completed != nil {
+			telemetry.ObserveJobCompletion(string(status), completed.Sub(queued))
+		}
+		slog.InfoContext(ctx, "queue.completed", "status", status, "reason", code)
+	}, nil
 }
 
 // attemptFor prefers the durable link and falls back to the attempt created
