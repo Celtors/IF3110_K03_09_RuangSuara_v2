@@ -9,6 +9,7 @@ import (
 	"backend/internal/telemetry"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -24,6 +25,7 @@ type WorkerConfig struct {
 	// database never runs more than one. Keep it below the platform pool size, because
 	// every running request holds a pooled connection for its advisory lock.
 	MaxConcurrent int
+	Metrics       *prometheus.Registry // optional exposition for this worker
 }
 
 func DefaultWorkerConfig() WorkerConfig {
@@ -53,17 +55,20 @@ func (r *Review) StartWorker(ctx context.Context, cfg WorkerConfig) <-chan struc
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = d.MaxConcurrent
 	}
+	sem := make(chan struct{}, cfg.MaxConcurrent)
+	unregisterMetrics := registerWorkerMetrics(cfg.Metrics, sem)
 	go func() {
 		defer close(done)
+		defer unregisterMetrics()
 		slog.InfoContext(ctx, "queue.worker", "status", "started")
-		r.runWorker(ctx, cfg)
+		r.runWorker(ctx, cfg, sem)
 		slog.InfoContext(ctx, "queue.worker", "status", "stopped")
 	}()
 	return done
 }
 
-func (r *Review) runWorker(ctx context.Context, cfg WorkerConfig) {
-	sem := make(chan struct{}, cfg.MaxConcurrent)
+func (r *Review) runWorker(ctx context.Context, cfg WorkerConfig, sem chan struct{}) {
+	lockWaits := &batchLockWaits{pending: make(map[batchLockKey]batchLockWait)}
 	var running sync.WaitGroup
 	poll := time.NewTicker(cfg.PollInterval)
 	defer poll.Stop()
@@ -72,7 +77,7 @@ func (r *Review) runWorker(ctx context.Context, cfg WorkerConfig) {
 
 	r.recoverInterrupted(ctx, cfg)
 	for {
-		r.drain(ctx, sem, &running)
+		r.drain(ctx, sem, &running, lockWaits)
 		select {
 		case <-ctx.Done():
 			running.Wait() // in-flight requests finish and record their outcome
@@ -81,12 +86,13 @@ func (r *Review) runWorker(ctx context.Context, cfg WorkerConfig) {
 		case <-r.wake:
 		case <-recovery.C:
 			r.recoverInterrupted(ctx, cfg)
+			lockWaits.prune(ctx, r.repo().Pool)
 		}
 	}
 }
 
 // drain starts requests until the queue has nothing runnable or the worker is full.
-func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.WaitGroup) {
+func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.WaitGroup, lockWaits *batchLockWaits) {
 	attempted := map[string]bool{}
 	for ctx.Err() == nil {
 		select {
@@ -121,7 +127,7 @@ func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.Wai
 			defer func() { <-sem }()
 			// Shutdown must not abort SQL halfway: the request gets its own context and
 			// the worker waits for it. A killed process is handled by recoverInterrupted.
-			r.process(context.WithoutCancel(ctx), q)
+			r.process(context.WithoutCancel(ctx), q, lockWaits)
 		}(*q)
 	}
 }
@@ -187,7 +193,7 @@ func (r *Review) revalidate(ctx context.Context, q QueuedRequest) (bool, string,
 }
 
 // process executes a fresh claim or reloads a running batch from durable state.
-func (r *Review) process(ctx context.Context, q QueuedRequest) {
+func (r *Review) process(ctx context.Context, q QueuedRequest, lockWaits *batchLockWaits) {
 	ctx = q.logContext(ctx)
 	if q.claimSpan.IsValid() {
 		ctx = trace.ContextWithSpanContext(ctx, q.claimSpan)
@@ -196,8 +202,11 @@ func (r *Review) process(ctx context.Context, q QueuedRequest) {
 	}
 	ctx, span := telemetry.Start(ctx, "worker.process")
 	defer telemetry.EndSpan(span)
-	if _, e := loadBatch(ctx, r.repo().Pool, q.ID); e == nil {
-		outcome, err := r.processBatch(ctx, q)
+	if dispatched, e := loadBatch(ctx, r.repo().Pool, q.ID); e == nil {
+		outcome, err := r.processBatch(ctx, q, dispatched, lockWaits)
+		if outcome != "lock_unavailable" {
+			lockWaits.discard(q.ID)
+		}
 		span.SetAttributes(attribute.String("outcome", outcome))
 		traceMigrationError(span, err)
 		return
@@ -207,6 +216,7 @@ func (r *Review) process(ctx context.Context, q QueuedRequest) {
 		slog.LogAttrs(ctx, slog.LevelWarn, "queue.dispatch", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
 		return
 	}
+	lockWaits.discard(q.ID)
 	slog.InfoContext(ctx, "queue.execution_started", "status", "running")
 
 	var attemptID string

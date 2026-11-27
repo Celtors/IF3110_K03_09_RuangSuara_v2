@@ -20,6 +20,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -77,7 +78,12 @@ func run(ctx context.Context) error {
 	if assets == "" {
 		assets = "../../frontend/dist" // Run Go commands from backend/src.
 	}
-	router, closePlatform, err := newRouter(service, assets)
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	var registry *prometheus.Registry
+	if metricsAddr != "" {
+		registry = telemetry.NewMetricsRegistry()
+	}
+	router, closePlatform, err := newRouter(service, assets, registry)
 	if err != nil {
 		return err
 	}
@@ -89,11 +95,17 @@ func run(ctx context.Context) error {
 	review := migration.NewReview(service)
 	migration.RegisterReviewRoutes(router, review)
 	workerCtx, stopWorker := context.WithCancel(ctx)
-	workerDone := review.StartWorker(workerCtx, migration.DefaultWorkerConfig())
+	workerConfig := migration.DefaultWorkerConfig()
+	workerConfig.Metrics = registry
+	workerDone := review.StartWorker(workerCtx, workerConfig)
 	defer func() {
 		stopWorker()
 		<-workerDone
 	}()
+	if registry != nil {
+		closeMetrics := startMetricsServer(metricsAddr, promhttp.HandlerFor(registry, promhttp.HandlerOpts{MaxRequestsInFlight: 2}))
+		defer closeMetrics()
+	}
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
 		addr = ":8080" // Preserve the shared backend's default listener.
@@ -128,7 +140,7 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-func newRouter(service *migration.Service, assets string) (*gin.Engine, func(), error) {
+func newRouter(service *migration.Service, assets string, registry *prometheus.Registry) (*gin.Engine, func(), error) {
 	router := gin.New()
 	router.Use(telemetry.HTTP, cors.Default())
 	platform, err := accesscontrol.SetupAccessControl(router)
@@ -144,19 +156,15 @@ func newRouter(service *migration.Service, assets string) (*gin.Engine, func(), 
 	}
 	app.RegisterMigration(router, service, assets)
 	platformSQL, _ := platform.DB()
-	closeMetrics := func() {}
-	if addr := os.Getenv("METRICS_ADDR"); addr != "" {
-		registry := telemetry.NewMetricsRegistry()
+	if registry != nil {
 		var platformMigration *pgxpool.Pool
 		if service.Repository != nil {
 			platformMigration = service.Repository.Pool
 			service.Repository.RegisterStateMetrics(registry)
 		}
 		telemetry.RegisterPoolMetrics(registry, platformMigration, platformSQL, provider.MigrationPoolStats)
-		closeMetrics = startMetricsServer(addr, promhttp.HandlerFor(registry, promhttp.HandlerOpts{MaxRequestsInFlight: 2}))
 	}
 	return router, func() {
-		closeMetrics()
 		provider.Close()
 		if platformSQL != nil {
 			_ = platformSQL.Close()

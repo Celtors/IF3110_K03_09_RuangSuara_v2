@@ -370,6 +370,15 @@ func (r *Repository) cancel(ctx context.Context, db, id, user, reason string) er
 	return tx.Commit(ctx)
 }
 
+// A running batch request still reserves its database while partial or paused.
+// Both claimSQL and the queue metrics use this predicate with r as the queued request.
+const queuedDatabaseBlocked = `(
+    EXISTS (SELECT 1 FROM dmp_migration.change_requests x
+            WHERE x.database_id=r.database_id AND x.status IN ('running','unknown'))
+    OR EXISTS (SELECT 1 FROM dmp_migration.attempts t
+               WHERE t.database_id=r.database_id AND t.status IN ('running','unknown'))
+)`
+
 // claimSQL picks the head of the queue of a database that has nothing running and no
 // unresolved attempt. Skipping locked rows lets several workers poll safely.
 const claimSQL = `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_hash,r.requested_by,
@@ -378,10 +387,7 @@ const claimSQL = `SELECT r.id,r.database_id,r.migration_id,r.operation,r.sql_has
  WHERE r.status='queued'
    AND r.id=(SELECT q.id FROM dmp_migration.change_requests q
              WHERE q.database_id=r.database_id AND q.status='queued' ORDER BY q.queued_at,q.seq LIMIT 1)
-   AND NOT EXISTS (SELECT 1 FROM dmp_migration.change_requests x
-                   WHERE x.database_id=r.database_id AND x.status IN ('running','unknown'))
-   AND NOT EXISTS (SELECT 1 FROM dmp_migration.attempts t
-                   WHERE t.database_id=r.database_id AND t.status IN ('running','unknown'))
+   AND NOT ` + queuedDatabaseBlocked + `
  ORDER BY r.queued_at,r.seq
  LIMIT 1
  FOR UPDATE OF r SKIP LOCKED`

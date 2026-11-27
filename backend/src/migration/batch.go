@@ -340,7 +340,7 @@ func transientBatch(err error) bool {
 // Both locks are session locks. The platform request stays running even when
 // paused, so a process crash does not free the logical database reservation.
 // The target lock must be acquired before trusting a missing checkpoint.
-func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome string, err error) {
+func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched batchProgress, lockWaits *batchLockWaits) (outcome string, err error) {
 	ctx, span := telemetry.Start(ctx, "batch.execute")
 	defer telemetry.EndSpan(span)
 	start := time.Now()
@@ -364,7 +364,11 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 	}()
 
 	c, release, err := r.repo().lock(ctx, q.DatabaseID)
+	platformProbedAt := time.Now()
 	if err != nil {
+		if err == errPlatformLockBusy && dispatched.acceptsLockTiming() {
+			lockWaits.probe(q, dispatched, "platform", "", platformProbedAt, false)
+		}
 		return "lock_unavailable", err
 	}
 	defer release()
@@ -381,6 +385,10 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 	}
 	if status != "running" || startedAt == nil || !startedAt.Equal(q.startedAt) || p.State == "paused" {
 		return "stale", nil
+	}
+	measureLockWait := p.acceptsLockTiming()
+	if measureLockWait {
+		lockWaits.probe(q, p, "platform", "", platformProbedAt, true)
 	}
 	ctx = telemetry.With(ctx, slog.String("batch_action", p.Action))
 	span.SetAttributes(attribute.String("batch_action", p.Action))
@@ -433,10 +441,19 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 	var locked bool
 	probeStart := time.Now()
 	err = target.QueryRow(ctx, `SELECT pg_try_advisory_lock(781349,3)`).Scan(&locked)
-	telemetry.ObserveLockProbe("target", time.Since(probeStart), locked, err)
+	targetProbedAt := time.Now()
+	telemetry.ObserveLockProbe("target", targetProbedAt.Sub(probeStart), locked, err)
 	if err != nil || !locked {
 		if err != nil {
 			_ = target.Conn().Close(ctx)
+		} else if measureLockWait {
+			// Confirm the physical database on this connection before timing across passes.
+			probeCtx, cancel := context.WithTimeout(telemetry.WithoutQueryTelemetry(ctx), 100*time.Millisecond)
+			identity, identityErr := targetIdentity(probeCtx, target.Conn())
+			cancel()
+			if identityErr == nil && (p.Identity == "" || p.Identity == identity) {
+				lockWaits.probe(q, p, "target", identity, targetProbedAt, false)
+			}
 		}
 		return "lock_unavailable", err
 	}
@@ -457,6 +474,9 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest) (outcome str
 	}
 	if p.Identity != "" && p.Identity != identity {
 		return pause("unresolved", fault("indeterminate", "Target identity changed"))
+	}
+	if measureLockWait {
+		lockWaits.probe(q, p, "target", identity, targetProbedAt, true)
 	}
 	if p.Identity == "" {
 		if _, err = c.Exec(ctx, `UPDATE dmp_migration.batch_jobs SET target_identity=$2 WHERE id=$1`, q.ID, identity); err != nil {

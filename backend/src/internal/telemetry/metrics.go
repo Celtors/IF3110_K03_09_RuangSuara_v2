@@ -20,6 +20,15 @@ var (
 	retries      = counter("migration_retries_total", "Repeated execution actions by category.", "kind")
 	batches      = counter("batch_commits_total", "Newly mirrored target-verified data batches.", "action")
 	batchRows    = counter("batch_rows_total", "Rows in newly mirrored target-verified data batches.", "action")
+
+	ordinaryLockWait = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: Namespace, Name: "ordinary_advisory_lock_retry_wait_seconds",
+		Help:    "Accumulated elapsed retry backoff after confirmed busy target advisory locks, recorded after the ordinary attempt's retry loop, including failed attempts that performed such backoff.",
+		Buckets: []float64{.125, .25, .3, .5, .6, .75, .85, 1, 2, 5},
+	})
+	batchLockWait = histogram("batch_advisory_lock_contention_interval_seconds",
+		"Elapsed time from the first confirmed busy batch advisory-lock probe to a later acquisition in the same worker and batch execution phase, including delays between passes.",
+		migrationBuckets, "scope")
 )
 
 var migrationBuckets = []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 3600}
@@ -48,6 +57,7 @@ func NewMetricsRegistry() *prometheus.Registry {
 	}
 	for _, scope := range []string{"platform", "target"} {
 		lockBusy.WithLabelValues(scope)
+		batchLockWait.WithLabelValues(scope)
 	}
 	for _, kind := range []string{"ordinary_transaction", "batch_transaction", "worker_reclaim", "batch_reentry", "failed_apply", "batch_resume_accepted"} {
 		retries.WithLabelValues(kind)
@@ -55,7 +65,7 @@ func NewMetricsRegistry() *prometheus.Registry {
 
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(httpRequests, httpDuration, queueWait, lockProbe, lockBusy,
-		completions, attemptTime, jobTime, retries, batches, batchRows)
+		ordinaryLockWait, batchLockWait, completions, attemptTime, jobTime, retries, batches, batchRows)
 	return registry
 }
 
@@ -78,6 +88,14 @@ func ObserveLockProbe(scope string, elapsed time.Duration, acquired bool, err er
 		lockBusy.WithLabelValues(scope).Inc()
 	}
 	lockProbe.WithLabelValues(scope, outcome).Observe(elapsed.Seconds())
+}
+
+func ObserveOrdinaryLockRetryWait(elapsed time.Duration) {
+	ordinaryLockWait.Observe(elapsed.Seconds())
+}
+
+func ObserveBatchLockContention(scope string, elapsed time.Duration) {
+	batchLockWait.WithLabelValues(scope).Observe(elapsed.Seconds())
 }
 
 func ObserveCompletion(mode, operation, outcome string, elapsed time.Duration) {

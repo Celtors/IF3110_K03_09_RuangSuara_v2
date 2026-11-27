@@ -337,6 +337,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		}
 	}
 	var result executionResult
+	var lockRetryWait time.Duration
 	for tries := 0; tries < 3; tries++ {
 		if tries > 0 {
 			telemetry.RecordRetry("ordinary_transaction")
@@ -360,13 +361,20 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		if ctx.Err() != nil {
 			break
 		}
+		backoffStarted := time.Now()
 		time.Sleep(time.Duration(tries+1) * 250 * time.Millisecond)
+		if result.advisoryLockBusy {
+			lockRetryWait += time.Since(backoffStarted)
+		}
 		if onBegin != nil {
 			if e := onBegin(ctx, attempt); e != nil {
 				result = executionResult{Status: "failed", FaultCode: "forbidden", Message: "Execution authorization could not be revalidated before retry"}
 				break
 			}
 		}
+	}
+	if lockRetryWait > 0 {
+		telemetry.ObserveOrdinaryLockRetryWait(lockRetryWait)
 	}
 
 	clean, done := cleanupContext(ctx)

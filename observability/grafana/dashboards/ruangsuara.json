@@ -3,7 +3,7 @@
   "title": "RuangSuara Observability",
   "description": "Application workload, durable migration state and PostgreSQL pool pressure.",
   "schemaVersion": 41,
-  "version": 1,
+  "version": 2,
   "editable": false,
   "refresh": "5s",
   "time": {
@@ -282,7 +282,7 @@
       "id": 1,
       "type": "stat",
       "title": "Collection health",
-      "description": "1 means healthy. A failed state query omits both status families. An unreachable backend also makes the state collection series disappear.",
+      "description": "A failed database query omits workflow counts and queue diagnostics. If the backend is unreachable, the scrape fails and the database health series disappears.",
       "datasource": {
         "type": "prometheus",
         "uid": "ruangsuara-prometheus"
@@ -368,13 +368,180 @@
       }
     },
     {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Migration worker capacity",
+      "description": "Occupied slots include claim processing and in-flight jobs. Available slots are the configured maximum minus occupied slots.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ruangsuara-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(ruangsuara_worker_slots_occupied)",
+          "legendFormat": "Occupied",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ruangsuara-prometheus"
+          },
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(ruangsuara_worker_slots_max - ruangsuara_worker_slots_occupied)",
+          "legendFormat": "Available",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ruangsuara-prometheus"
+          },
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Oldest queued job age",
+      "description": "Time since the oldest currently queued request last entered the execution queue. Requeue restarts age. Zero on an empty queue. A failed state collection produces a gap.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ruangsuara-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 5,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(clamp_min(time() - (ruangsuara_oldest_queued_timestamp_seconds > 0), 0) or (ruangsuara_oldest_queued_timestamp_seconds == 0))",
+          "legendFormat": "Oldest",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ruangsuara-prometheus"
+          },
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Database-blocked queued requests",
+      "description": "Queued requests whose database has a running or unresolved request or attempt. Includes databases reserved by paused batches. Worker capacity can be exhausted at the same time.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ruangsuara-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 5,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(ruangsuara_database_blocked_queued_requests)",
+          "legendFormat": "Blocked",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ruangsuara-prometheus"
+          },
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "id": 11,
       "type": "row",
       "title": "API performance",
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 5,
+        "y": 12,
         "w": 24,
         "h": 1
       },
@@ -390,7 +557,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 6,
+            "y": 13,
             "w": 12,
             "h": 8
           },
@@ -439,7 +606,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 6,
+            "y": 13,
             "w": 12,
             "h": 8
           },
@@ -499,7 +666,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 14,
+            "y": 21,
             "w": 12,
             "h": 8
           },
@@ -546,7 +713,7 @@
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 6,
+        "y": 13,
         "w": 24,
         "h": 1
       },
@@ -562,7 +729,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 7,
+            "y": 14,
             "w": 12,
             "h": 8
           },
@@ -611,7 +778,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 7,
+            "y": 14,
             "w": 12,
             "h": 8
           },
@@ -660,7 +827,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 15,
+            "y": 22,
             "w": 12,
             "h": 8
           },
@@ -709,7 +876,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 15,
+            "y": 22,
             "w": 12,
             "h": 8
           },
@@ -748,6 +915,110 @@
           }
         },
         {
+          "id": 32,
+          "type": "timeseries",
+          "title": "Ordinary advisory-lock retry wait p95",
+          "description": "Accumulated retry sleep after confirmed busy target advisory locks, including failed attempts that slept. Gaps indicate no observed waits in the query interval.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ruangsuara-prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 30,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(ruangsuara_ordinary_advisory_lock_retry_wait_seconds_bucket[$__rate_interval]))) and on() (sum(rate(ruangsuara_ordinary_advisory_lock_retry_wait_seconds_count[$__rate_interval])) > 0)",
+              "legendFormat": "Retry backoff",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "ruangsuara-prometheus"
+              },
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "spanNulls": false
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 33,
+          "type": "timeseries",
+          "title": "Batch advisory-lock contention interval p95",
+          "description": "Time from first confirmed busy probe to a later acquisition in the same worker and batch execution phase. Includes delays between passes. Open or abandoned intervals produce no observation.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ruangsuara-prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 30,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le, scope) (rate(ruangsuara_batch_advisory_lock_contention_interval_seconds_bucket[$__rate_interval]))) and on(scope) (sum by (scope) (rate(ruangsuara_batch_advisory_lock_contention_interval_seconds_count[$__rate_interval])) > 0)",
+              "legendFormat": "{{scope}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "ruangsuara-prometheus"
+              },
+              "range": true,
+              "instant": false
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "spanNulls": false
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
           "id": 16,
           "type": "timeseries",
           "title": "Migration attempt duration p95",
@@ -758,7 +1029,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 23,
+            "y": 38,
             "w": 12,
             "h": 8
           },
@@ -807,7 +1078,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 23,
+            "y": 38,
             "w": 12,
             "h": 8
           },
@@ -856,7 +1127,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 31,
+            "y": 46,
             "w": 12,
             "h": 8
           },
@@ -905,7 +1176,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 31,
+            "y": 46,
             "w": 12,
             "h": 8
           },
@@ -952,7 +1223,7 @@
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 7,
+        "y": 14,
         "w": 24,
         "h": 1
       },
@@ -968,7 +1239,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 8,
+            "y": 15,
             "w": 12,
             "h": 8
           },
@@ -1017,7 +1288,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 8,
+            "y": 15,
             "w": 12,
             "h": 8
           },
@@ -1066,7 +1337,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 16,
+            "y": 23,
             "w": 12,
             "h": 8
           },
@@ -1113,7 +1384,7 @@
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 15,
         "w": 24,
         "h": 1
       },
@@ -1129,7 +1400,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 9,
+            "y": 16,
             "w": 12,
             "h": 8
           },
@@ -1200,7 +1471,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 9,
+            "y": 16,
             "w": 12,
             "h": 8
           },
@@ -1249,7 +1520,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 17,
+            "y": 24,
             "w": 12,
             "h": 8
           },

@@ -195,6 +195,8 @@ func (r *Repository) ExecutionHistory(ctx context.Context, db string) ([]Executi
 }
 
 // Lock this database so migration edits and executions cannot overlap.
+var errPlatformLockBusy = fault("conflict", "Another migration operation is in progress")
+
 func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func(), error) {
 	lockCtx, span := telemetry.Start(ctx, "migration.lock")
 	defer telemetry.EndSpan(span)
@@ -225,7 +227,7 @@ func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func()
 		}
 		span.SetAttributes(attribute.String("outcome", "busy"))
 		slog.WarnContext(lockCtx, "migration.lock", "status", "busy")
-		return nil, nil, fault("conflict", "Another migration operation is in progress")
+		return nil, nil, errPlatformLockBusy
 	}
 	span.SetAttributes(attribute.String("outcome", "acquired"))
 	slog.InfoContext(lockCtx, "migration.lock", "status", "acquired")

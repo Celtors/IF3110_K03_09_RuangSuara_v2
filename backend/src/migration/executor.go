@@ -12,7 +12,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type executionResult struct{ Status, Code, Message, FaultCode string }
+type executionResult struct {
+	Status, Code, Message, FaultCode string
+	advisoryLockBusy                 bool
+}
 
 // Record the transaction ID so interrupted commits can be checked later.
 func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarget string, recordXID func(string, string) error, recordRows func(int64) error, replay *batchReplay) executionResult {
@@ -38,7 +41,7 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarge
 	err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(781349,3)`).Scan(&locked)
 	telemetry.ObserveLockProbe("target", time.Since(probeStart), locked, err)
 	if err != nil || !locked {
-		return executionResult{Status: "failed", Code: "55P03", Message: "Target migration lock is busy"}
+		return executionResult{Status: "failed", Code: "55P03", Message: "Target migration lock is busy", advisoryLockBusy: err == nil}
 	}
 	var xid string
 	if err = tx.QueryRow(ctx, `SELECT pg_catalog.pg_current_xact_id()::text`).Scan(&xid); err != nil {
