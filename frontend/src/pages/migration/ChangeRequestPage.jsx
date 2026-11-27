@@ -4,6 +4,7 @@ import {
   OPERATION_LABEL,
   approveChangeRequest,
   cancelChangeRequest,
+  namesFrom,
   rejectChangeRequest,
   shortId,
   sqlFor,
@@ -16,7 +17,7 @@ import {
   useMigrationDefinition,
   useSqlIntegrity,
 } from "../../migration/useChangeRequests.js";
-import { ActivityLog, ApprovalsTable, RequestBadge, StatusTrack, Who, namesFrom } from "./ChangeRequestParts.jsx";
+import { ActivityLog, ApprovalsTable, RequestBadge, StatusTrack, Who } from "./ChangeRequestParts.jsx";
 import { DecisionDialog } from "./DecisionDialog.jsx";
 
 // What the request is doing now, in a sentence.
@@ -146,6 +147,7 @@ export function ChangeRequestPage({ databaseId }) {
         <dl className="details-grid">
           {[
             ["Database", request.database_id],
+            ["Job ID", request.id],
             ["Operation", OPERATION_LABEL[request.operation] ?? request.operation],
             ["Approved", date(request.approved_at)],
             ["Queued", date(request.queued_at)],
@@ -156,7 +158,7 @@ export function ChangeRequestPage({ databaseId }) {
               "Execution attempt",
               request.attempt_id ? (
                 <a className="cr-link" href={href("details", databaseId, request.migration_id)} key="a">
-                  View attempts →
+                  {request.attempt_id}
                 </a>
               ) : (
                 "—"
@@ -196,7 +198,7 @@ export function ChangeRequestPage({ databaseId }) {
               <button className="btn btn-danger-quiet" onClick={() => setDialog("reject")}>
                 Reject…
               </button>
-              <button className="btn btn-primary" disabled={mismatched} onClick={() => setDialog("approve")}>
+              <button className="btn btn-primary" disabled={!sql || mismatched} onClick={() => setDialog("approve")}>
                 Approve…
               </button>
             </div>

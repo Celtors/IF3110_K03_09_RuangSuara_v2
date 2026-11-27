@@ -114,5 +114,5 @@ func LoginRequest(c *gin.Context, db *gorm.DB) {
 
 	slog.InfoContext(ctx, "authentication.login", "status", "succeeded")
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("ssid", session_token, int(session_absolute_exp_duration.Seconds()), "/", "localhost", true, true)
+	c.SetCookie("ssid", session_token, int(session_absolute_exp_duration.Seconds()), "/", "", true, true)
 }

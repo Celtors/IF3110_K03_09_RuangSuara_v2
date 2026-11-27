@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,8 +14,15 @@ import (
 	"testing"
 	"time"
 
+	"backend/internal/telemetry"
+
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type jobTestAccess struct {
@@ -67,6 +75,7 @@ func newJobHarness(t *testing.T) *jobHarness {
 		t.Fatal(err)
 	}
 	config.MaxConns = 12
+	config.ConnConfig.Tracer = telemetry.PostgresTracer{Scope: "platform"}
 	platform, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)
@@ -81,8 +90,9 @@ func newJobHarness(t *testing.T) *jobHarness {
 	r.Approvers = jobTestApprovers{}
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	router.Use(telemetry.HTTP)
 	RegisterReviewRoutes(router, r)
-	db := newID()
+	db := canonicalDatabaseID(newID())
 	h := &jobHarness{r, router, target, platform, db, access}
 	t.Cleanup(func() { // cleanup only this test database's records; audit triggers may reject DELETE, so require disposable platform
 		jobs, e := platform.Query(ctx, `SELECT b.id FROM dmp_migration.batch_jobs b JOIN dmp_migration.change_requests r ON r.id=b.id WHERE r.database_id=$1`, db)
@@ -169,6 +179,17 @@ func (h *jobHarness) worker(t *testing.T) func() {
 }
 func TestAsyncJobsAndRecoveryIntegration(t *testing.T) {
 	h := newJobHarness(t)
+	var logs bytes.Buffer
+	slogBefore, tracingBefore := slog.Default(), otel.GetTracerProvider()
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	slog.SetDefault(slog.New(telemetry.NewHandler(&logs)))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		slog.SetDefault(slogBefore)
+		otel.SetTracerProvider(tracingBefore)
+	})
 	rel, up, down := batchFixture(t, h.target, 5, true)
 	id := h.submit(t, up, down, 2)
 	if p := h.status(t, id); p["status"] != "pending_review" {
@@ -196,12 +217,107 @@ func TestAsyncJobsAndRecoveryIntegration(t *testing.T) {
 	stop()
 	mustExec(t, h.target, `ALTER TABLE `+rel+` DROP CONSTRAINT limited_score`)
 	h.request(t, "editor", "POST", "/jobs/"+id+"/resume", nil, 202)
-	h.worker(t)
+	h.r = NewReview(h.r.Service) // Fresh worker state, same PostgreSQL storage.
+	h.r.Approvers = jobTestApprovers{}
+	stop = h.worker(t)
 	p = h.wait(t, id, "completed", false)
 	if p["committed_batches"] != float64(3) || p["committed_rows"] != float64(5) {
 		t.Fatal(p)
 	}
 	h.wait(t, later, "completed", false)
+	stop()
+	assertBatchResumeTelemetry(t, logs.String(), exporter.GetSpans(), id, strings.TrimPrefix(rel, "public."))
+}
+
+func assertBatchResumeTelemetry(t *testing.T, logs string, spans tracetest.SpanStubs, id, table string) {
+	t.Helper()
+	rawSpans, err := json.Marshal(spans)
+	if err != nil || strings.Contains(logs, table) || bytes.Contains(rawSpans, []byte(table)) ||
+		strings.Contains(logs, "limited_score") || bytes.Contains(rawSpans, []byte("limited_score")) {
+		t.Fatal("batch query or error exposed a target identifier")
+	}
+	spanByID := make(map[string]tracetest.SpanStub, len(spans))
+	for _, span := range spans {
+		spanByID[span.SpanContext.SpanID().String()] = span
+	}
+	var records []map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(logs), "\n") {
+		var record map[string]any
+		if err = json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record["job_id"] == id {
+			records = append(records, record)
+		}
+	}
+	find := func(want map[string]any, spanName string) (map[string]any, tracetest.SpanStub) {
+		t.Helper()
+		for _, record := range records {
+			matched := true
+			for k, v := range want {
+				matched = matched && record[k] == v
+			}
+			if !matched {
+				continue
+			}
+			spanID, _ := record["span_id"].(string)
+			span, exists := spanByID[spanID]
+			if !exists || span.Name != spanName || record["trace_id"] != span.SpanContext.TraceID().String() || span.EndTime.Before(span.StartTime) {
+				t.Fatalf("missing matching finished span for %v", want)
+			}
+			return record, span
+		}
+		t.Fatalf("missing batch log matching %v", want)
+		return nil, tracetest.SpanStub{}
+	}
+	approval, publish := find(map[string]any{"event": "queue.submitted"}, "queue.publish")
+	_, claim := find(map[string]any{"event": "queue.claim", "status": "running"}, "queue.claim")
+	first, initial := find(map[string]any{"event": "batch.started", "reloaded": false}, "batch.execute")
+	reloaded, resumed := find(map[string]any{"event": "batch.started", "reloaded": true}, "batch.execute")
+	initialWorker := spanByID[initial.Parent.SpanID().String()]
+	resumedWorker := spanByID[resumed.Parent.SpanID().String()]
+	if claim.Parent.SpanID() != publish.SpanContext.SpanID() ||
+		initialWorker.Name != "worker.process" || initialWorker.Parent.SpanID() != claim.SpanContext.SpanID() ||
+		resumedWorker.Name != "worker.process" || !resumedWorker.Parent.Equal(publish.SpanContext.WithRemote(true)) ||
+		first["trace_id"] != approval["trace_id"] || reloaded["trace_id"] != approval["trace_id"] ||
+		first["correlation_id"] != approval["submission_correlation_id"] || reloaded["correlation_id"] != first["correlation_id"] {
+		t.Fatal("initial claim or resumed worker lost its approval trace or submission correlation")
+	}
+	_, lock := find(map[string]any{"event": "migration.lock", "status": "acquired"}, "migration.lock")
+	if lock.Parent.SpanID() != initial.SpanContext.SpanID() {
+		t.Fatal("batch advisory lock is missing its execution parent")
+	}
+	paused, _ := find(map[string]any{"event": "batch.execution", "status": "paused", "committed_rows": float64(2)}, "batch.execute")
+	failed, failedSQL := find(map[string]any{"event": "sql.finished", "database_scope": "target",
+		"status": "failed", "sqlstate": "23514", "batch_number": float64(2)}, "db.query")
+	_, rollback := find(map[string]any{"event": "transaction.rollback", "database_scope": "target",
+		"status": "rolled_back", "batch_number": float64(2)}, "db.rollback")
+	_, commit := find(map[string]any{"event": "transaction.commit", "database_scope": "target",
+		"status": "committed", "batch_number": float64(2)}, "db.commit")
+	failedBatch, committedBatch := spanByID[failedSQL.Parent.SpanID().String()], spanByID[commit.Parent.SpanID().String()]
+	committedAttrs := attribute.NewSet(committedBatch.Attributes...)
+	outcome, _ := committedAttrs.Value("outcome")
+	batchNumber, _ := committedAttrs.Value("batch_number")
+	if failedSQL.Status.Code != codes.Error || failedBatch.Name != "batch.transaction" ||
+		rollback.Parent.SpanID() != failedBatch.SpanContext.SpanID() || failedBatch.Parent.SpanID() != initial.SpanContext.SpanID() ||
+		committedBatch.Name != "batch.transaction" || committedBatch.Parent.SpanID() != resumed.SpanContext.SpanID() ||
+		outcome.AsString() != "committed" || batchNumber.AsInt64() != 2 {
+		t.Fatal("batch statement, rollback, or resumed commit span has the wrong outcome or parent")
+	}
+	verified, verifiedSpan := find(map[string]any{"event": "batch.checkpoint_verified", "checkpoint_kind": "batch",
+		"status": "committed", "committed_batches": float64(2), "committed_rows": float64(4)}, "batch.execute")
+	if !verifiedSpan.SpanContext.Equal(resumed.SpanContext) || paused["attempt_id"] == nil ||
+		paused["attempt_id"] != failed["execution_id"] || paused["attempt_id"] != verified["attempt_id"] ||
+		verified["trace_id"] != approval["trace_id"] {
+		t.Fatal("verified progress is missing resumed execution metadata")
+	}
+	for _, record := range []map[string]any{failed, paused, verified} {
+		data, _ := json.Marshal(record)
+		t.Log(string(data))
+	}
+	t.Logf("exported %s trace_id=%s span_id=%s parent_span_id=%s batch_number=%d outcome=%s",
+		committedBatch.Name, committedBatch.SpanContext.TraceID(), committedBatch.SpanContext.SpanID(),
+		committedBatch.Parent.SpanID(), batchNumber.AsInt64(), outcome.AsString())
 }
 func TestAsyncPermissionRevalidationIntegration(t *testing.T) {
 	h := newJobHarness(t)
@@ -227,6 +343,69 @@ func TestAsyncPermissionRevalidationIntegration(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatal("worker did not cancel revoked requester")
+}
+
+func TestAsyncRecoveryAfterAccessRevoked(t *testing.T) {
+	h := newJobHarness(t)
+	rel, _, _ := batchFixture(t, h.target, 1, false)
+	up := `UPDATE ` + rel + ` SET score=score+1`
+	id := h.submit(t, up, `UPDATE `+rel+` SET score=score-1`, 0)
+	h.approve(t, id)
+	ctx := context.Background()
+	repo := h.r.repo()
+	q, err := repo.claim(ctx, h.r.revalidate)
+	if err != nil || q == nil || q.ID != id {
+		t.Fatalf("claim %v %v", q, err)
+	}
+	m, err := repo.Get(ctx, h.db, q.MigrationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempt Attempt
+	func() {
+		conn, release, e := repo.lock(ctx, h.db)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer release()
+		attempt, e = beginAttempt(ctx, conn, m, q.RequestedBy, q.Operation, up, nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = repo.linkAttempt(ctx, id, attempt.ID); e != nil {
+			t.Fatal(e)
+		}
+		result := executePostgres(ctx, h.target, up, "", func(xid, identity string) error {
+			_, e := conn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1`, attempt.ID, xid, identity)
+			return e
+		}, func(int64) error { return nil }, nil)
+		if result.Status != "succeeded" {
+			t.Fatalf("interruption fixture did not commit: %+v", result)
+		}
+	}()
+	h.access.mu.Lock()
+	h.access.revoked = true
+	h.access.mu.Unlock()
+	if code, _ := faultInfo(h.r.Service.Reconcile(ctx, "editor", h.db)); code != "forbidden" {
+		t.Fatalf("public reconciliation with revoked access returned %q", code)
+	}
+	candidate := InFlightRequest{ID: id, DatabaseID: h.db, MigrationID: m.ID, Operation: q.Operation,
+		RequestedBy: q.RequestedBy, Status: RequestRunning, StartedAt: q.startedAt, queueTrace: q.queueTrace}
+	stale := candidate
+	stale.StartedAt = stale.StartedAt.Add(-time.Second)
+	h.r.recoverOne(ctx, stale)
+	stored, err := h.r.Get(ctx, "leader", h.db, id)
+	if err != nil || stored.Status != RequestRunning {
+		t.Fatalf("stale recovery changed the current claim: %v %v", stored.Status, err)
+	}
+	h.r.recoverOne(ctx, candidate)
+	stored, err = h.r.Get(ctx, "leader", h.db, id)
+	if err != nil || stored.Status != RequestSucceeded || stored.AttemptID == nil || *stored.AttemptID != attempt.ID {
+		t.Fatalf("internal recovery did not settle the linked attempt: %v %v", stored.Status, err)
+	}
+	if got := score(t, h.target, rel, 1); got != 1 {
+		t.Fatalf("recovery replayed committed SQL, score is %d", got)
+	}
 }
 func TestBatchUnmirroredCommitRecoveryIntegration(t *testing.T) {
 	h := newJobHarness(t)

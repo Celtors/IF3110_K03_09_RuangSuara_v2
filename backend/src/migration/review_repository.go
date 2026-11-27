@@ -65,6 +65,14 @@ func (r *Repository) insertRequest(ctx context.Context, q ChangeRequest, approve
 		(q.CompensationSQLHash != "" && (m.Irreversible || sqlHash(m.SQLDown) != q.CompensationSQLHash)) {
 		return q, fault("conflict", "Migration SQL changed during submission")
 	}
+	if q.Operation == OperationApply {
+		if err := m.Draft.ValidateForReview(); err != nil {
+			return q, err
+		}
+	}
+	if _, _, err := prepareExecution(ctx, conn, m, q.Operation); err != nil {
+		return q, err
+	}
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return q, err

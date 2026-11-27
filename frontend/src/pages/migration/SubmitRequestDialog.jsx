@@ -33,6 +33,7 @@ export function SubmitRequestDialog({ databaseId, migration, operation, onClose,
   const [error, setError] = useState("");
   const copy = COPY[operation];
   async function submit() {
+    if (busy) return;
     setBusy(true);
     setError("");
     try {
@@ -45,7 +46,7 @@ export function SubmitRequestDialog({ databaseId, migration, operation, onClose,
     }
   }
   return (
-    <Modal title={copy.title(migration.name)} onClose={onClose} wide>
+    <Modal title={copy.title(migration.name)} onClose={onClose} wide busy={busy}>
       <p>
         {copy.lead} database <strong>{databaseId}</strong>. {OPERATION_LABEL[operation]} requests do not run immediately.
       </p>

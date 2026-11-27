@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, databaseBase } from "./api.js";
 import {
   getChangeRequest,
@@ -12,7 +12,7 @@ const POLL_MS = 4000;
 
 // Requests of one database (optionally of one migration). Refreshes itself while any
 // request can still change, and keeps showing the previous rows during a refresh.
-export function useChangeRequestList(databaseId, migrationId = "") {
+export function useChangeRequestList(databaseId, migrationId = "", onSettled) {
   const scope = `${databaseId}|${migrationId}`;
   const [tick, setTick] = useState(0);
   const [state, setState] = useState({ scope: "", items: [], error: "" });
@@ -24,7 +24,11 @@ export function useChangeRequestList(databaseId, migrationId = "") {
         const items = await listChangeRequests(databaseId, { migrationId });
         if (active) setState({ scope, items, error: "" });
       } catch (e) {
-        if (active) setState({ scope, items: [], error: e.message });
+        if (active) setState((previous) => ({
+          scope,
+          items: previous.scope === scope ? previous.items : [],
+          error: e.message,
+        }));
       }
     })();
     return () => {
@@ -32,6 +36,15 @@ export function useChangeRequestList(databaseId, migrationId = "") {
     };
   }, [databaseId, migrationId, scope, tick]);
   const items = state.scope === scope ? state.items : [];
+  const previous = useRef(state);
+  useEffect(() => {
+    if (state.scope !== scope || state.error) return;
+    const prior = previous.current;
+    previous.current = state;
+    if (prior.scope !== scope || !onSettled) return;
+    const liveIds = new Set(prior.items.filter((r) => isLive(r.status)).map((r) => r.id));
+    if (state.items.some((r) => liveIds.has(r.id) && !isLive(r.status))) onSettled();
+  }, [scope, state, onSettled]);
   const live = items.some((r) => isLive(r.status));
   useEffect(() => {
     if (!live) return;

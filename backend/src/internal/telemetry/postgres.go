@@ -29,16 +29,45 @@ type PostgresTracer struct{ Scope string }
 type queryKey struct{}
 
 func (t PostgresTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	const maxParameterTypes = 24
 	count := 0
+	var types []string
 	for _, arg := range data.Args {
 		switch arg.(type) {
 		case pgx.QueryExecMode, pgx.QueryRewriter, pgx.QueryResultFormats, pgx.QueryResultFormatsByOID:
 			continue
 		}
 		count++
+		if len(types) < maxParameterTypes {
+			types = append(types, parameterType(arg))
+		}
 	}
-	ctx, query := StartSQL(ctx, t.Scope, data.SQL, count)
+	ctx, query := startSQL(ctx, t.Scope, data.SQL, count, types)
 	return context.WithValue(ctx, queryKey{}, query)
+}
+
+// A fixed vocabulary avoids leaking values or user-defined type names.
+func parameterType(value any) string {
+	switch value.(type) {
+	case nil:
+		return "null"
+	case string, *string:
+		return "text"
+	case bool, *bool:
+		return "boolean"
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, *int64:
+		return "integer"
+	case float32, float64:
+		return "float"
+	case []byte:
+		return "bytes"
+	case []int64, []string:
+		return "array"
+	case time.Time, *time.Time:
+		return "time"
+	default:
+		return "other"
+	}
 }
 
 func (t PostgresTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
@@ -56,6 +85,7 @@ func (t PostgresTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx
 type SQLExecution struct {
 	start       time.Time
 	attrs       []slog.Attr
+	scope       string
 	transaction string
 	span        trace.Span
 }
@@ -63,13 +93,21 @@ type SQLExecution struct {
 // StartSQL is also used by the migration script executor, which calls PgConn
 // directly and bypasses pgx's query hooks.
 func StartSQL(ctx context.Context, scope, sql string, parameterCount int) (context.Context, SQLExecution) {
+	return startSQL(ctx, scope, sql, parameterCount, nil)
+}
+
+func startSQL(ctx context.Context, scope, sql string, parameterCount int, parameterTypes []string) (context.Context, SQLExecution) {
 	shape := sqlShape(sql)
 	q := SQLExecution{
+		scope: scope,
 		attrs: []slog.Attr{
 			slog.String("database_scope", scope),
 			slog.String("query", shape),
 			slog.Int("parameter_count", parameterCount),
 		},
+	}
+	if len(parameterTypes) > 0 {
+		q.attrs = append(q.attrs, slog.Any("parameter_types", parameterTypes))
 	}
 	switch sql := strings.TrimSpace(sql); {
 	case strings.EqualFold(sql, "commit"):
@@ -89,10 +127,32 @@ func StartSQL(ctx context.Context, scope, sql string, parameterCount int) (conte
 			attribute.String("db.query.text", shape),
 			attribute.Int("parameter_count", parameterCount),
 		))
+		if len(parameterTypes) > 0 {
+			q.span.SetAttributes(attribute.StringSlice("parameter_types", parameterTypes))
+		}
 	}
 	slog.LogAttrs(ctx, slog.LevelInfo, "sql.started", append(q.attrs, slog.String("status", "started"))...)
 	q.start = time.Now()
 	return ctx, q
+}
+
+// StatementFinished records the server's completed command in a script. The
+// script and its transaction have separate outcomes.
+func (q SQLExecution) StatementFinished(ctx context.Context, position int, tag pgconn.CommandTag) {
+	if tag.String() == "" {
+		return
+	}
+	command, _, _ := strings.Cut(tag.String(), " ")
+	attrs := []slog.Attr{slog.String("database_scope", q.scope), slog.Int("statement_index", position), slog.String("status", "executed")}
+	switch command {
+	case "INSERT", "UPDATE", "DELETE", "MERGE", "COPY":
+		attrs = append(attrs, slog.String("command", command), slog.Int64("rows_affected", tag.RowsAffected()))
+	case "SELECT", "FETCH":
+		attrs = append(attrs, slog.String("command", command), slog.Int64("rows_returned", tag.RowsAffected()))
+	case "ALTER", "CREATE", "DROP", "TRUNCATE", "COMMENT", "SET", "RESET", "DO", "GRANT", "REVOKE":
+		attrs = append(attrs, slog.String("command", command))
+	}
+	slog.LogAttrs(ctx, slog.LevelInfo, "sql.statement_finished", attrs...)
 }
 
 func (q SQLExecution) Finish(ctx context.Context, rows SQLRows, err error) {

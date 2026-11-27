@@ -11,7 +11,9 @@ import { SqlConsole } from "./SqlConsole.jsx";
 
 const rowsResult = { columns: ["id", "name"], column_types: ["int4", "text"], rows: [[1, "Alice"]], row_count: 1, has_result_set: true, truncated: false, execution_time_ms: 5 };
 
-beforeEach(() => call.mockReset());
+beforeEach(() => {
+  call.mockReset();
+});
 
 describe("SqlConsole", () => {
   it("posts the SQL to the shared database and renders the result", async () => {
@@ -49,6 +51,8 @@ describe("SqlConsole", () => {
     await user.click(screen.getByRole("button", { name: "Execute" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("syntax error");
     expect(screen.getByRole("status")).toHaveTextContent("Last run failed");
+    expect(screen.getByText("invalid_sql")).toBeVisible();
+    expect(screen.getByText("1 ms")).toBeVisible();
   });
   it("Clear empties the editor and the result", async () => {
     call.mockResolvedValue(rowsResult);

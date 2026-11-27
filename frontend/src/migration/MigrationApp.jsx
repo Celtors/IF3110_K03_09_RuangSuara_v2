@@ -133,7 +133,7 @@ export function MigrationApp() {
   const historyData = ready && databaseId ? loaded.history : EMPTY;
   const error = ready && databaseId ? loaded.error : "";
   const selected = databases.items.find((d) => d.id === databaseId);
-  const reload = () => setRefresh((v) => v + 1);
+  const reload = useCallback(() => setRefresh((v) => v + 1), []);
 
   const changeDatabase = (next) => {
     setDatabaseId(next);
@@ -176,6 +176,7 @@ export function MigrationApp() {
               return (
                 <a
                   aria-current={activeNav === key ? "page" : undefined}
+                  id={`migration-nav-${key}`}
                   className={activeNav === key ? "nav-link active" : "nav-link"}
                   href={isTab ? workspaceHref(key, databaseId) : href(key, databaseId)}
                   onClick={isTab && workspace ? (e) => navigateTab(e, key) : undefined}
@@ -271,7 +272,12 @@ export function MigrationApp() {
                     ))}
                   {page === "details" &&
                     (current ? (
-                      <Details current={current} canEdit={historyData.can_edit} />
+                      <Details
+                        current={current}
+                        canEdit={historyData.can_edit}
+                        nextOperation={historyData.migrations.find((m) => m.id === current.id)?.next_operation}
+                        reload={reload}
+                      />
                     ) : (
                       <ErrorBox error="Select a migration from history." />
                     ))}

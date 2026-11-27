@@ -91,6 +91,19 @@ export function approvalProgress(request) {
   return { approved: approvals.filter((a) => a.decision === "approved").length, total: approvals.length };
 }
 
+// The API returns usernames for group leaders in approval records.
+export function namesFrom(requests) {
+  const names = {};
+  for (const request of requests ?? []) {
+    for (const approval of request.approvals ?? []) {
+      if (approval.required_leader_id && approval.leader_username) {
+        names[approval.required_leader_id] = approval.leader_username;
+      }
+    }
+  }
+  return names;
+}
+
 // The six stages of the workflow with the state of each, for the progress track.
 export function trackFor(request) {
   const labels = ["Draft", "Pending review", "Approved", "In queue", "Running", "Success / Failed"];

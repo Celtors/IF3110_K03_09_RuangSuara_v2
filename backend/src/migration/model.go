@@ -59,14 +59,15 @@ type Migration struct {
 	ID         string `json:"id"`
 	DatabaseID string `json:"database_id"`
 	Draft
-	Author       string     `json:"author_user_id"`
-	Created      time.Time  `json:"created_at"`
-	Updated      time.Time  `json:"updated_at"`
-	State        string     `json:"state"`
-	Version      *int64     `json:"version"`
-	Attempts     []Attempt  `json:"attempts,omitempty"`
-	LastExecutor *string    `json:"last_executor_user_id"`
-	LastExecuted *time.Time `json:"last_executed_at"`
+	Author        string     `json:"author_user_id"`
+	Created       time.Time  `json:"created_at"`
+	Updated       time.Time  `json:"updated_at"`
+	State         string     `json:"state"`
+	Version       *int64     `json:"version"`
+	Attempts      []Attempt  `json:"attempts,omitempty"`
+	LastExecutor  *string    `json:"last_executor_user_id"`
+	LastExecuted  *time.Time `json:"last_executed_at"`
+	NextOperation Operation  `json:"next_operation,omitempty"`
 }
 type Operation string
 

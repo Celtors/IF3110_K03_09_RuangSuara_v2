@@ -36,7 +36,7 @@ func RotateSession(session models.SSOSession, c *gin.Context, db *gorm.DB) {
 		new_token_hash := utility.HashToken(session_token)
 		old_token_hash := session.SessionTokenHash
 		db.Model(&models.SSOSession{}).Where("id = ?", session.ID).Updates(models.SSOSession{SessionTokenHash: new_token_hash})
-		c.SetCookie("ssid", session_token, int(session_absolute_exp_duration.Seconds()-time.Since(session.CreatedAt).Seconds()), "/", "localhost", true, true)
+		c.SetCookie("ssid", session_token, int(session_absolute_exp_duration.Seconds()-time.Since(session.CreatedAt).Seconds()), "/", "", true, true)
 		new_rotation := models.SessionRotation{
 			SessionId:           session.ID,
 			OldSessionTokenHash: old_token_hash,

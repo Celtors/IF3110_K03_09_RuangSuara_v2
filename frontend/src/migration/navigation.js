@@ -32,7 +32,7 @@ export const titles = {
   ],
   editor: [
     "Migration editor",
-    "Review your SQL, save a draft, then confirm its execution.",
+    "Save a draft, then submit its SQL for approval.",
   ],
   details: [
     "Migration details",

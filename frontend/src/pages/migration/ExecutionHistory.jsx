@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { date, requestHref } from "../../migration/api.js";
+import { date, href, requestHref } from "../../migration/api.js";
 import { OPERATION_LABEL, isOpen } from "../../migration/changeRequests.js";
 import { ErrorBox } from "../../migration/components.jsx";
 import { fetchExecutionHistory, latestByMigration, nextOperations } from "../../migration/executionHistory.js";
@@ -12,29 +12,30 @@ import { SubmitRequestDialog } from "./SubmitRequestDialog.jsx";
 //   requests    useChangeRequestList result, so a button stays off while a request is open
 export function ExecutionHistory({ databaseId, migrations, canEdit, requests }) {
   const [hideRolledBack, setHideRolledBack] = useState(false);
-  const [state, setState] = useState({ key: "", entries: [], error: "" });
+  const [retry, setRetry] = useState(0);
+  const [state, setState] = useState(null);
   const [target, setTarget] = useState(null); // { migration, operation }
-  // Refetch when the filter or the migrations change: a request that settled updates both.
-  const key = `${databaseId}|${hideRolledBack}|${migrations.map((m) => `${m.id}:${m.state}`).join(",")}`;
 
+  // A failed rollback or forward can add an attempt without changing definition state.
   useEffect(() => {
     let active = true;
     (async () => {
       try {
         const entries = await fetchExecutionHistory(databaseId, hideRolledBack);
-        if (active) setState({ key, entries, error: "" });
+        if (active) setState({ databaseId, hideRolledBack, migrations, retry, entries, error: "" });
       } catch (e) {
-        if (active) setState({ key, entries: [], error: e.message });
+        if (active) setState({ databaseId, hideRolledBack, migrations, retry, entries: [], error: e.message });
       }
     })();
     return () => {
       active = false;
     };
-  }, [databaseId, hideRolledBack, key]);
+  }, [databaseId, hideRolledBack, migrations, retry]);
 
-  const loading = state.key !== key;
+  const loading = !state || state.databaseId !== databaseId || state.hideRolledBack !== hideRolledBack
+    || state.migrations !== migrations || state.retry !== retry;
   const entries = loading ? [] : state.entries;
-  const latest = useMemo(() => latestByMigration(entries), [entries]);
+  const latest = latestByMigration(entries);
   const byId = useMemo(() => new Map(migrations.map((m) => [m.id, m])), [migrations]);
   const openFor = (migrationId) =>
     requests.items.find((r) => r.migration_id === migrationId && isOpen(r.status));
@@ -54,16 +55,21 @@ export function ExecutionHistory({ databaseId, migrations, canEdit, requests }) 
           Hide rolled-back executions
         </label>
       </div>
-      <ErrorBox error={state.key === key ? state.error : ""} />
       {loading ? (
         <p role="status">Loading execution history…</p>
+      ) : state.error ? (
+        <>
+          <ErrorBox error={state.error} />
+          <button className="btn" onClick={() => setRetry((n) => n + 1)}>Try again</button>
+        </>
       ) : entries.length ? (
         <div className="table-scroll" role="region" aria-label="Execution history table" tabIndex={0}>
           <table className="table">
             <thead>
               <tr>
-                <th scope="col">#</th>
+                <th scope="col">Success order</th>
                 <th scope="col">Migration</th>
+                <th scope="col">Execution ID</th>
                 <th scope="col">Operation</th>
                 <th scope="col">Status</th>
                 <th scope="col">Executor</th>
@@ -81,8 +87,12 @@ export function ExecutionHistory({ databaseId, migrations, canEdit, requests }) 
                   <tr key={e.execution_id}>
                     <td className="mono">{e.success_order ?? "—"}</td>
                     <td>
-                      <strong>{e.migration_name}</strong>
+                      <a className="text-link" href={href("details", databaseId, e.migration_id)}>{e.migration_name}</a>
                       {e.migration_version ? <small>v{e.migration_version}</small> : null}
+                    </td>
+                    <td className="mono">
+                      {e.execution_id}
+                      {e.reverses_execution_id && <small>Reverses {e.reverses_execution_id}</small>}
                     </td>
                     <td>{OPERATION_LABEL[e.operation] ?? e.operation}</td>
                     <td>
@@ -103,6 +113,7 @@ export function ExecutionHistory({ databaseId, migrations, canEdit, requests }) 
                               key={operation}
                               type="button"
                               className="btn"
+                              disabled={requests.loading || Boolean(requests.error)}
                               onClick={() => setTarget({ migration, operation })}
                             >
                               {label}

@@ -79,14 +79,14 @@ func (s *Service) History(ctx context.Context, user, db string) ([]Migration, Pe
 	if err := s.authorize(ctx, user, db, View); err != nil {
 		return nil, NoAccess, err
 	}
-	if _, err := s.connection(ctx, db); err != nil {
-		return nil, NoAccess, err
-	}
 	p, err := s.Access.Permission(ctx, user, db)
 	if err != nil {
 		return nil, NoAccess, fault("authorization_unavailable", "Database authorization is unavailable")
 	}
 	ms, err := s.Repository.List(ctx, db)
+	if err == nil && p == Edit && len(ms) > 0 {
+		err = s.Repository.setNextOperations(ctx, db, ms)
+	}
 	return ms, p, err
 }
 

@@ -37,6 +37,7 @@ function setup({ url = "?database=db-1", databases = DBS, listError } = {}) {
     }
     if (path === "/api/change-requests/pending-approval") return { change_requests: [] };
     if (path.includes("/change-requests")) return { change_requests: [] };
+    if (path.endsWith("/migration-history")) return { attempts: [] };
     if (path.endsWith("/migrations")) return { migrations: [migration], can_edit: path.includes("db-1") };
     if (path.endsWith("/query")) return queryResult(`from ${path.split("/")[3]}`);
     if (path.endsWith("/query-plan")) return { plan: [], nodes: [{ depth: 0, node_type: `Plan ${path.split("/")[3]}`, total_cost: 1, estimated_rows: 1 }] };
@@ -45,7 +46,8 @@ function setup({ url = "?database=db-1", databases = DBS, listError } = {}) {
   return render(<MigrationApp />);
 }
 const dropdown = () => screen.getByRole("combobox", { name: "Database" });
-const tab = (name) => screen.getByRole("tab", { name });
+const navLink = (name, options = {}) =>
+  within(screen.getByRole("navigation", { name: "Migration navigation" })).getByRole("link", { name, ...options });
 const needDatabase = () => screen.getByRole("heading", { name: "Select a database first" }); // role queries skip hidden panels
 
 beforeEach(() => {
@@ -56,7 +58,7 @@ beforeEach(() => {
 describe("Overview tab", () => {
   it("is the default tab on index.html and loads accessible databases into the dropdown", async () => {
     setup();
-    expect(screen.getByRole("tab", { name: "Overview", selected: true })).toBeInTheDocument();
+    expect(navLink("Overview", { current: "page" })).toBeInTheDocument();
     expect(await screen.findByRole("option", { name: "Dev DB · View + Edit" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Prod DB · View only" })).toBeInTheDocument();
     await waitFor(() => expect(dropdown()).toHaveValue("db-1"));
@@ -72,7 +74,7 @@ describe("Overview tab", () => {
     const user = userEvent.setup();
     await screen.findByRole("option", { name: "Dev DB · View + Edit" });
     await user.click(screen.getByRole("link", { name: /Run ad-hoc SQL/ }));
-    expect(tab("SQL Console")).toHaveAttribute("aria-selected", "true");
+    expect(navLink("SQL console")).toHaveAttribute("aria-current", "page");
     expect(window.location.search).toContain("tab=console");
   });
   it("selecting a database updates the shared id, reloads data and the URL", async () => {
@@ -97,18 +99,19 @@ describe("Overview tab", () => {
   });
   it("warns about an inaccessible database and blocks the other tabs", async () => {
     setup({ url: "?database=gone" });
-    expect(await screen.findByText(/not accessible to you/)).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("not accessible to you");
     const user = userEvent.setup();
-    for (const name of ["Migration", "SQL Console", "Query Plan"]) {
-      await user.click(tab(name));
+    for (const name of ["Migrations", "SQL console", "Query plans"]) {
+      await user.click(navLink(name));
       expect(needDatabase()).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent("not accessible to you");
     }
     expect(screen.queryByLabelText("SQL statement")).not.toBeInTheDocument();
   });
   it("blocks the other tabs when nothing is selected", async () => {
     setup({ url: "" });
     await screen.findByRole("option", { name: "Dev DB · View + Edit" });
-    await userEvent.setup().click(tab("SQL Console"));
+    await userEvent.setup().click(navLink("SQL console"));
     expect(needDatabase()).toBeInTheDocument();
   });
 });
@@ -119,11 +122,11 @@ describe("Shared database context", () => {
     const user = userEvent.setup();
     await screen.findByRole("option", { name: "Dev DB · View + Edit" });
     expect(screen.getAllByRole("combobox")).toHaveLength(1);
-    for (const name of ["Migration", "SQL Console", "Query Plan"]) {
-      await user.click(tab(name));
+    for (const name of ["Migrations", "SQL console", "Query plans"]) {
+      await user.click(navLink(name));
       expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     }
-    await user.click(tab("Overview"));
+    await user.click(navLink("Overview"));
     expect(dropdown()).toHaveValue("db-1");
   });
   it("Migration, SQL Console and Query Plan all use the Overview selection and keep it across tab switches", async () => {
@@ -131,37 +134,37 @@ describe("Shared database context", () => {
     const user = userEvent.setup();
     await screen.findByRole("option", { name: "Prod DB · View only" });
 
-    await user.click(tab("Migration"));
+    await user.click(navLink("Migrations"));
     expect(await screen.findByText("Add students")).toBeInTheDocument();
     expect(mocks.api).toHaveBeenCalledWith("/api/databases/db-2/migrations");
 
-    await user.click(tab("SQL Console"));
+    await user.click(navLink("SQL console"));
     await user.type(screen.getByLabelText("SQL statement"), "SELECT 1");
     await user.click(screen.getByRole("button", { name: "Execute" }));
     expect(await screen.findByText("from db-2")).toBeInTheDocument();
     expect(mocks.api).toHaveBeenCalledWith("/api/databases/db-2/query", "POST", { query: "SELECT 1" });
 
-    await user.click(tab("Query Plan"));
+    await user.click(navLink("Query plans"));
     await user.click(screen.getByRole("button", { name: /Explain query/ }));
     expect(await screen.findByText("Plan db-2")).toBeInTheDocument();
 
-    await user.click(tab("Overview"));
+    await user.click(navLink("Overview"));
     expect(dropdown()).toHaveValue("db-2");
-    await user.click(tab("SQL Console"));
+    await user.click(navLink("SQL console"));
     expect(screen.getByText("from db-2")).toBeInTheDocument();
   });
   it("changing the database in Overview updates every tab and clears the other database's results", async () => {
     setup({ url: "?database=db-2&tab=console" });
     const user = userEvent.setup();
-    await screen.findByRole("option", { name: "Prod DB · View only" });
-    expect(screen.getByText(/View only: only read-only queries/)).toBeInTheDocument();
+    expect(await screen.findByText(/View only: only read-only queries/)).toBeVisible();
     await user.type(screen.getByLabelText("SQL statement"), "SELECT 1");
     await user.click(screen.getByRole("button", { name: "Execute" }));
     await screen.findByText("from db-2");
 
-    await user.click(tab("Overview"));
+    await user.click(navLink("Overview"));
+    expect(screen.getByRole("option", { name: "Prod DB · View only" })).toBeInTheDocument();
     await user.selectOptions(dropdown(), "db-1");
-    await user.click(tab("SQL Console"));
+    await user.click(navLink("SQL console"));
     expect(screen.queryByText("from db-2")).not.toBeInTheDocument();
     expect(screen.getByText(/NOT recorded as migrations/)).toBeInTheDocument();
     await user.type(screen.getByLabelText("SQL statement"), "SELECT 2");
@@ -171,7 +174,8 @@ describe("Shared database context", () => {
   });
   it("restores the tab from the URL", async () => {
     setup({ url: "?database=db-1&tab=plan" });
-    expect(await screen.findByRole("tab", { name: "Query Plan", selected: true })).toBeInTheDocument();
+    expect(navLink("Query plans", { current: "page" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Explain query/ })).toBeVisible();
   });
 });
 

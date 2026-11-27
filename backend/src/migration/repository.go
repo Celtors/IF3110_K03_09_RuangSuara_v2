@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"backend/internal/telemetry"
@@ -85,6 +86,62 @@ func (r *Repository) List(ctx context.Context, db string) ([]Migration, error) {
 }
 func (r *Repository) Get(ctx context.Context, db, id string) (Migration, error) {
 	return scanMigration(r.Pool.QueryRow(ctx, `SELECT `+definitionColumns+` FROM dmp_migration.definitions WHERE database_id=$1 AND id=$2`, db, id), false)
+}
+
+// History exposes operation hints using the same ordering checks as execution.
+// Submission and the worker still check the current state under the database lock.
+func (r *Repository) setNextOperations(ctx context.Context, db string, migrations []Migration) error {
+	conn, err := r.Pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+
+	var activeVersion int64
+	var hasRolledBack bool
+	for _, m := range migrations {
+		if m.State == "applied" && m.Version != nil {
+			activeVersion = max(activeVersion, *m.Version)
+		}
+		hasRolledBack = hasRolledBack || m.State == "rolled_back"
+	}
+	var forwardID string
+	if hasRolledBack {
+		forwardID, err = nextForwardID(ctx, conn, db)
+		if err != nil {
+			return err
+		}
+	}
+
+	for i := range migrations {
+		m := &migrations[i]
+		var checkErr error
+		switch m.State {
+		case "draft", "failed":
+			if m.LastExecuted != nil || m.Version != nil {
+				checkErr = checkApplyOrder(ctx, conn, *m)
+			}
+			if checkErr == nil {
+				m.NextOperation = OperationApply
+			}
+		case "applied":
+			if m.Version != nil && *m.Version == activeVersion && !m.Irreversible && strings.TrimSpace(m.SQLDown) != "" {
+				_, checkErr = rollbackExecutionID(ctx, conn, *m)
+				if checkErr == nil {
+					m.NextOperation = OperationRollback
+				}
+			}
+		case "rolled_back":
+			if m.ID == forwardID {
+				m.NextOperation = OperationForward
+			}
+		}
+		var unavailable *Fault
+		if checkErr != nil && !errors.As(checkErr, &unavailable) {
+			return checkErr
+		}
+	}
+	return nil
 }
 func (r *Repository) Attempts(ctx context.Context, db, id string) ([]Attempt, error) {
 	rows, err := r.Pool.Query(ctx, `

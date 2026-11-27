@@ -37,18 +37,7 @@ func prepareExecution(ctx context.Context, conn *pgxpool.Conn, definition Migrat
 			return "", nil, fault("conflict", "This migration has no reversible SQL down")
 		}
 
-		var executionID string
-		err := conn.QueryRow(ctx, `
- SELECT a.id
- FROM dmp_migration.attempts a
- JOIN dmp_migration.definitions d ON d.id=a.migration_id
- WHERE a.database_id=$1 AND d.id=$2 AND a.status='succeeded' AND a.operation IN ('apply','forward')
-   AND d.version=(SELECT MAX(version) FROM dmp_migration.definitions WHERE database_id=$1 AND state='applied')
- ORDER BY a.version DESC
- LIMIT 1`, definition.DatabaseID, definition.ID).Scan(&executionID)
-		if isNoRows(err) {
-			return "", nil, fault("migration_order_conflict", "Rollback requires the latest active migration and its successful execution")
-		}
+		executionID, err := rollbackExecutionID(ctx, conn, definition)
 		if err != nil {
 			return "", nil, err
 		}
@@ -72,6 +61,22 @@ func prepareExecution(ctx context.Context, conn *pgxpool.Conn, definition Migrat
 		return "", nil, err
 	}
 	return sql, reversesExecutionID, nil
+}
+
+func rollbackExecutionID(ctx context.Context, conn *pgxpool.Conn, definition Migration) (string, error) {
+	var executionID string
+	err := conn.QueryRow(ctx, `
+ SELECT a.id
+ FROM dmp_migration.attempts a
+ JOIN dmp_migration.definitions d ON d.id=a.migration_id
+ WHERE a.database_id=$1 AND d.id=$2 AND a.status='succeeded' AND a.operation IN ('apply','forward')
+   AND d.version=(SELECT MAX(version) FROM dmp_migration.definitions WHERE database_id=$1 AND state='applied')
+ ORDER BY a.version DESC
+ LIMIT 1`, definition.DatabaseID, definition.ID).Scan(&executionID)
+	if isNoRows(err) {
+		return "", fault("migration_order_conflict", "Rollback requires the latest active migration and its successful execution")
+	}
+	return executionID, err
 }
 
 func checkApplyOrder(ctx context.Context, conn *pgxpool.Conn, definition Migration) error {
@@ -115,6 +120,17 @@ func checkApplyOrder(ctx context.Context, conn *pgxpool.Conn, definition Migrati
 }
 
 func checkForwardOrder(ctx context.Context, conn *pgxpool.Conn, definition Migration) error {
+	nextID, err := nextForwardID(ctx, conn, definition.DatabaseID)
+	if err != nil {
+		return err
+	}
+	if nextID != definition.ID {
+		return fault("migration_order_conflict", "Only the next rolled-back migration on the current path can be forwarded")
+	}
+	return nil
+}
+
+func nextForwardID(ctx context.Context, conn *pgxpool.Conn, databaseID string) (string, error) {
 	// A later initial apply closes an older rollback's forward path, even if
 	// the later migration is eventually rolled back too.
 	var nextID string
@@ -138,12 +154,9 @@ func checkForwardOrder(ctx context.Context, conn *pgxpool.Conn, definition Migra
          AND newer.version>d.version AND a.version>r.success_order
    )
  ORDER BY d.version
- LIMIT 1`, definition.DatabaseID).Scan(&nextID)
-	if err != nil && !isNoRows(err) {
-		return err
+ LIMIT 1`, databaseID).Scan(&nextID)
+	if isNoRows(err) {
+		return "", nil
 	}
-	if nextID != definition.ID {
-		return fault("migration_order_conflict", "Only the next rolled-back migration on the current path can be forwarded")
-	}
-	return nil
+	return nextID, err
 }

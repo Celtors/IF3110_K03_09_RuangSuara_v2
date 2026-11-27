@@ -36,7 +36,7 @@ export function DecisionDialog({ kind, onSubmit, onClose }) {
   const missing = copy.required && !comment.trim();
   async function run(event) {
     event.preventDefault();
-    if (missing) return;
+    if (busy || missing) return;
     setBusy(true);
     setError("");
     try {
@@ -48,7 +48,7 @@ export function DecisionDialog({ kind, onSubmit, onClose }) {
     }
   }
   return (
-    <Modal title={copy.title} onClose={onClose}>
+    <Modal title={copy.title} onClose={onClose} busy={busy}>
       <form onSubmit={run} className="stack">
         <p>{copy.body}</p>
         <label htmlFor="decision-comment">{copy.label}</label>

@@ -3,16 +3,17 @@ import { href, date, requestHref } from "../../migration/api.js";
 import { database } from "../../migration/navigation.js";
 import { Badge, SQL } from "../../migration/components.jsx";
 import { isOpen } from "../../migration/changeRequests.js";
-import { nextOperations } from "../../migration/executionHistory.js";
+import { isUnattemptedDraft, nextOperations } from "../../migration/executionHistory.js";
 import { useChangeRequestList } from "../../migration/useChangeRequests.js";
 import { ChangeRequestList } from "./ChangeRequestList.jsx";
 import { SubmitRequestDialog } from "./SubmitRequestDialog.jsx";
 
-export function Details({ current: m, canEdit }) {
+export function Details({ current: m, canEdit, nextOperation, reload }) {
   const [operation, setOperation] = useState("");
-  const requests = useChangeRequestList(database, m.id);
+  const requests = useChangeRequestList(database, m.id, reload);
   const openRequest = requests.items.find((r) => isOpen(r.status));
-  const operations = canEdit ? nextOperations(m) : [];
+  const actionsReady = canEdit && !requests.loading && !requests.error && !openRequest;
+  const operations = canEdit ? nextOperations({ ...m, next_operation: nextOperation }) : [];
   return (
     <>
       <section className="panel">
@@ -23,7 +24,7 @@ export function Details({ current: m, canEdit }) {
           </div>
           <div className="actions">
             <Badge state={m.state} />
-            {canEdit && ["draft", "failed"].includes(m.state) && (
+            {actionsReady && isUnattemptedDraft(m) && !requests.items.some((r) => r.attempt_id) && (
               <a
                 className="btn btn-primary"
                 href={href("editor", database, m.id)}
@@ -77,7 +78,7 @@ export function Details({ current: m, canEdit }) {
                 <button
                   key={op}
                   className="btn btn-primary"
-                  disabled={Boolean(openRequest)}
+                  disabled={!actionsReady}
                   onClick={() => setOperation(op)}
                 >
                   {label}
@@ -110,11 +111,13 @@ export function Details({ current: m, canEdit }) {
           m.attempts.map((a, i) => (
             <details key={a.id} open={i === m.attempts.length - 1}>
               <summary>
-                <Badge state={a.status} /> {a.version ? `v${a.version} · ` : ""}
+                <Badge state={a.status} /> {a.operation} · {a.version ? `#${a.version} · ` : ""}
                 {a.executor_user_id} · {date(a.started_at)}
               </summary>
               <div className="attempt-body">
                 <p>Completed: {date(a.completed_at)}</p>
+                <p>Execution ID <code>{a.id}</code></p>
+                {a.reverses_execution_id && <p>Reverses execution <code>{a.reverses_execution_id}</code></p>}
                 {a.error && (
                   <div
                     className={`alert notice ${a.status === "failed" ? "error" : ""}`}

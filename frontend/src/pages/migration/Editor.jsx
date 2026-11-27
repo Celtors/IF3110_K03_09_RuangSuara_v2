@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { api, href, draftKey, requestHref } from "../../migration/api.js";
+import { apiWithSessionRetry, href, draftKey, requestHref } from "../../migration/api.js";
 import { database, base } from "../../migration/navigation.js";
 import { ErrorBox } from "../../migration/components.jsx";
 import { isOpen } from "../../migration/changeRequests.js";
+import { isUnattemptedDraft } from "../../migration/executionHistory.js";
 import { replaceUrl } from "../../migration/router.js";
 import { useChangeRequestList } from "../../migration/useChangeRequests.js";
 import { SubmitRequestDialog } from "./SubmitRequestDialog.jsx";
@@ -25,10 +26,14 @@ export function Editor({ current, canEdit }) {
   // The SQL is frozen while a change request for it is open: approval covers exactly that SQL.
   const requests = useChangeRequestList(saved ? database : "", saved?.id ?? "");
   const openRequest = requests.items.find((r) => isOpen(r.status));
+  const attempted = requests.items.some((r) => r.attempt_id);
   const editable =
     canEdit &&
+    !requests.loading &&
+    !requests.error &&
     !openRequest &&
-    (!saved || ["draft", "failed"].includes(saved.state));
+    !attempted &&
+    (!saved || isUnattemptedDraft(saved));
   const dirty =
     !saved ||
     [
@@ -58,11 +63,12 @@ export function Editor({ current, canEdit }) {
   };
   async function save(event) {
     event.preventDefault();
+    if (!editable || busy || !dirty) return;
     setBusy(true);
     setError("");
     try {
       const payload = draft;
-      const m = await api(
+      const m = await apiWithSessionRetry(
         saved ? `${base}/migrations/${saved.id}` : `${base}/migrations`,
         saved ? "PATCH" : "POST",
         payload,
@@ -91,6 +97,8 @@ export function Editor({ current, canEdit }) {
   return (
     <>
       <ErrorBox error={error} />
+      <ErrorBox error={requests.error} />
+      {requests.error && <button className="btn" onClick={requests.reload}>Retry change requests</button>}
       {message && (
         <div className="alert notice success" role="status">
           {message}
@@ -105,11 +113,13 @@ export function Editor({ current, canEdit }) {
         </div>
       )}
       {!editable && !openRequest && (
-        <div className="alert notice">
-          {canEdit
-            ? "This migration is locked because it has been applied or its outcome is unresolved."
-            : "You have viewing permission for this database."}
-        </div>
+        !canEdit ? (
+          <div className="alert notice">You have viewing permission for this database.</div>
+        ) : requests.loading ? (
+          <p role="status">Checking change requests…</p>
+        ) : !requests.error && (
+          <div className="alert notice">This definition can no longer be edited. Create a new migration to change its SQL.</div>
+        )
       )}
       <form onSubmit={save}>
         <div className="editor-grid">
@@ -160,7 +170,6 @@ export function Editor({ current, canEdit }) {
                   onChange={(e) => change("irreversible_reason", e.target.value)}
                   readOnly={!editable || busy}
                   maxLength={4000}
-                  required
                   placeholder="Drops a column; the data cannot be restored by SQL down."
                 />
                 <div className="editor-foot">

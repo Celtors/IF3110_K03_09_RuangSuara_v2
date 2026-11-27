@@ -60,9 +60,12 @@ func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarge
 	sqlCtx, activity := telemetry.StartSQL(ctx, "target", sql, 0)
 	results := tx.Conn().PgConn().Exec(sqlCtx, sql)
 	var rows telemetry.SQLRows
-	for results.NextResult() {
-		tag, _ := results.ResultReader().Close()
-		rows.Add(tag)
+	for position := 1; results.NextResult(); position++ {
+		tag, statementErr := results.ResultReader().Close()
+		if statementErr == nil {
+			rows.Add(tag)
+			activity.StatementFinished(sqlCtx, position, tag)
+		}
 	}
 	err = results.Close()
 	activity.Finish(sqlCtx, rows, err)

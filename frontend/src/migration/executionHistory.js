@@ -1,14 +1,18 @@
 import { api, databaseBase } from "./api.js";
 
-// The operations a migration can be asked to run next, given its state, as [operation, label]
-// pairs. Each one needs approval before it runs. Shared by the details page and the
-// execution history so both offer exactly the same buttons.
+// Translate the server's ordering hint into the same action on both migration views.
 export function nextOperations(m) {
-  if (m.state === "draft") return [["apply", "Submit for approval"]];
-  if (m.state === "failed") return [["apply", "Resubmit for approval"]];
-  if (m.state === "applied" && !m.irreversible && m.sql_down?.trim()) return [["rollback", "Request rollback"]];
-  if (m.state === "rolled_back") return [["forward", "Request roll forward"]];
-  return [];
+  const labels = {
+    apply: m.state === "failed" ? "Resubmit for approval" : "Submit for approval",
+    rollback: "Request rollback",
+    forward: "Request roll forward",
+  };
+  const operation = m.next_operation;
+  return operation ? [[operation, labels[operation]]] : [];
+}
+
+export function isUnattemptedDraft(m) {
+  return m.state === "draft" && !m.attempts?.length;
 }
 
 // Every execution (apply, rollback, roll forward) on a database, oldest first. With

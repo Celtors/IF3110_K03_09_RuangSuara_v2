@@ -1,12 +1,63 @@
 package migration
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	fx "backend/access_control/effect"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func TestMigrationCommitResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		status string
+	}{
+		{name: "commit", status: "succeeded"},
+		{name: "rollback tag", err: pgx.ErrTxCommitRollback, status: "failed"},
+		{name: "constraint violation", err: &pgconn.PgError{Code: "23503"}, status: "failed"},
+		{name: "connection lost", err: context.DeadlineExceeded, status: "unknown"},
+		{name: "transaction outcome unknown", err: &pgconn.PgError{Code: "08007"}, status: "unknown"},
+		{name: "statement outcome unknown", err: &pgconn.PgError{Code: "40003"}, status: "unknown"},
+		{name: "fatal shutdown", err: &pgconn.PgError{Code: "57P01", SeverityUnlocalized: "FATAL"}, status: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if result := commitResult(test.err); result.Status != test.status {
+				t.Fatalf("commit status: got %q, want %q", result.Status, test.status)
+			}
+		})
+	}
+}
+
+func TestPrepareExecutionRejectsIneligibleDefinitions(t *testing.T) {
+	tests := []struct {
+		name       string
+		definition Migration
+		operation  Operation
+		code       string
+	}{
+		{name: "invalid operation", operation: "invalid", code: "invalid_input"},
+		{name: "reapply", definition: Migration{State: "applied"}, operation: OperationApply, code: "already_applied"},
+		{name: "apply in unrecognized state", definition: Migration{State: "unrecognized"}, operation: OperationApply, code: "conflict"},
+		{name: "apply without name", definition: Migration{State: "draft"}, operation: OperationApply, code: "invalid_input"},
+		{name: "rollback draft", definition: Migration{State: "draft"}, operation: OperationRollback, code: "conflict"},
+		{name: "rollback without down SQL", definition: Migration{State: "applied"}, operation: OperationRollback, code: "conflict"},
+		{name: "forward active", definition: Migration{State: "applied"}, operation: OperationForward, code: "conflict"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sql, reversesExecutionID, err := prepareExecution(context.Background(), nil, test.definition, test.operation)
+			if faultCode(err) != test.code || sql != "" || reversesExecutionID != nil {
+				t.Fatalf("preparation returned %q, %v, %v. Want fault %q", sql, reversesExecutionID, err, test.code)
+			}
+		})
+	}
+}
 
 func TestMigrationPermissionMapping(t *testing.T) {
 	cases := []struct {
@@ -60,6 +111,41 @@ func TestMigrationSQLSizeLimit(t *testing.T) {
 		t.Fatal("oversized SQL must fail")
 	}
 }
+
+func TestMigrationDefinitionValidation(t *testing.T) {
+	const up = "CREATE TABLE items (id integer)"
+	const down = "DROP TABLE items"
+	cases := []struct {
+		name       string
+		draft      Draft
+		saveCode   string
+		reviewCode string
+	}{
+		{name: "empty draft", saveCode: "invalid_input", reviewCode: "invalid_input"},
+		{name: "blank name", draft: Draft{Name: " \t ", SQLUp: up, SQLDown: down}, saveCode: "invalid_input", reviewCode: "invalid_input"},
+		{name: "missing SQL up", draft: Draft{Name: "Items", SQLDown: down}, saveCode: "invalid_sql", reviewCode: "invalid_sql"},
+		{name: "blank SQL up", draft: Draft{Name: "Items", SQLUp: " \n ", SQLDown: down}, saveCode: "invalid_sql", reviewCode: "invalid_sql"},
+		{name: "up only", draft: Draft{Name: "Items", SQLUp: up}, reviewCode: "invalid_input"},
+		{name: "reversible", draft: Draft{Name: "Items", SQLUp: up, SQLDown: down}},
+		{name: "irreversible", draft: Draft{Name: "Items", SQLUp: up, Irreversible: true, IrreversibleReason: "Deleted rows cannot be restored"}},
+		{name: "irreversible without reason", draft: Draft{Name: "Items", SQLUp: up, Irreversible: true, IrreversibleReason: "  "}, reviewCode: "invalid_input"},
+		{name: "irreversible with down SQL", draft: Draft{Name: "Items", SQLUp: up, SQLDown: down, Irreversible: true}, saveCode: "invalid_input", reviewCode: "invalid_input"},
+		{name: "reason without irreversible designation", draft: Draft{Name: "Items", SQLUp: up, SQLDown: down, IrreversibleReason: "No recovery"}, saveCode: "invalid_input", reviewCode: "invalid_input"},
+		{name: "invalid up SQL", draft: Draft{Name: "Items", SQLUp: "CREATE TABLE", SQLDown: down}, saveCode: "invalid_sql", reviewCode: "invalid_sql"},
+		{name: "invalid down SQL", draft: Draft{Name: "Items", SQLUp: up, SQLDown: "BEGIN"}, saveCode: "unsupported_sql", reviewCode: "unsupported_sql"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.draft.validate(false); faultCode(err) != tc.saveCode {
+				t.Errorf("save validation returned %v, want code %q", err, tc.saveCode)
+			}
+			if err := tc.draft.ValidateForReview(); faultCode(err) != tc.reviewCode {
+				t.Errorf("review validation returned %v, want code %q", err, tc.reviewCode)
+			}
+		})
+	}
+}
+
 func TestSchemaValidation(t *testing.T) {
 	cases := []struct {
 		name   string

@@ -38,11 +38,23 @@ export function Workspace({
   const usable = Boolean(databaseId && selected); // a valid, accessible selection
   const toOverview = () => onTabChange("overview");
   const panel = (id) => ({
-    role: "tabpanel",
-    id: `panel-${id}`,
-    "aria-labelledby": `tab-${id}`,
+    role: "region",
+    "aria-labelledby": `migration-nav-${id}`,
     hidden: tab !== id,
   });
+  const unavailable = databases.loading ? (
+    <div className="panel" role="status">Loading accessible databases…</div>
+  ) : databases.error ? (
+    <>
+      <ErrorBox error={databases.error} />
+      <button className="btn btn-primary" onClick={databases.reload}>Try again</button>
+    </>
+  ) : (
+    <>
+      {databaseId && <ErrorBox error="The selected database is not accessible to you." />}
+      <NeedDatabase onChangeRequest={toOverview} />
+    </>
+  );
   return (
     <>
       <div {...panel("overview")}>
@@ -71,7 +83,7 @@ export function Workspace({
             )}
           </>
         ) : (
-          <NeedDatabase onChangeRequest={toOverview} />
+          unavailable
         )}
       </div>
 
@@ -86,7 +98,7 @@ export function Workspace({
             <SqlConsole key={databaseId} databaseId={databaseId} canEdit={selected.permission === "ViewEdit"} />
           </>
         ) : (
-          <NeedDatabase onChangeRequest={toOverview} />
+          unavailable
         )}
       </div>
 
@@ -97,7 +109,7 @@ export function Workspace({
             <QueryPlan key={databaseId} databaseId={databaseId} />
           </>
         ) : (
-          <NeedDatabase onChangeRequest={toOverview} />
+          unavailable
         )}
       </div>
     </>

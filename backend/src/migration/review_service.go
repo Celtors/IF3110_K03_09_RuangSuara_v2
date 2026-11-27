@@ -72,8 +72,7 @@ func rawSQL(m Migration, op Operation) string {
 }
 
 // requestSQL checks that op can be requested for m in its current state and returns the
-// SQL it would run. Ordering rules (latest-first rollback, apply order) are enforced
-// again when the request runs, because other migrations can change before then.
+// SQL it would run. Submission and execution check ordering with the database lock held.
 func requestSQL(m Migration, op Operation) (string, error) {
 	switch op {
 	case OperationApply:

@@ -1,20 +1,13 @@
-import { useEffect, useRef } from "react";
 import { date, requestHref, viewerId } from "../../migration/api.js";
-import { OPERATION_LABEL } from "../../migration/changeRequests.js";
+import { OPERATION_LABEL, namesFrom } from "../../migration/changeRequests.js";
 import { ErrorBox } from "../../migration/components.jsx";
-import { ApprovalMeter, RequestBadge, Who, namesFrom } from "./ChangeRequestParts.jsx";
+import { ApprovalMeter, RequestBadge, Who } from "./ChangeRequestParts.jsx";
 
 // Change requests of a database, or of one migration. `list` is the result of
 // useChangeRequestList, so a caller that also needs the data (to disable a button while a
-// request is open, say) fetches and polls once. `onSettled` runs when a request that was
-// still moving reaches a final status, so the caller can refresh what it shows.
-export function ChangeRequestList({ list, databaseId, title = "Change requests", onSettled, hideMigration = false }) {
-  const { items, error, loading, live } = list;
-  const wasLive = useRef(false);
-  useEffect(() => {
-    if (wasLive.current && !live) onSettled?.();
-    wasLive.current = live;
-  }, [live, onSettled]);
+// request is open, say) fetches and polls once.
+export function ChangeRequestList({ list, databaseId, title = "Change requests", hideMigration = false }) {
+  const { items, error, loading, live, reload } = list;
   const me = viewerId();
   const names = namesFrom(items);
 
@@ -27,6 +20,7 @@ export function ChangeRequestList({ list, databaseId, title = "Change requests",
         {live && <span className="cr-live">Updating automatically</span>}
       </div>
       <ErrorBox error={error} />
+      {error && <button className="btn" onClick={reload}>Retry change requests</button>}
       {loading ? (
         <p role="status">Loading change requests…</p>
       ) : items.length ? (
@@ -72,7 +66,7 @@ export function ChangeRequestList({ list, databaseId, title = "Change requests",
             </tbody>
           </table>
         </div>
-      ) : (
+      ) : !error && (
         <div className="empty">
           <span>✓</span>
           <h3>No change requests yet</h3>
