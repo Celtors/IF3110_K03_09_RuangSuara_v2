@@ -14,15 +14,16 @@ import "./style.css";
 import "./changeRequests.css";
 
 const WORKSPACE_PAGES = ["index", "history", "query-plan"];
-const TABS = ["overview", "migration", "approvals", "console", "plan"];
+const TABS = ["overview", "viewer", "migration", "approvals", "console", "plan"];
 const PAGE_TAB = { index: "overview", history: "migration", "query-plan": "plan" };
 const EMPTY = { migrations: [], can_edit: false };
 const tabTitles = {
   overview: titles.index,
   migration: titles.history,
+  viewer: ["Database viewer", "Browse schemas, tables, and data."],
   console: [
     "SQL console",
-    "Run ad-hoc SQL on the selected database. Nothing here is recorded as a migration.",
+    "Run read-only SQL on the selected database.",
   ],
   approvals: [
     "Approvals",
@@ -32,6 +33,7 @@ const tabTitles = {
 };
 const NAV = [
   ["overview", "⌂", "Overview"],
+  ["viewer", "▦", "Database viewer"],
   ["migration", "◷", "Migrations"],
   ["approvals", "✓", "Approvals"],
   ["console", "▤", "SQL console"],

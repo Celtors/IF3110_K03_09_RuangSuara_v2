@@ -9,7 +9,7 @@ GROUP BY d.name;`;
 
 // The database comes from the shared Migration-workspace state (prop). This
 // component has no selector and no database state of its own.
-export function SqlConsole({ databaseId, canEdit }) {
+export function SqlConsole({ databaseId }) {
   const [sql, setSql] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState();
@@ -44,10 +44,8 @@ export function SqlConsole({ databaseId, canEdit }) {
 
   return (
     <>
-      <div className={canEdit ? "alert notice warning" : "alert notice"}>
-        {canEdit
-          ? "View + Edit: statements can change data and schema. They run immediately in their own transaction and are NOT recorded as migrations."
-          : "View only: only read-only queries (SELECT, WITH … SELECT) are allowed. The server enforces this."}
+      <div className="alert notice">
+        The SQL Console is read-only. Submit a migration to change data or schema.
       </div>
       <form className="panel" onSubmit={run}>
         <div className="panel-heading">

@@ -142,12 +142,23 @@ func run(ctx context.Context) error {
 
 func newRouter(service *migration.Service, assets string, registry *prometheus.Registry) (*gin.Engine, func(), error) {
 	router := gin.New()
+	router.UseRawPath = true
+	router.UnescapePathValues = false
 	router.Use(telemetry.HTTP, cors.Default())
 	platform, err := accesscontrol.SetupAccessControl(router)
 	if err != nil {
 		return nil, nil, err
 	}
+	initCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := databasemanagement.Initialize(initCtx, platform); err != nil {
+		if sqlDB, dbErr := platform.DB(); dbErr == nil {
+			_ = sqlDB.Close()
+		}
+		return nil, nil, errors.New("could not initialize database registrations")
+	}
 	provider := databasemanagement.NewProvider(platform)
+	databasemanagement.RegisterRoutes(router, platform, provider)
 	if service.Access == nil {
 		service.Access = migration.ApplicationAccess{Platform: platform}
 	}

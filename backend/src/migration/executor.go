@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"backend/internal/targetdb"
 	"backend/internal/telemetry"
 
 	"github.com/jackc/pgx/v5"
@@ -18,21 +19,23 @@ type executionResult struct {
 }
 
 // Record the transaction ID so interrupted commits can be checked later.
-func executePostgres(ctx context.Context, pool *pgxpool.Pool, sql, expectedTarget string, recordXID func(string, string) error, recordRows func(int64) error, replay *batchReplay) executionResult {
+func executePostgres(ctx context.Context, pool *pgxpool.Pool, platform rowQuerier, sql, expectedTarget string, recordXID func(string, string) error, recordRows func(int64) error, replay *batchReplay) executionResult {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return executionResult{Status: "failed", Message: "Target connection unavailable before SQL execution", FaultCode: "database_unavailable"}
 	}
 	defer rollback(ctx, tx)
-	if _, err = tx.Exec(ctx, `SET LOCAL statement_timeout = '30s'; SET LOCAL lock_timeout = '5s'; SET LOCAL idle_in_transaction_session_timeout = '40s'`); err != nil {
+	if _, err = tx.Exec(ctx, `SET LOCAL search_path=public; SET LOCAL statement_timeout = '30s'; SET LOCAL lock_timeout = '5s'; SET LOCAL idle_in_transaction_session_timeout = '40s'`); err != nil {
 		return executionResult{Status: "failed", Message: "Could not configure target transaction"}
 	}
 	// Inspect the connection that will actually execute SQL, not another pool
 	// member that might belong to a different server behind the same endpoint.
-	identity, err := targetIdentity(ctx, tx.Conn())
+	fingerprint, err := checkTarget(ctx, tx, platform)
 	if err != nil {
-		return executionResult{Status: "failed", Message: err.Error(), FaultCode: "database_unavailable"}
+		code, message := faultInfo(err)
+		return executionResult{Status: "failed", Message: message, FaultCode: code}
 	}
+	identity := targetdb.RecoveryIdentity(tx.Conn().Config(), fingerprint)
 	if expectedTarget != "" && identity != expectedTarget {
 		return executionResult{Status: "failed", Message: "The target differs from the original migration target", FaultCode: "conflict"}
 	}

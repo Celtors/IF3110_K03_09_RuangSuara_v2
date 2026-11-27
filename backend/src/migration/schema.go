@@ -2,6 +2,8 @@ package migration
 
 import (
 	"context"
+
+	"backend/internal/targetdb"
 	"regexp"
 	"strings"
 
@@ -146,14 +148,14 @@ func (s *Service) Schema(ctx context.Context, user, db, name string) (Schema, er
 	if err := s.authorize(ctx, user, db, View); err != nil {
 		return Schema{}, err
 	}
-	if !validName(name) || strings.HasPrefix(name, "pg_") || name == "information_schema" {
+	if !validName(name) || strings.HasPrefix(name, "pg_") || name == "information_schema" || name == targetdb.LedgerSchema {
 		return Schema{}, fault("invalid_input", "Invalid schema name")
 	}
 	pool, err := s.connection(ctx, db)
 	if err != nil {
 		return Schema{}, err
 	}
-	return inspectSchema(ctx, pool, name)
+	return inspectSchema(ctx, pool, s.Repository.Pool, name)
 }
 func (s *Service) Diff(ctx context.Context, user, db string, desired Schema) (Diff, error) {
 	db = canonicalDatabaseID(db)
@@ -181,5 +183,5 @@ func (s *Service) Plan(ctx context.Context, user, db, sql string) (Plan, error) 
 	if err != nil {
 		return Plan{}, err
 	}
-	return explainPostgres(ctx, pool, sql)
+	return explainPostgres(ctx, pool, s.Repository.Pool, sql)
 }

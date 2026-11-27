@@ -5,16 +5,14 @@ import (
 	"fmt"
 	"strings"
 
+	"backend/internal/targetdb"
+
 	pgquery "github.com/wasilibs/go-pgquery"
 )
 
 // Parse SQL and reject unsupported or unsafe statements.
 // Migration must control its own transactions and database settings.
 func parseSQL(sql string, plan bool) ([]map[string]any, error) {
-	if strings.Contains(strings.ToLower(sql), "dmp_batch") {
-		return nil, fault("unsupported_sql", "The internal batch ledger is reserved")
-	}
-
 	if len(sql) > 256*1024 || strings.TrimSpace(sql) == "" {
 		return nil, fault("invalid_sql", "SQL must contain 1 to 262144 bytes")
 	}
@@ -55,6 +53,9 @@ func checkNodes(value any, plan bool) error {
 	switch v := value.(type) {
 	case map[string]any:
 		for k, x := range v {
+			if (k == "removeType" || k == "renameType" || k == "objtype") && (x == "OBJECT_DATABASE" || x == "OBJECT_ROLE" || x == "OBJECT_TABLESPACE") {
+				return fault("unsupported_sql", "Server-level objects cannot be changed by migrations")
+			}
 			if k == "concurrent" && x == true {
 				return fault("unsupported_sql", "Concurrent index operations cannot run in a migration transaction")
 			}
@@ -75,8 +76,8 @@ func checkNodes(value any, plan bool) error {
 				if len(parts) > 0 {
 					name = parts[len(parts)-1]
 				}
-				if name == "set_config" || strings.HasPrefix(name, "pg_advisory_") || strings.HasPrefix(name, "dblink") || strings.HasPrefix(name, "lo_") {
-					return fault("unsupported_sql", "Session-changing and external-effect functions are unsupported")
+				if err := checkTargetFunction(x); err != nil {
+					return err
 				}
 				if plan {
 					safe := map[string]bool{"count": true, "sum": true, "avg": true, "min": true, "max": true, "lower": true, "upper": true, "length": true, "abs": true}
@@ -88,6 +89,10 @@ func checkNodes(value any, plan bool) error {
 			if err := checkNodes(x, plan); err != nil {
 				return err
 			}
+		}
+	case string:
+		if strings.EqualFold(v, targetdb.LedgerSchema) {
+			return fault("unsupported_sql", "The internal batch ledger is reserved")
 		}
 	case []any:
 		for _, x := range v {

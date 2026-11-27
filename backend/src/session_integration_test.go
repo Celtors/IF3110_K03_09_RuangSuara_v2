@@ -248,7 +248,17 @@ func TestSessionAndAdminIntegration(t *testing.T) {
 		wantStatus(send(http.MethodPatch, "/admin-control-panel/users", string(update), origin, csrf, admin), http.StatusOK)
 		wantStatus(send(http.MethodGet, me, "", "", "", newCookie), http.StatusUnauthorized)
 		fresh := login("alice")
-		login("alice")
+		current := login("alice")
 		wantStatus(send(http.MethodGet, me, "", "", "", fresh), http.StatusUnauthorized)
+
+		const replacement = "fixture-new-password"
+		update, _ = json.Marshal(map[string]string{"id": aliceID, "password": replacement})
+		wantStatus(send(http.MethodPatch, "/admin-control-panel/users", string(update), origin, csrf, admin), http.StatusOK)
+		wantStatus(send(http.MethodGet, me, "", "", "", current), http.StatusUnauthorized)
+		loginBody, err := json.Marshal(map[string]string{"username": "alice", "password": replacement})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus(send(http.MethodPost, "/session-manager/login", string(loginBody), origin, "", nil), http.StatusOK)
 	})
 }

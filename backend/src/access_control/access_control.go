@@ -55,7 +55,6 @@ func SetupAccessControl(r *gin.Engine) (*gorm.DB, error) {
 		return nil, errors.New("could not initialize session storage")
 	}
 
-	dbmanagement.RegisterRoutes(r, access_control_db)
 	admin := r.Group("/admin-control-panel", dbmanagement.PlatformAdminMiddlewares(access_control_db)...)
 	withPlatform := func(handler func(*gin.Context, *gorm.DB)) gin.HandlerFunc {
 		return func(c *gin.Context) {

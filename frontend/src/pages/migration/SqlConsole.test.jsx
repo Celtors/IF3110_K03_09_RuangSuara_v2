@@ -19,7 +19,7 @@ describe("SqlConsole", () => {
   it("posts the SQL to the shared database and renders the result", async () => {
     call.mockResolvedValue(rowsResult);
     const user = userEvent.setup();
-    render(<SqlConsole databaseId="db-1" canEdit />);
+    render(<SqlConsole databaseId="db-1" />);
     await user.type(screen.getByLabelText("SQL statement"), "SELECT 1");
     await user.click(screen.getByRole("button", { name: "Execute" }));
     expect(call).toHaveBeenCalledWith("/api/databases/db-1/query", "POST", { query: "SELECT 1" });
@@ -30,7 +30,7 @@ describe("SqlConsole", () => {
     let finish;
     call.mockResolvedValueOnce(rowsResult).mockReturnValueOnce(new Promise((r) => (finish = r)));
     const user = userEvent.setup();
-    render(<SqlConsole databaseId="db-1" canEdit />);
+    render(<SqlConsole databaseId="db-1" />);
     await user.type(screen.getByLabelText("SQL statement"), "SELECT 1");
     await user.click(screen.getByRole("button", { name: "Execute" }));
     await screen.findByText("Alice");
@@ -57,7 +57,7 @@ describe("SqlConsole", () => {
       rejectQuery = reject;
     }));
     const user = userEvent.setup();
-    render(<SqlConsole databaseId="db-1" canEdit />);
+    render(<SqlConsole databaseId="db-1" />);
     await user.type(screen.getByLabelText("SQL statement"), "SELEC");
     await user.click(screen.getByRole("button", { name: "Execute" }));
     expect(call).toHaveBeenCalledTimes(1);
@@ -79,7 +79,7 @@ describe("SqlConsole", () => {
   it("Clear empties the editor and the result", async () => {
     call.mockResolvedValue(rowsResult);
     const user = userEvent.setup();
-    render(<SqlConsole databaseId="db-1" canEdit />);
+    render(<SqlConsole databaseId="db-1" />);
     await user.type(screen.getByLabelText("SQL statement"), "SELECT 1");
     await user.click(screen.getByRole("button", { name: "Execute" }));
     await screen.findByText("Alice");
@@ -88,21 +88,19 @@ describe("SqlConsole", () => {
     expect(screen.queryByText("Alice")).not.toBeInTheDocument();
   });
   it("cannot execute without SQL or without a database", async () => {
-    const { rerender } = render(<SqlConsole databaseId="db-1" canEdit />);
+    const { rerender } = render(<SqlConsole databaseId="db-1" />);
     expect(screen.getByRole("button", { name: "Execute" })).toBeDisabled(); // empty editor
-    rerender(<SqlConsole databaseId="" canEdit />);
+    rerender(<SqlConsole databaseId="" />);
     await userEvent.setup().type(screen.getByLabelText("SQL statement"), "SELECT 1");
     expect(screen.getByRole("button", { name: "Execute" })).toBeDisabled();
     expect(call).not.toHaveBeenCalled();
   });
-  it("describes the access level", () => {
-    const { rerender } = render(<SqlConsole databaseId="db-1" canEdit={false} />);
-    expect(screen.getByText(/View only: only read-only queries/)).toBeInTheDocument();
-    rerender(<SqlConsole databaseId="db-1" canEdit />);
-    expect(screen.getByText(/NOT recorded as migrations/)).toBeInTheDocument();
+  it("explains the read-only policy", () => {
+    render(<SqlConsole databaseId="db-1" />);
+    expect(screen.getByText(/SQL Console is read-only/)).toBeInTheDocument();
   });
   it("has no database selector of its own", () => {
-    render(<SqlConsole databaseId="db-1" canEdit />);
+    render(<SqlConsole databaseId="db-1" />);
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
 });

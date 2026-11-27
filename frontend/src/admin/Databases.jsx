@@ -21,7 +21,7 @@ export default function Databases() {
   const edit=d=>{setEditing(d.id);setForm({name:d.name,host:d.host,port:d.port,database_name:d.database_name,username:d.username,password:'',ssl_mode:d.ssl_mode})}
   const test=async id=>{setError('');try{const r=await http.post('/api/admin/databases/'+id+'/test');setMessage(r.message);if(!r.success)setError(r.message)}catch(ex){setError(ex.message)}}
   const remove=async id=>{if(!window.confirm('Delete this database registration?'))return;try{await http.delete('/api/admin/databases/'+id);await load()}catch(e){setError(e.message)}}
-  return <><header className="page-head"><div><h1>Database connections</h1><p className="muted">Register PostgreSQL or MariaDB databases. Credentials are kept encrypted on the backend.</p></div></header>
+  return <><header className="page-head"><div><h1>Database connections</h1><p className="muted">Register PostgreSQL databases. Credentials are kept encrypted on the backend.</p></div></header>
     {error&&<p className="alert alert-error" role="alert">{error}</p>}{message&&<p role="status">{message}</p>}
     <form className="stack" onSubmit={save}><h2>{editing?'Edit connection':'Add connection'}</h2>
       {field('name','Connection name')}{field('host','Host')}{field('port','Port','number')}{field('database_name','Database name')}{field('username','Username')}{field('password',editing?'New password (leave blank to retain)':'Password','password')}

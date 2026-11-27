@@ -6,14 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
-	"strings"
-	"time"
 
 	fx "backend/access_control/effect"
 	acmodels "backend/access_control/models"
 	sessionmanager "backend/access_control/session_manager"
-	"backend/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -26,12 +22,12 @@ type Handler struct {
 }
 
 func PlatformAdminMiddlewares(platform *gorm.DB) []gin.HandlerFunc {
-	h := &Handler{platform: platform, provider: NewProvider(platform)}
+	h := &Handler{platform: platform}
 	return []gin.HandlerFunc{h.requireSession, h.requireAdmin}
 }
 
-func RegisterRoutes(r gin.IRouter, platform *gorm.DB) {
-	h := &Handler{platform: platform, provider: NewProvider(platform)}
+func RegisterRoutes(r gin.IRouter, platform *gorm.DB, provider *Provider) {
+	h := &Handler{platform: platform, provider: provider}
 	admin := r.Group("/api/admin/databases", h.requireSession, h.requireAdmin)
 	admin.POST("", h.createDatabase)
 	admin.GET("", h.listDatabases)
@@ -142,33 +138,6 @@ func effectivePermission(rows []policyGrant, edit bool) bool {
 	return fx.Grants(effects, edit)
 }
 
-func (h *Handler) createDatabase(c *gin.Context) {
-	var req CreateDatabaseRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, "INVALID_REQUEST", "Invalid database configuration")
-		return
-	}
-	if err := req.Validate(); err != nil {
-		fail(c, 400, "INVALID_REQUEST", err.Error())
-		return
-	}
-	mode := normalizeSSLMode(req.SSLMode)
-
-	ciphertext, err := encryptPassword(req.Password)
-	if err != nil {
-		fail(c, 500, "CREDENTIALS_NOT_CONFIGURED", "Secure credential encryption is not configured")
-		return
-	}
-	db := Database{Name: strings.TrimSpace(req.Name), Host: strings.TrimSpace(req.Host), Port: req.Port, DatabaseName: req.DatabaseName, Username: req.Username, PasswordCiphertext: ciphertext, SSLMode: mode}
-	if err := h.platform.WithContext(context.WithoutCancel(c.Request.Context())).Create(&db).Error; err != nil {
-		fail(c, 500, "DATABASE_CREATE_FAILED", "Could not register database")
-		return
-	}
-	ctx := telemetry.With(c.Request.Context(), telemetry.ID("database_id", db.ID.String()))
-	c.Request = c.Request.WithContext(ctx)
-	slog.InfoContext(ctx, "database.registered", "status", "succeeded")
-	c.JSON(http.StatusCreated, db)
-}
 func (h *Handler) listDatabases(c *gin.Context) {
 	var list []Database
 	if err := h.platform.WithContext(context.WithoutCancel(c.Request.Context())).Order("created_at DESC").Find(&list).Error; err != nil {
@@ -184,86 +153,6 @@ func (h *Handler) getDatabase(c *gin.Context) {
 		return
 	}
 	c.JSON(200, d)
-}
-func (h *Handler) updateDatabase(c *gin.Context) {
-	platform := h.platform.WithContext(context.WithoutCancel(c.Request.Context()))
-	var d Database
-	if err := platform.First(&d, "id = ?", c.Param("id")).Error; err != nil {
-		fail(c, 404, "DATABASE_NOT_FOUND", "Database not found")
-		return
-	}
-	var req UpdateDatabaseRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, 400, "INVALID_REQUEST", "Invalid update request")
-		return
-	}
-
-	if req.Name != "" {
-		d.Name = req.Name
-	}
-	if req.Host != "" {
-		if err := validateHost(req.Host); err != nil {
-			fail(c, 400, "INVALID_REQUEST", err.Error())
-			return
-		}
-		d.Host = req.Host
-	}
-	if req.Port != 0 {
-		if req.Port < 1 || req.Port > 65535 {
-			fail(c, 400, "INVALID_REQUEST", "Invalid port")
-			return
-		}
-		d.Port = req.Port
-	}
-	if req.DatabaseName != "" {
-		d.DatabaseName = req.DatabaseName
-	}
-	if req.Username != "" {
-		d.Username = req.Username
-	}
-	if req.SSLMode != "" {
-		d.SSLMode = req.SSLMode
-	}
-	if req.Password != "" {
-		enc, err := encryptPassword(req.Password)
-		if err != nil {
-			fail(c, 500, "CREDENTIALS_NOT_CONFIGURED", "Secure credential encryption is not configured")
-			return
-		}
-		d.PasswordCiphertext = enc
-	}
-	if err := platform.Save(&d).Error; err != nil {
-		fail(c, 500, "DATABASE_UPDATE_FAILED", "Could not update database")
-		return
-	}
-	slog.InfoContext(c.Request.Context(), "database.updated", "status", "succeeded")
-	c.JSON(200, d)
-}
-func (h *Handler) deleteDatabase(c *gin.Context) {
-	result := h.platform.WithContext(context.WithoutCancel(c.Request.Context())).Delete(&Database{}, "id = ?", c.Param("id"))
-	if result.Error != nil {
-		fail(c, 500, "DATABASE_DELETE_FAILED", "Could not delete database")
-		return
-	}
-	if result.RowsAffected == 0 {
-		fail(c, 404, "DATABASE_NOT_FOUND", "Database not found")
-		return
-	}
-	slog.InfoContext(c.Request.Context(), "database.deleted", "status", "succeeded")
-	c.Status(204)
-}
-func (h *Handler) testConnection(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 6*time.Second)
-	defer cancel()
-	db, err := h.provider.Target(ctx, c.Param("id"))
-	if err != nil {
-		slog.WarnContext(ctx, "database.connection_test", "status", "failed")
-		c.JSON(200, gin.H{"success": false, "message": "Connection failed. Verify target settings, credentials, network access, and TLS configuration."})
-		return
-	}
-	closeTarget(db)
-	slog.InfoContext(ctx, "database.connection_test", "status", "succeeded")
-	c.JSON(200, gin.H{"success": true, "message": "Connection successful"})
 }
 func (h *Handler) setPolicy(c *gin.Context) {
 	groupID, err := uuid.Parse(c.Param("groupID"))
@@ -294,137 +183,4 @@ func (h *Handler) setPolicy(c *gin.Context) {
 	}
 	slog.InfoContext(c.Request.Context(), "database.policy_saved", "status", "succeeded")
 	c.JSON(200, policy)
-}
-func (h *Handler) target(c *gin.Context) (*gorm.DB, bool) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 6*time.Second)
-	defer cancel()
-	db, err := h.provider.Target(ctx, c.Param("id"))
-	if err != nil {
-		fail(c, 502, "TARGET_UNAVAILABLE", "Target database is unavailable")
-		return nil, false
-	}
-	return db.WithContext(context.WithoutCancel(c.Request.Context())), true
-}
-func (h *Handler) schemas(c *gin.Context) {
-	db, ok := h.target(c)
-	if !ok {
-		return
-	}
-	defer closeTarget(db)
-	var rows []struct {
-		Name string `json:"name"`
-	}
-	query := "SELECT schema_name AS name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') AND schema_name NOT LIKE 'pg_toast%' ORDER BY schema_name"
-	err := db.Raw(query).Scan(&rows).Error
-	if err != nil {
-		fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect target schemas")
-		return
-	}
-	c.JSON(200, rows)
-}
-func (h *Handler) tables(c *gin.Context) {
-	db, ok := h.target(c)
-	if !ok {
-		return
-	}
-	defer closeTarget(db)
-	var rows []struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-	}
-	err := db.Raw("SELECT table_name AS name, table_type AS type FROM information_schema.tables WHERE table_schema = ? ORDER BY table_name", c.Param("schema")).Scan(&rows).Error
-	if err != nil {
-		fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect target tables")
-		return
-	}
-	c.JSON(200, rows)
-}
-func (h *Handler) columns(c *gin.Context)     { h.metadata(c, "columns") }
-func (h *Handler) constraints(c *gin.Context) { h.metadata(c, "constraints") }
-func (h *Handler) indexes(c *gin.Context)     { h.metadata(c, "indexes") }
-func (h *Handler) metadata(c *gin.Context, kind string) {
-	db, ok := h.target(c)
-	if !ok {
-		return
-	}
-	defer closeTarget(db)
-	schema, table := c.Param("schema"), c.Param("table")
-	var exists int64
-	if err := db.Raw("SELECT count(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?", schema, table).Scan(&exists).Error; err != nil {
-		fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect target table")
-		return
-	}
-	if exists == 0 {
-		fail(c, 404, "TABLE_NOT_FOUND", "Schema or table not found")
-		return
-	}
-	switch kind {
-	case "columns":
-		var rows []map[string]interface{}
-		query := "SELECT column_name, ordinal_position, data_type, udt_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position"
-		err := db.Raw(query, schema, table).Scan(&rows).Error
-		if err != nil {
-			fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect columns")
-			return
-		}
-		c.JSON(200, rows)
-	case "constraints":
-		var rows []map[string]interface{}
-		query := "SELECT tc.constraint_name, tc.constraint_type, kcu.column_name, ccu.table_schema AS foreign_table_schema, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name FROM information_schema.table_constraints tc LEFT JOIN information_schema.key_column_usage kcu ON tc.constraint_catalog=kcu.constraint_catalog AND tc.constraint_schema=kcu.constraint_schema AND tc.constraint_name=kcu.constraint_name AND tc.table_name=kcu.table_name LEFT JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_catalog=tc.constraint_catalog AND ccu.constraint_schema=tc.constraint_schema AND ccu.constraint_name=tc.constraint_name WHERE tc.table_schema=? AND tc.table_name=? ORDER BY tc.constraint_name"
-		err := db.Raw(query, schema, table).Scan(&rows).Error
-		if err != nil {
-			fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect constraints")
-			return
-		}
-		c.JSON(200, rows)
-	case "indexes":
-		var rows []map[string]interface{}
-		query := "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ? ORDER BY indexname"
-
-		err := db.Raw(query, schema, table).Scan(&rows).Error
-		if err != nil {
-			fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect indexes")
-			return
-		}
-		c.JSON(200, rows)
-	}
-}
-
-func (h *Handler) rows(c *gin.Context) {
-	db, ok := h.target(c)
-	if !ok {
-		return
-	}
-	defer closeTarget(db)
-	schema, table := c.Param("schema"), c.Param("table")
-	var exists int64
-	if err := db.Raw("SELECT count(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?", schema, table).Scan(&exists).Error; err != nil {
-		fail(c, 502, "INTROSPECTION_FAILED", "Could not inspect target table")
-		return
-	}
-	if exists == 0 {
-		fail(c, 404, "TABLE_NOT_FOUND", "Schema or table not found")
-		return
-	}
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	if limit < 1 {
-		limit = 1
-	}
-	if limit > 200 {
-		limit = 200
-	}
-	if offset < 0 {
-		fail(c, 400, "INVALID_PAGINATION", "offset must be zero or greater")
-		return
-	}
-	quote := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
-
-	query := fmt.Sprintf("SELECT * FROM %s.%s LIMIT ? OFFSET ?", quote(schema), quote(table))
-	var rows []map[string]interface{}
-	if err := db.Raw(query, limit, offset).Scan(&rows).Error; err != nil {
-		fail(c, 502, "QUERY_FAILED", "Could not read target rows")
-		return
-	}
-	c.JSON(200, gin.H{"limit": limit, "offset": offset, "rows": rows})
 }

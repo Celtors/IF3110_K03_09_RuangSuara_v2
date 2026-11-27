@@ -244,12 +244,15 @@ func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func()
 	return c, release, nil
 }
 
-func (r *Repository) save(ctx context.Context, db, id, user string, d Draft) (Migration, error) {
+func (r *Repository) save(ctx context.Context, db, id, user string, d Draft, authorize func() error) (Migration, error) {
 	c, release, err := r.lock(ctx, db)
 	if err != nil {
 		return Migration{}, err
 	}
 	defer release()
+	if err := authorize(); err != nil {
+		return Migration{}, err
+	}
 
 	if id == "" {
 		id := newID()

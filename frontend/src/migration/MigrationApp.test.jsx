@@ -608,7 +608,7 @@ describe("Shared database context", () => {
     const user = userEvent.setup();
 
     expect(
-      await screen.findByText(/View only: only read-only queries/),
+      await screen.findByText(/The SQL Console is read-only/),
     ).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("SQL statement"), "SELECT 1");
@@ -623,7 +623,7 @@ describe("Shared database context", () => {
     expect(screen.queryByText("from db-2")).not.toBeInTheDocument();
 
     expect(
-      screen.getByText(/NOT recorded as migrations/),
+      screen.getByText(/The SQL Console is read-only/),
     ).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("SQL statement"), "SELECT 2");

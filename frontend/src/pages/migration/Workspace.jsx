@@ -4,6 +4,7 @@ import { HistoryView } from "./HistoryView.jsx";
 import { QueryPlan } from "./QueryPlan.jsx";
 import { SqlConsole } from "./SqlConsole.jsx";
 import { ErrorBox } from "../../migration/components.jsx";
+import { DatabaseViewer } from "./DatabaseViewer.jsx";
 import { ApprovalInbox } from "./ApprovalInbox.jsx";
 
 // Read-only reminder; NOT a selector. Selection happens only in Overview.
@@ -91,11 +92,17 @@ export function Workspace({
         <ApprovalInbox approvals={approvals} databases={databases.items} />
       </div>
 
+      {tab === "viewer" && (
+        <div {...panel("viewer")}>
+          <DatabaseViewer databaseId={databaseId} onDatabaseChange={onDatabaseChange} databases={databases} selected={selected} />
+        </div>
+      )}
+
       <div {...panel("console")}>
         {usable ? (
           <>
             <DatabaseContext selected={selected} onChangeRequest={toOverview} />
-            <SqlConsole key={databaseId} databaseId={databaseId} canEdit={selected.permission === "ViewEdit"} />
+            <SqlConsole key={databaseId} databaseId={databaseId} />
           </>
         ) : (
           unavailable

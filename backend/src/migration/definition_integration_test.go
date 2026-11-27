@@ -48,11 +48,13 @@ INSERT INTO dmp_migration.attempts
     ('unknown','unresolved','legacy','SELECT 5','edit','unknown',NULL,'42','original-target'),
     ('retry-failed','retry','legacy-retry','SELECT 6','edit','failed',NULL,'43','original-target');`
 
-// MIGRATION_TEST_DSN must point to a disposable PostgreSQL database without migration storage.
+// MIGRATION_TEST_DSN is a fresh disposable platform database. The console
+// target fixture supplies a separate physical database for execution.
 func TestMigrationDefinitionPersistence(t *testing.T) {
 	dsn := os.Getenv("MIGRATION_TEST_DSN")
-	if dsn == "" {
-		t.Skip("set MIGRATION_TEST_DSN to a disposable PostgreSQL database")
+	targetDSN := os.Getenv("SQL_CONSOLE_TEST_TARGET_DSN")
+	if dsn == "" || targetDSN == "" {
+		t.Skip("set MIGRATION_TEST_DSN and SQL_CONSOLE_TEST_TARGET_DSN to separate disposable PostgreSQL databases")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -61,6 +63,11 @@ func TestMigrationDefinitionPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+	target, err := pgxpool.New(ctx, targetDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
 
 	var schemaExists bool
 	if err := pool.QueryRow(ctx, `SELECT to_regnamespace('dmp_migration') IS NOT NULL`).Scan(&schemaExists); err != nil {
@@ -113,7 +120,7 @@ func TestMigrationDefinitionPersistence(t *testing.T) {
 	service := &Service{
 		Repository:  repo,
 		Access:      fakeAccess{perms: map[string]Permission{"edit": Edit, "view": View}},
-		Connections: fakeConnections{pool: pool},
+		Connections: fakeConnections{pool: target},
 	}
 	const db = "slice1"
 	if _, err := service.Save(ctx, "edit", db, "", Draft{}); faultCode(err) != "invalid_input" {

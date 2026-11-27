@@ -16,7 +16,10 @@ import (
 
 func testOperationTransitions(t *testing.T, ctx context.Context, service *Service) {
 	const db = "slice2-transitions"
-	pool := service.Repository.Pool
+	pool, err := service.Connections.PostgreSQL(ctx, "slice2")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `
  CREATE TABLE slice2_items (id integer PRIMARY KEY);
  CREATE TABLE slice2_refs (id integer REFERENCES slice2_items(id));
@@ -326,7 +329,10 @@ func beginInterruptedAttempt(t *testing.T, ctx context.Context, service *Service
 // Leave platform finalization pending so reconciliation has to read the actual target outcome.
 func runInterruptedSQL(t *testing.T, ctx context.Context, service *Service, attempt Attempt) pgx.Tx {
 	t.Helper()
-	pool := service.Repository.Pool
+	pool, err := service.Connections.PostgreSQL(ctx, attempt.DatabaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -341,7 +347,7 @@ func runInterruptedSQL(t *testing.T, ctx context.Context, service *Service, atte
 	if err := tx.QueryRow(ctx, "SELECT pg_catalog.pg_current_xact_id()::text").Scan(&xid); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, "UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1", attempt.ID, xid, identity); err != nil {
+	if _, err := service.Repository.Pool.Exec(ctx, "UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1", attempt.ID, xid, identity); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, attempt.SQL); err != nil {

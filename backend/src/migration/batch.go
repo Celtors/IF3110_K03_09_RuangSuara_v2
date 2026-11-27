@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"backend/internal/targetdb"
 	"backend/internal/telemetry"
 
 	"github.com/jackc/pgx/v5"
@@ -468,13 +469,11 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 			_ = target.Conn().Close(clean)
 		}
 	}()
-	if err = ensureTargetIsNotPlatform(ctx, target, c); err != nil {
-		return pause("unresolved", err)
-	}
-	identity, err := targetIdentity(ctx, target.Conn())
+	fingerprint, err := checkTarget(ctx, target, c)
 	if err != nil {
 		return pause("unresolved", err)
 	}
+	identity := targetdb.RecoveryIdentity(target.Conn().Config(), fingerprint)
 	if p.Identity != "" && p.Identity != identity {
 		return pause("unresolved", fault("indeterminate", "Target identity changed"))
 	}

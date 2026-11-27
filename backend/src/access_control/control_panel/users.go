@@ -135,10 +135,18 @@ func UpdateUserRequest(c *gin.Context, db *gorm.DB) {
 		if result.RowsAffected == 0 {
 			return gorm.ErrRecordNotFound
 		}
+		revokeReason := ""
 		if updatedUserModel.Status == "Inactive" {
-			if err := models.RevokeUserSessions(tx, userQuery.ID, "account_deactivated"); err != nil {
+			revokeReason = "account_deactivated"
+		} else if updatedUserModel.PasswordHash != "" {
+			revokeReason = "password_changed"
+		}
+		if revokeReason != "" {
+			if err := models.RevokeUserSessions(tx, userQuery.ID, revokeReason); err != nil {
 				return err
 			}
+		}
+		if updatedUserModel.Status == "Inactive" {
 			return tx.Where("leader_id = ?", userQuery.ID).Delete(&models.GroupLeader{}).Error
 		}
 		return nil

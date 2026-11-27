@@ -2,13 +2,12 @@ package migration
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"backend/internal/targetdb"
 	"backend/internal/telemetry"
 
 	"github.com/jackc/pgx/v5"
@@ -51,15 +50,14 @@ func (s *Service) authorize(ctx context.Context, user, db string, want Permissio
 // This identifies configured endpoints, without persisting credentials. A
 // registration retarget must never make recovery inspect an unrelated XID.
 func targetIdentity(ctx context.Context, conn *pgx.Conn) (string, error) {
-	c := conn.Config()
-	var cluster, database string
-	if err := conn.QueryRow(ctx, `SELECT system_identifier::text, (SELECT oid::text FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()) FROM pg_catalog.pg_control_system()`).Scan(&cluster, &database); err != nil {
+	fingerprint, err := targetdb.Fingerprint(ctx, conn)
+	if err != nil {
 		if postgresCode(err) == "42501" {
 			return "", fault("database_unavailable", "Target identity inspection is not permitted; an administrator must check EXECUTE on pg_catalog.pg_control_system()")
 		}
 		return "", fault("database_unavailable", "Target identity could not be verified")
 	}
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%s", c.Host, c.Port, c.Database, cluster, database)))), nil
+	return targetdb.RecoveryIdentity(conn.Config(), fingerprint), nil
 }
 func (s *Service) connection(ctx context.Context, db string) (*pgxpool.Pool, error) {
 	if s.Connections == nil {
@@ -68,6 +66,12 @@ func (s *Service) connection(ctx context.Context, db string) (*pgxpool.Pool, err
 	pool, err := s.Connections.PostgreSQL(ctx, db)
 	if errors.Is(err, ErrDatabaseNotFound) {
 		return nil, fault("not_found", "Managed database not found")
+	}
+	if errors.Is(err, targetdb.ErrPlatform) {
+		return nil, fault("forbidden", err.Error())
+	}
+	if errors.Is(err, targetdb.ErrChanged) {
+		return nil, fault("conflict", err.Error())
 	}
 	if err != nil || pool == nil {
 		return nil, fault("database_unavailable", "Target database connection unavailable")
@@ -162,7 +166,7 @@ func (s *Service) Save(ctx context.Context, user, db, id string, d Draft) (Migra
 	if _, err := s.connection(ctx, db); err != nil {
 		return Migration{}, err
 	}
-	m, err := s.Repository.save(ctx, db, id, user, d)
+	m, err := s.Repository.save(ctx, db, id, user, d, func() error { return s.authorize(ctx, user, db, Edit) })
 	if err == nil {
 		action := "updated"
 		if id == "" {
@@ -344,7 +348,7 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		} else if operation == OperationApply && definition.State == "failed" {
 			telemetry.RecordRetry("failed_apply")
 		}
-		result = executePostgres(ctx, pool, attempt.SQL, expectedTarget, func(xid, identity string) error {
+		result = executePostgres(ctx, pool, platformConn, attempt.SQL, expectedTarget, func(xid, identity string) error {
 			if err := s.authorize(ctx, user, db, Edit); err != nil {
 				return err
 			}

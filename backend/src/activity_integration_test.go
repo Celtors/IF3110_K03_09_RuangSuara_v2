@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -94,7 +95,7 @@ func TestActivityLoggingThroughWorker(t *testing.T) {
 	t.Setenv("PLATFORM_DATABASE_DSN", platformDSN)
 	t.Setenv("DB_CREDENTIALS_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("ALLOW_PRIVATE_TARGETS", "true")
-	t.Setenv("TARGET_DB_ALLOWED_HOSTS", target.Host)
+	t.Setenv("TARGET_DB_ALLOWED_HOSTS", target.Host+","+config.ConnConfig.Host)
 	t.Setenv("MIGRATION_FORBID_SELF_APPROVAL", "false")
 	gin.SetMode(gin.TestMode)
 	service := &migration.Service{Repository: repository}
@@ -198,6 +199,9 @@ func TestActivityLoggingThroughWorker(t *testing.T) {
 		jobs[i].approval = approval.Header().Get("X-Correlation-ID")
 		jobs[i].id = change.Request.ID
 	}
+	adminPath := "/api/admin/databases/" + database.ID
+	request("PATCH", adminPath, map[string]string{"database_name": target.Database + "_other"}, http.StatusConflict)
+	request("DELETE", adminPath, nil, http.StatusConflict)
 
 	// Reload through new storage and provider connections after the HTTP contexts have ended.
 	workerPool, err := pgxpool.NewWithConfig(ctx, config.Copy())
@@ -427,6 +431,103 @@ func TestActivityLoggingThroughWorker(t *testing.T) {
 			t.Fatal("statement, transaction and job records are out of order")
 		}
 	}
+
+	t.Run("registration protection and viewer", func(t *testing.T) {
+		own := config.ConnConfig
+		ownPassword := own.Password
+		if ownPassword == "" {
+			ownPassword = targetPassword
+		}
+		registration := map[string]any{"name": "isolated registration", "host": own.Host, "port": own.Port,
+			"database_name": own.Database, "username": own.User, "password": ownPassword, "ssl_mode": "disable"}
+		request("POST", "/api/admin/databases", registration, http.StatusForbidden)
+		registration["host"], registration["port"], registration["database_name"] = target.Host, target.Port, target.Database
+		registration["username"], registration["password"] = target.User, targetPassword
+		if _, err := pool.Exec(ctx, "UPDATE databases SET physical_fingerprint=NULL WHERE id=$1", database.ID); err != nil {
+			t.Fatal(err)
+		}
+		legacy := request("POST", "/api/admin/databases", registration, http.StatusConflict)
+		if !strings.Contains(legacy.Body.String(), "Test Connection") {
+			t.Fatal("legacy history did not reserve its unbound physical target")
+		}
+		var probe struct{ Success bool }
+		read(request("POST", adminPath+"/test", nil, http.StatusOK), &probe)
+		if !probe.Success {
+			t.Fatal("legacy target did not bind to its recorded physical database")
+		}
+		if target.Host == "127.0.0.1" {
+			t.Setenv("TARGET_DB_ALLOWED_HOSTS", target.Host+","+own.Host+",localhost")
+			registration["host"] = "localhost"
+		}
+		request("POST", "/api/admin/databases", registration, http.StatusConflict)
+		registration["ssl_mode"] = "invalid"
+		request("POST", "/api/admin/databases", registration, http.StatusBadRequest)
+		request("PATCH", adminPath, map[string]string{"ssl_mode": "invalid"}, http.StatusBadRequest)
+		request("PATCH", adminPath, map[string]string{"database_name": target.Database + "_other"}, http.StatusConflict)
+		request("DELETE", adminPath, nil, http.StatusConflict)
+		request("PATCH", adminPath, map[string]string{"password": targetPassword}, http.StatusOK)
+
+		targetPool, err := pgxpool.New(ctx, targetDSN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer targetPool.Close()
+		schema := "viewer / reports"
+		table := "values? @+\""
+		namespace := pgx.Identifier{schema}.Sanitize()
+		parent := pgx.Identifier{schema, "parent"}.Sanitize()
+		object := pgx.Identifier{schema, table}.Sanitize()
+		_, err = targetPool.Exec(ctx, "CREATE SCHEMA "+namespace+"; CREATE TABLE "+parent+` (a int, b int, PRIMARY KEY (a,b));
+			INSERT INTO `+parent+` VALUES (1,2); CREATE TABLE `+object+` (
+			id bigint PRIMARY KEY, amount numeric, note text, alpha int, beta int,
+			CONSTRAINT viewer_pair FOREIGN KEY (beta,alpha) REFERENCES `+parent+` (a,b));
+			INSERT INTO `+object+` VALUES (9223372036854775807,12345678901234567890.123456789,NULL,2,1), (17,0,'',2,1)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		view := prefix + "/schemas/" + url.PathEscape(schema) + "/tables/" + url.PathEscape(table)
+		var columns []struct {
+			Position int `json:"ordinal_position"`
+		}
+		read(request("GET", view+"/columns", nil, http.StatusOK), &columns)
+		if len(columns) != 5 || columns[0].Position != 1 || columns[4].Position != 5 {
+			t.Fatalf("unexpected column ordering: %+v", columns)
+		}
+		const auditor = "22222222-2222-4222-8222-000000000004"
+		request("POST", "/session-manager/login", map[string]string{"username": "carol", "password": "password123"}, http.StatusOK)
+		request("GET", view+"/rows", nil, http.StatusForbidden)
+		if _, err := pool.Exec(ctx, `INSERT INTO group_policies (group_id,database_id,effect)
+			VALUES ($1,$2,'ViewOnly')`, auditor, database.ID); err != nil {
+			t.Fatal(err)
+		}
+		var constraints []map[string]string
+		read(request("GET", view+"/constraints", nil, http.StatusOK), &constraints)
+		var pairs []string
+		for _, constraint := range constraints {
+			if constraint["constraint_name"] == "viewer_pair" {
+				pairs = append(pairs, constraint["column_name"]+":"+constraint["foreign_column_name"])
+			}
+		}
+		if strings.Join(pairs, ",") != "beta:a,alpha:b" {
+			t.Fatalf("unexpected foreign key pairs: %v", pairs)
+		}
+		var page struct {
+			Rows    []map[string]*string
+			HasMore bool `json:"has_more"`
+		}
+		read(request("GET", view+"/rows?limit=1&offset=0", nil, http.StatusOK), &page)
+		if len(page.Rows) != 1 || !page.HasMore || page.Rows[0]["note"] == nil || *page.Rows[0]["note"] != "" {
+			t.Fatalf("expected first page with empty text and a successor: %+v", page)
+		}
+		read(request("GET", view+"/rows?limit=1&offset=1", nil, http.StatusOK), &page)
+		if len(page.Rows) != 1 || page.HasMore || page.Rows[0]["id"] == nil || *page.Rows[0]["id"] != "9223372036854775807" ||
+			page.Rows[0]["amount"] == nil || *page.Rows[0]["amount"] != "12345678901234567890.123456789" || page.Rows[0]["note"] != nil {
+			t.Fatalf("expected final page with exact values and NULL: %+v", page)
+		}
+		request("GET", view+"/indexes", nil, http.StatusOK)
+		request("GET", prefix+"/schemas/public/tables/viewer_absent/rows", nil, http.StatusNotFound)
+		request("GET", prefix+"/schemas/dmp_batch/tables", nil, http.StatusForbidden)
+	})
 }
 
 func testPGXTraceAfterInvalidatedStatement(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {

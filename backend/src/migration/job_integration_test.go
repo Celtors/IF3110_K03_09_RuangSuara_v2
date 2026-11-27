@@ -515,7 +515,7 @@ func TestAsyncRecoveryAfterAccessRevoked(t *testing.T) {
 		if e = repo.linkAttempt(ctx, id, attempt.ID); e != nil {
 			t.Fatal(e)
 		}
-		result := executePostgres(ctx, h.target, up, "", func(xid, identity string) error {
+		result := executePostgres(ctx, h.target, conn, up, "", func(xid, identity string) error {
 			_, e := conn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3 WHERE id=$1`, attempt.ID, xid, identity)
 			return e
 		}, func(int64) error { return nil }, nil)
