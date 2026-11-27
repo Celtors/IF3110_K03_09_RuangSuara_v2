@@ -49,7 +49,7 @@ export function useChangeRequestList(databaseId, migrationId = "") {
 }
 
 // One request with approvals and audit events; refreshes itself while it can still change.
-export function useChangeRequest(databaseId, requestId) {
+export function useChangeRequest(databaseId, requestId, { poll = true, revision = "" } = {}) {
   const scope = `${databaseId}|${requestId}`;
   const [tick, setTick] = useState(0);
   const [state, setState] = useState({ scope: "", request: undefined, error: "" });
@@ -67,9 +67,9 @@ export function useChangeRequest(databaseId, requestId) {
     return () => {
       active = false;
     };
-  }, [databaseId, requestId, scope, tick]);
+  }, [databaseId, requestId, scope, tick, revision]);
   const current = state.scope === scope ? state : { request: undefined, error: "" };
-  const live = Boolean(current.request) && isLive(current.request.status);
+  const live = poll && Boolean(current.request) && isLive(current.request.status);
   useEffect(() => {
     if (!live) return;
     const timer = setInterval(() => setTick((n) => n + 1), POLL_MS);

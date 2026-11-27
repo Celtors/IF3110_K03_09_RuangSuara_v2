@@ -14,34 +14,37 @@ export const OPERATION_LABEL = {
   forward: "Roll forward",
 };
 
-export const STATUS_LABEL = {
-  pending_review: "Pending review",
-  approved: "Approved",
-  queued: "In queue",
-  running: "Running",
-  succeeded: "Success",
-  failed: "Failed",
-  unknown: "Unresolved",
-  rejected: "Rejected",
-  cancelled: "Cancelled",
+// Both the approval API and job API use this vocabulary (legacy aliases included).
+export const STATUS = {
+  pending_review: { label: "Pending review", badge: "pending_review", live: true, open: true },
+  approved: { label: "Approved", badge: "approved", live: true, open: true },
+  queued: { label: "In queue", badge: "queued", live: true, open: true },
+  running: { label: "Running", badge: "running", live: true, open: true, blocks: true },
+  completed: { label: "Completed", badge: "succeeded" },
+  succeeded: { label: "Success", badge: "succeeded" },
+  failed: { label: "Failed", badge: "failed", recoverable: true },
+  partial: { label: "Partial", badge: "unknown", open: true, blocks: true, recoverable: true },
+  unresolved: { label: "Unresolved (awaiting recovery)", badge: "unknown", open: true, blocks: true },
+  unknown: { label: "Unresolved", badge: "unknown", open: true, blocks: true },
+  reverted: { label: "Reverted", badge: "succeeded" },
+  partially_reverted: { label: "Partially reverted", badge: "unknown", open: true, blocks: true },
+  rejected: { label: "Rejected", badge: "rejected" },
+  cancelled: { label: "Cancelled", badge: "cancelled" },
 };
-
-// Requests that still block a new request for the same migration and operation.
-const OPEN = ["pending_review", "approved", "queued", "running", "unknown"];
-// Requests whose status can still change by itself, so screens keep refreshing.
-const LIVE = ["pending_review", "approved", "queued", "running", "unknown"];
-export const isOpen = (status) => OPEN.includes(status);
-export const isLive = (status) => LIVE.includes(status);
+export const STATUS_LABEL = Object.fromEntries(Object.entries(STATUS).map(([key, value]) => [key, value.label]));
+export const isOpen = (status) => Boolean(STATUS[status]?.open);
+export const isLive = (status) => Boolean(STATUS[status]?.live);
 
 const requestsBase = (database) => `${databaseBase(database)}/change-requests`;
 const requestPath = (database, id) => `${requestsBase(database)}/${encodeURIComponent(id)}`;
 
-export async function submitChangeRequest(database, migrationId, operation) {
+export async function submitChangeRequest(database, migrationId, operation, options = {}) {
   const data = await apiWithSessionRetry(requestsBase(database), "POST", {
     migration_id: migrationId,
     operation,
+    ...options,
   });
-  return data.change_request;
+  return { ...data.change_request, job_id: data.job_id ?? data.change_request?.id };
 }
 
 export async function listChangeRequests(database, { migrationId = "", status = "", limit = 0 } = {}) {

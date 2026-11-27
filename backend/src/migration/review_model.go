@@ -56,6 +56,8 @@ type RequestEvent struct {
 
 
 type ChangeRequest struct {
+	Batch                   *BatchSpec `json:"batch,omitempty"`
+	CompensationSQLHash     string     `json:"compensation_sql_hash,omitempty"`
 	submissionCorrelationID string
 	ID                      string        `json:"id"`
 	DatabaseID              string        `json:"database_id"`
@@ -81,8 +83,11 @@ type ChangeRequest struct {
 }
 
 type SubmitRequest struct {
-	MigrationID string    `json:"migration_id"`
-	Operation   Operation `json:"operation"`
+	BatchAttribute string    `json:"batch_attribute,omitempty"`
+	BatchSize      int       `json:"batch_size,omitempty"`
+	Mode           string    `json:"mode,omitempty"`
+	MigrationID    string    `json:"migration_id"`
+	Operation      Operation `json:"operation"`
 }
 
 
@@ -101,6 +106,7 @@ type RequiredApprover struct {
 
 
 type QueuedRequest struct {
+	startedAt               time.Time
 	submissionCorrelationID string
 	ID                      string
 	DatabaseID              string

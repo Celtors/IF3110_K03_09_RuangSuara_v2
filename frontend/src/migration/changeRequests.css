@@ -249,3 +249,7 @@
   gap: 0.4rem;
   font-size: 0.875rem;
 }
+
+/* Job identifiers may be long; keep the existing panel responsive. */
+.migration-app .job-id { overflow-wrap: anywhere; }
+.migration-app .job-progress { width: 100%; accent-color: var(--accent); }

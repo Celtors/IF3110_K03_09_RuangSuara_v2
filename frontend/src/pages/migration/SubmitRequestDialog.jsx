@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Modal from "../../components/Modal.jsx";
 import { requestHref } from "../../migration/api.js";
 import { OPERATION_LABEL, submitChangeRequest } from "../../migration/changeRequests.js";
 import { SQL } from "../../migration/components.jsx";
+import { batchErrors, possibleBlockers } from "../../migration/jobs.js";
+import { BlockingJobs } from "./BlockingJobs.jsx";
 import { navigate } from "../../migration/router.js";
 
 const COPY = {
@@ -31,16 +33,38 @@ const COPY = {
 export function SubmitRequestDialog({ databaseId, migration, operation, onClose, onSubmitted }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [mode, setMode] = useState("normal");
+  const [attribute, setAttribute] = useState("id");
+  const [size, setSize] = useState("1000");
+  const [attempted, setAttempted] = useState(false);
+  const [batchError, setBatchError] = useState("");
+  const [blockers, setBlockers] = useState([]);
+  const inFlight = useRef(false);
+  const batch = operation === "apply" && mode === "batch";
+  const invalid = batchErrors(attribute, size);
   const copy = COPY[operation];
   async function submit() {
-    setBusy(true);
+    if (inFlight.current) return;
+    setAttempted(true);
     setError("");
+    setBatchError("");
+    setBlockers([]);
+    if (batch && (invalid.attribute || invalid.size)) return;
+    inFlight.current = true;
+    setBusy(true);
     try {
-      const request = await submitChangeRequest(databaseId, migration.id, operation);
+      const request = await submitChangeRequest(databaseId, migration.id, operation, batch
+        ? { mode: "batch", batch_attribute: attribute.trim(), batch_size: Number(size) }
+        : { mode: "normal" });
       if (onSubmitted) onSubmitted(request);
-      else navigate(requestHref(databaseId, request.id));
+      else navigate(requestHref(databaseId, request.job_id));
     } catch (e) {
-      setError(e.message);
+      if (batch && e.code === "invalid_input") setBatchError(e.message);
+      else setError(e.message);
+      if (e.code === "conflict" || e.code === "indeterminate") {
+        try { setBlockers(await possibleBlockers(databaseId)); } catch { /* original error remains visible */ }
+      }
+      inFlight.current = false;
       setBusy(false);
     }
   }
@@ -49,7 +73,27 @@ export function SubmitRequestDialog({ databaseId, migration, operation, onClose,
       <p>
         {copy.lead} database <strong>{databaseId}</strong>. {OPERATION_LABEL[operation]} requests do not run immediately.
       </p>
+      {operation === "apply" && (
+        <div className="stack">
+          <label htmlFor="execution-mode">Execution mode</label>
+          <select id="execution-mode" className="input" value={mode} disabled={busy} onChange={(e) => { setMode(e.target.value); setBatchError(""); }}>
+            <option value="normal">Normal</option>
+            <option value="batch">Batch</option>
+          </select>
+          {batch && <>
+            <p>Batch mode requires a single integer-column UPDATE with an explicit WHERE cursor = ANY($1::bigint[]) predicate. The cursor must be a single integer GENERATED ALWAYS identity primary key.</p>
+            <label htmlFor="batch-attribute">Batch attribute</label>
+            <input id="batch-attribute" className="input" value={attribute} disabled={busy} aria-invalid={Boolean((attempted && invalid.attribute) || batchError)} aria-describedby="batch-attribute-error batch-server-error" onChange={(e) => { setAttribute(e.target.value); setBatchError(""); }} />
+            <span id="batch-attribute-error" role={attempted && invalid.attribute ? "alert" : undefined}>{attempted && invalid.attribute}</span>
+            <label htmlFor="batch-size">Batch size</label>
+            <input id="batch-size" className="input" type="number" min="1" max="10000" step="1" value={size} disabled={busy} aria-invalid={Boolean((attempted && invalid.size) || batchError)} aria-describedby="batch-size-error batch-server-error" onChange={(e) => { setSize(e.target.value); setBatchError(""); }} />
+            <span id="batch-size-error" role={attempted && invalid.size ? "alert" : undefined}>{attempted && invalid.size}</span>
+            <div id="batch-server-error">{batchError && <p className="alert notice error" role="alert">{batchError}</p>}</div>
+          </>}
+        </div>
+      )}
       <SQL value={migration[copy.field] ?? ""} />
+      {batch && migration.sql_down?.trim() && <details><summary>SQL down (for eligible compensation)</summary><SQL value={migration.sql_down} /></details>}
       <ol className="cr-explain">
         <li>Every group with access to this database reviews and approves; only the group’s leader can decide for it.</li>
         <li>After the last approval the request joins the queue for this database.</li>
@@ -60,6 +104,7 @@ export function SubmitRequestDialog({ databaseId, migration, operation, onClose,
           {error}
         </div>
       )}
+      <BlockingJobs databaseId={databaseId} jobs={blockers} />
       <div className="actions">
         <button type="button" className="btn" disabled={busy} onClick={onClose}>
           Cancel

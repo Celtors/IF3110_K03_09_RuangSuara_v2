@@ -29,7 +29,7 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'dmp_migration.definitions'::regclass
-          AND conname = 'definitions_version_required'
+            AND conname = 'definitions_version_required'
     ) THEN
         -- The M1 state/version equivalence would reject a reserved version on failure.
         ALTER TABLE dmp_migration.definitions
@@ -46,7 +46,7 @@ BEGIN
         SET irreversible = true,
             irreversible_reason = 'Milestone 1 migration has no recorded SQL down'
         WHERE d.state <> 'draft'
-           OR EXISTS (SELECT 1 FROM dmp_migration.attempts a WHERE a.migration_id = d.id);
+            OR EXISTS (SELECT 1 FROM dmp_migration.attempts a WHERE a.migration_id = d.id);
     END IF;
 END $$;
 
@@ -66,7 +66,7 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'dmp_migration.attempts'::regclass
-          AND conname = 'attempts_reversal_check'
+            AND conname = 'attempts_reversal_check'
     ) THEN
         ALTER TABLE dmp_migration.attempts
             ADD COLUMN operation text NOT NULL DEFAULT 'apply'
@@ -86,3 +86,6 @@ ON dmp_migration.attempts(migration_id) WHERE status = 'succeeded' AND operation
 CREATE INDEX IF NOT EXISTS definitions_database ON dmp_migration.definitions(database_id,created_at);
 
 CREATE INDEX IF NOT EXISTS attempts_migration ON dmp_migration.attempts(migration_id,started_at DESC,id DESC);
+
+-- Staged before target COMMIT; visible as committed only for succeeded attempts.
+ALTER TABLE dmp_migration.attempts ADD COLUMN IF NOT EXISTS prepared_rows bigint;

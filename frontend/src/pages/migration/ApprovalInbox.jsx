@@ -1,7 +1,8 @@
 import { date, requestHref, viewerId } from "../../migration/api.js";
 import { OPERATION_LABEL } from "../../migration/changeRequests.js";
 import { ErrorBox } from "../../migration/components.jsx";
-import { Who, namesFrom } from "./ChangeRequestParts.jsx";
+import { Who } from "./ChangeRequestParts.jsx";
+import { namesFrom } from "./NamesFrom.jsx";
 
 // Requests, across every database, that wait on a group the signed-in user belongs to.
 // `approvals` comes from usePendingApprovals in MigrationApp, which also drives the sidebar count.
