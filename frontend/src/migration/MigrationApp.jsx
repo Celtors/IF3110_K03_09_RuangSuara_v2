@@ -26,7 +26,7 @@ const tabTitles = {
   ],
   approvals: [
     "Approvals",
-    "Changes waiting for your decision as a group leader, across every database you lead.",
+    "Changes waiting for your decision as a group leader, across every database your groups can access.",
   ],
   plan: titles["query-plan"],
 };
@@ -276,7 +276,7 @@ export function MigrationApp() {
                       <ErrorBox error="Select a migration from history." />
                     ))}
                   {page === "schema-diff" && <SchemaDiff canEdit={historyData.can_edit} />}
-                  {page === "change-request" && <ChangeRequestPage databaseId={databaseId} canEdit={historyData.can_edit} />}
+                  {page === "change-request" && <ChangeRequestPage databaseId={databaseId} />}
                 </Fragment>
               )}
             </>

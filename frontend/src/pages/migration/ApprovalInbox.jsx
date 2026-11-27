@@ -4,7 +4,7 @@ import { ErrorBox } from "../../migration/components.jsx";
 import { Who } from "./ChangeRequestParts.jsx";
 import { namesFrom } from "./NamesFrom.jsx";
 
-// Requests, across every database, that wait for the signed-in user as a group leader.
+// Requests, across every database, that wait on a group the signed-in user belongs to.
 // `approvals` comes from usePendingApprovals in MigrationApp, which also drives the sidebar count.
 export function ApprovalInbox({ approvals, databases = [] }) {
   const me = viewerId();
@@ -18,7 +18,7 @@ export function ApprovalInbox({ approvals, databases = [] }) {
           <h2>
             Waiting for your approval <span className="badge badge-off count">{items.length}</span>
           </h2>
-          <p>You are the leader of a group with access to these databases. Open a request to read its SQL and decide.</p>
+          <p>You belong to a group with access to these databases. Open a request to read its SQL and decide.</p>
         </div>
         <button className="btn" onClick={reload} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}
@@ -48,7 +48,7 @@ export function ApprovalInbox({ approvals, databases = [] }) {
                   <td>{nameOf(r.database_id)}</td>
                   <td>
                     {r.approvals
-                      .filter((a) => a.required_leader_id === me && a.decision === "pending")
+                      .filter((a) => a.mine && a.decision === "pending")
                       .map((a) => a.group_name || a.group_id)
                       .join(", ") || "—"}
                   </td>

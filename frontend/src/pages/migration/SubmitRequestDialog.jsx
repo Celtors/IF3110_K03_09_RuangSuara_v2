@@ -28,7 +28,7 @@ const COPY = {
   },
 };
 
-// Asks to run an operation. Nothing runs yet: the leader of every group with access to the
+// Asks to run an operation. Nothing runs yet: every group with access to the
 // database must approve first, then the request waits its turn in the database's queue.
 export function SubmitRequestDialog({ databaseId, migration, operation, onClose, onSubmitted }) {
   const [busy, setBusy] = useState(false);
@@ -95,7 +95,7 @@ export function SubmitRequestDialog({ databaseId, migration, operation, onClose,
       <SQL value={migration[copy.field] ?? ""} />
       {batch && migration.sql_down?.trim() && <details><summary>SQL down (for eligible compensation)</summary><SQL value={migration.sql_down} /></details>}
       <ol className="cr-explain">
-        <li>The leader of every group with access to this database reviews and approves.</li>
+        <li>Every group with access to this database reviews and approves; only the group’s leader can decide for it.</li>
         <li>After the last approval the request joins the queue for this database.</li>
         <li>Requests on one database run one at a time, in order, without anyone clicking execute.</li>
       </ol>

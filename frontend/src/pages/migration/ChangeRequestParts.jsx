@@ -67,7 +67,7 @@ export function ApprovalsTable({ approvals, me }) {
         <thead>
           <tr>
             <th scope="col">Group</th>
-            <th scope="col">Leader</th>
+            <th scope="col">Group leader</th>
             <th scope="col">Decision</th>
             <th scope="col">Decided</th>
             <th scope="col">Comment</th>
@@ -75,13 +75,13 @@ export function ApprovalsTable({ approvals, me }) {
         </thead>
         <tbody>
           {approvals.map((a) => (
-            <tr key={a.id} className={a.required_leader_id === me ? "mine" : undefined}>
+            <tr key={a.id} className={a.mine ? "mine" : undefined}>
               <td>
                 <strong>{a.group_name || a.group_id}</strong>
               </td>
               <td>
-                {a.leader_username || shortId(a.required_leader_id)}
-                {a.required_leader_id === me && <small>You are this group’s leader</small>}
+                {a.leader_username || <span className="muted">No leader assigned. Pending until one is</span>}
+                {a.mine && a.decision === "pending" && <small>You can decide for this group</small>}
               </td>
               <td>
                 <DecisionBadge decision={a.decision} />

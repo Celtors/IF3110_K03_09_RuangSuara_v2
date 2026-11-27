@@ -103,7 +103,7 @@ export default function Groups({ canEdit = false }) {
                     {g.leader_name ? (
                       <strong>{g.leader_name}</strong>
                     ) : (
-                      <span className="badge badge-warn" title="Changes to databases this group can access cannot be approved until it has a leader">No leader</span>
+                      <span className="badge badge-warn" title="This group has no leader. Its members can still approve database changes">No leader</span>
                     )}
                   </td>
                   <td className="muted">{formatDate(g.created_at)}</td>

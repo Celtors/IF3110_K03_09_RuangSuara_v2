@@ -29,7 +29,7 @@ function Outcome({ request }) {
     const waiting = request.approvals.filter((a) => a.decision === "pending");
     return (
       <div className="alert notice">
-        Waiting for {waiting.length === 1 ? "the leader of" : "the leaders of"}{" "}
+        Waiting for the leader of{" "}
         <strong>{waiting.map((a) => a.group_name || a.group_id).join(", ")}</strong>.
       </div>
     );
@@ -194,7 +194,7 @@ export function ChangeRequestPage({ databaseId, canEdit }) {
           </span>
         </div>
         <p className="cr-lead">
-          The leader of every group with access to this database must approve before the change can run.
+          Every group with access to this database must approve before the change can run. Only a group’s leader can decide for it.
         </p>
         <ApprovalsTable approvals={request.approvals} me={me} />
         {role.canDecide && (
