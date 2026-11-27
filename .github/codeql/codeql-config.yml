@@ -1,0 +1,12 @@
+name: RuangSuara security-extended
+
+# Keep the standard queries and add broader security coverage.
+queries:
+  - uses: security-extended
+
+# Exclude generated output and installed dependencies, not application/test source.
+paths-ignore:
+  - 'frontend/dist/**'
+  - 'frontend/dist-ssr/**'
+  - 'frontend/coverage/**'
+  - '**/node_modules/**'
