@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import userEvent from "@testing-library/user-event";
-import { render, screen } from "@testing-library/react";
+import {
+  act,
+  render,
+  screen,
+  within,
+  waitFor,
+} from "@testing-library/react";
 
 const { call } = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("../../migration/api.js", () => ({
@@ -42,13 +48,63 @@ describe("SqlConsole", () => {
     expect(await screen.findByText("Bob")).toBeInTheDocument();
   });
   it("shows backend errors with details", async () => {
-    call.mockRejectedValue(Object.assign(new Error("syntax error"), { code: "invalid_sql", details: { execution_time_ms: 1 } }));
+    const backendError = Object.assign(new Error("syntax error"), {
+      code: "invalid_sql",
+      details: {
+        execution_time_ms: 1,
+        postgres_code: "42601",
+        position: 1,
+      },
+    });
+    let rejectQuery;
+    call.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectQuery = reject;
+        }),
+    );
     const user = userEvent.setup();
     render(<SqlConsole databaseId="db-1" canEdit />);
-    await user.type(screen.getByLabelText("SQL statement"), "SELEC");
-    await user.click(screen.getByRole("button", { name: "Execute" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("syntax error");
-    expect(screen.getByRole("status")).toHaveTextContent("Last run failed");
+    await user.type(
+      screen.getByLabelText("SQL statement"),
+      "SELEC",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Execute" }),
+    );
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(call).toHaveBeenCalledWith(
+      "/api/databases/db-1/query",
+      "POST",
+      { query: "SELEC" },
+    );
+    expect(
+      screen.getByRole("button", { name: "Running…" }),
+    ).toBeDisabled();
+    await act(async () => {
+      rejectQuery(backendError);
+    });
+    const errorPanel = await screen.findByRole("region", {
+      name: "Execution error",
+    });
+    const panel = within(errorPanel);
+    expect(panel.getByRole("alert"))
+      .toHaveTextContent("syntax error");
+    expect(panel.getByText("invalid_sql"))
+      .toBeInTheDocument();
+    expect(panel.getByText("SQLSTATE 42601"))
+      .toBeInTheDocument();
+    expect(panel.getByText("at character 1"))
+      .toBeInTheDocument();
+    expect(panel.getByText("1 ms"))
+      .toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("status"))
+        .toHaveTextContent("Last run failed");
+    });
+    expect(
+      screen.getByRole("button", { name: "Execute" }),
+    ).toBeEnabled();
   });
   it("Clear empties the editor and the result", async () => {
     call.mockResolvedValue(rowsResult);

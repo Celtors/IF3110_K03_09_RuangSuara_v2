@@ -33,8 +33,14 @@ export function ExecutionHistory({ databaseId, migrations, canEdit, requests }) 
   }, [databaseId, hideRolledBack, key]);
 
   const loading = state.key !== key;
-  const entries = loading ? [] : state.entries;
-  const latest = useMemo(() => latestByMigration(entries), [entries]);
+  const entries = useMemo(
+    () => (loading ? [] : state.entries),
+    [loading, state.entries],
+  );
+  const latest = useMemo(
+    () => latestByMigration(entries),
+    [entries],
+  );
   const byId = useMemo(() => new Map(migrations.map((m) => [m.id, m])), [migrations]);
   const openFor = (migrationId) =>
     requests.items.find((r) => r.migration_id === migrationId && isOpen(r.status));

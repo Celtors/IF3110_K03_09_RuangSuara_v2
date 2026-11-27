@@ -3,14 +3,7 @@ import { createRoot } from 'react-dom/client'
 import '../index.css'
 import { HOME_PAGE, LOGIN_PAGE, fetchMe } from '../auth/session'
 import AdminShell from './AdminShell'
-
-function StartupError({ message }) {
-  return (
-    <main className="content">
-      <p className="alert alert-error" role="alert">{message}</p>
-    </main>
-  )
-}
+import StartupError from './StartupError'
 
 // Shared start-up for every admin page. The server decides who gets in: visitors who are
 // not signed in go to the login page (remembering where they were going), signed-in users
