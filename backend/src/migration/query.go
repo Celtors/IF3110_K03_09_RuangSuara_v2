@@ -4,13 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"backend/internal/targetdb"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -60,7 +62,8 @@ func loadConsoleLimits(getenv func(string) string) consoleLimits {
 }
 
 // consolePermission resolves the caller's real permission exactly once.
-func (s *Service) consolePermission(ctx context.Context, user, db string) (Permission, error) {
+func (s *Service) consolePermission(ctx context.Context, user, db string) (_ Permission, resultErr error) {
+	defer func() { authorizationOutcome(ctx, View, resultErr) }()
 	if user == "" || s.Access == nil {
 		return NoAccess, fault("unauthenticated", "A validated session is required")
 	}
@@ -90,11 +93,11 @@ func (s *Service) consolePermission(ctx context.Context, user, db string) (Permi
 func (s *Service) Query(ctx context.Context, user, db, sql string) (QueryResult, error) {
 	result := QueryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}}
 	db = canonicalDatabaseID(db)
-	permission, err := s.consolePermission(ctx, user, db)
-	if err != nil {
+	ctx = migrationContext(ctx, user, db, "")
+	if _, err := s.consolePermission(ctx, user, db); err != nil {
 		return result, err
 	}
-	kind, err := parseConsoleSQL(sql, permission)
+	kind, err := parseConsoleSQL(sql)
 	if err != nil {
 		return result, err
 	}
@@ -105,18 +108,15 @@ func (s *Service) Query(ctx context.Context, user, db, sql string) (QueryResult,
 	if err != nil {
 		return result, err
 	}
-	result, err = runConsoleQuery(ctx, pool, s.Repository.Pool, permission, sql, limits)
-	outcome := "ok"
+	result, err = runConsoleQuery(ctx, pool, s.Repository.Pool, sql, limits)
 	if err != nil {
-		outcome = "error"
-		var f *Fault
-		if errors.As(err, &f) {
-			outcome = f.Code
-		}
+		code, _ := faultInfo(err)
+		slog.WarnContext(ctx, "database.console", "status", "failed", "reason", code,
+			"access_mode", result.AccessMode, "statement_kind", kind, "duration_ms", result.ExecutionTimeMS)
+	} else {
+		slog.InfoContext(ctx, "database.console", "status", "succeeded",
+			"access_mode", result.AccessMode, "statement_kind", kind, "duration_ms", result.ExecutionTimeMS)
 	}
-	// Audit trail without SQL text or credentials.
-	log.Printf("sql_console user=%s database=%s access=%s statement=%s outcome=%s ms=%.2f",
-		user, db, result.AccessMode, kind, outcome, result.ExecutionTimeMS)
 	return result, err
 }
 
@@ -124,56 +124,44 @@ type rowQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func databaseFingerprint(ctx context.Context, q rowQuerier) (string, error) {
-	var cluster, database string
-	err := q.QueryRow(ctx, `SELECT system_identifier::text, (SELECT oid::text FROM pg_catalog.pg_database WHERE datname=pg_catalog.current_database()) FROM pg_catalog.pg_control_system()`).Scan(&cluster, &database)
-	return cluster + "/" + database, err
-}
-
-// Fails closed if a registration resolves to the platform database itself.
-func ensureTargetIsNotPlatform(ctx context.Context, target, platform rowQuerier) error {
-	targetID, err := databaseFingerprint(ctx, target)
+// checkTarget verifies the connection that will read or execute the operation.
+func checkTarget(ctx context.Context, target, platform rowQuerier) (string, error) {
+	actual, err := targetdb.Fingerprint(ctx, target)
 	if err != nil {
 		if postgresCode(err) == "42501" {
-			return fault("database_unavailable", "Target identity inspection is not permitted; an administrator must check EXECUTE on pg_catalog.pg_control_system()")
+			return "", fault("database_unavailable", "Target identity inspection requires EXECUTE on pg_catalog.pg_control_system()")
 		}
-		return fault("database_unavailable", "Target identity could not be verified")
+		return "", fault("database_unavailable", "Target identity could not be verified")
 	}
-	platformID, err := databaseFingerprint(ctx, platform)
+	own, err := targetdb.Fingerprint(ctx, platform)
 	if err != nil {
-		return fault("database_unavailable", "Platform identity could not be verified")
+		return "", fault("database_unavailable", "Platform identity could not be verified")
 	}
-	if targetID == platformID {
-		return fault("forbidden", "This registration resolves to the platform database; the SQL Console is disabled for it")
+	if err := targetdb.CheckIdentity(actual, own, ""); err != nil {
+		return "", fault("forbidden", err.Error())
 	}
-	return nil
+	return actual, nil
 }
 
-func runConsoleQuery(ctx context.Context, pool, platform *pgxpool.Pool, permission Permission, sql string, limits consoleLimits) (result QueryResult, err error) {
+func runConsoleQuery(ctx context.Context, pool, platform *pgxpool.Pool, sql string, limits consoleLimits) (result QueryResult, err error) {
 	result = QueryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, MaxRows: limits.MaxRows, AccessMode: "read_only"}
 	start := time.Now()
 	defer func() {
 		result.ExecutionTimeMS = math.Round(float64(time.Since(start).Microseconds())/10) / 100
 	}()
 
-	options := pgx.TxOptions{AccessMode: pgx.ReadOnly}
-
-	if permission >= Edit {
-		options.AccessMode = pgx.ReadWrite
-		result.AccessMode = "read_write"
-	}
-	tx, err := pool.BeginTx(ctx, options)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return result, fault("database_unavailable", "Target connection unavailable before SQL execution")
 	}
-	defer rollback(tx) // no-op after Commit; rolls back every failure path
+	defer rollback(ctx, tx)
 
 	statementMS := strconv.FormatInt(limits.Timeout.Milliseconds(), 10)
 	idleMS := strconv.FormatInt((limits.Timeout + 5*time.Second).Milliseconds(), 10)
-	if _, err = tx.Exec(ctx, `SELECT pg_catalog.set_config('statement_timeout',$1,true), pg_catalog.set_config('lock_timeout','5000',true), pg_catalog.set_config('idle_in_transaction_session_timeout',$2,true)`, statementMS, idleMS); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_catalog.set_config('search_path','public',true), pg_catalog.set_config('statement_timeout',$1,true), pg_catalog.set_config('lock_timeout','5000',true), pg_catalog.set_config('idle_in_transaction_session_timeout',$2,true)`, statementMS, idleMS); err != nil {
 		return result, fault("database_unavailable", "Could not configure target transaction")
 	}
-	if err = ensureTargetIsNotPlatform(ctx, tx, platform); err != nil {
+	if _, err = checkTarget(ctx, tx, platform); err != nil {
 		return result, err
 	}
 
@@ -220,30 +208,6 @@ func runConsoleQuery(ctx context.Context, pool, platform *pgxpool.Pool, permissi
 	result.RowCount = len(result.Rows)
 	tag := rows.CommandTag()
 	result.Command = commandName(tag.String())
-	switch result.Command {
-	case "INSERT", "UPDATE", "DELETE", "MERGE":
-		n := tag.RowsAffected()
-		result.RowsAffected = &n
-	case "SELECT":
-		if !result.HasResultSet { // SELECT INTO
-			n := tag.RowsAffected()
-			result.RowsAffected = &n
-		}
-	}
-
-	if permission >= Edit {
-		if err = tx.Commit(ctx); err != nil {
-			var pgErr *pgconn.PgError
-			switch {
-			case errors.As(err, &pgErr):
-				return result, consoleFault(ctx, err, &result)
-			case errors.Is(err, pgx.ErrTxCommitRollback):
-				return result, fault("query_failed", "PostgreSQL rolled the transaction back at COMMIT")
-			default:
-				return result, fault("indeterminate", "COMMIT acknowledgement was lost; verify the target data before retrying")
-			}
-		}
-	}
 	return result, nil
 }
 

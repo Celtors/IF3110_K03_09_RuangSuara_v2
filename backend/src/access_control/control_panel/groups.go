@@ -18,25 +18,25 @@ type CreateGroupPayload struct {
 
 type UpdateGroupPayload struct {
 	Id          uuid.UUID `json:"id" binding:"required"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
 }
 
 type GroupCompact struct {
-	Id          uuid.UUID `json:"id"`
-	Name        string            `json:"name"`
+	Id   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
 }
 
 type GroupViewPayload struct {
 	Id          uuid.UUID `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	LeaderName  string            `json:"leader_name"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	LeaderName  string    `json:"leader_name"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-func (payload CreateGroupPayload) GetDBStruct() (models.Group) {
+func (payload CreateGroupPayload) GetDBStruct() models.Group {
 	return models.Group{
 		Name:        payload.Name,
 		Description: payload.Description,
@@ -70,7 +70,6 @@ func CreateGroupRequest(c *gin.Context, db *gorm.DB) {
 
 	groupModel := groupPayload.GetDBStruct()
 
-
 	if err := db.Create(&groupModel).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  "error",
@@ -85,10 +84,10 @@ func CreateGroupRequest(c *gin.Context, db *gorm.DB) {
 }
 
 func GetAllGroupsRequest(c *gin.Context, db *gorm.DB) {
-    var groups []GroupViewPayload
+	var groups []GroupViewPayload
 
-    err := db.Table("groups_ AS g").
-        Select(`
+	err := db.Table("groups_ AS g").
+		Select(`
             g.id,
             g.name,
             g.description,
@@ -96,22 +95,21 @@ func GetAllGroupsRequest(c *gin.Context, db *gorm.DB) {
             g.created_at,
             g.updated_at
         `).
-        Joins("LEFT JOIN group_leaders gl ON g.id = gl.group_id").
-        Joins("LEFT JOIN users u ON u.id = gl.leader_id").
-        Scan(&groups).Error
+		Joins("LEFT JOIN group_leaders gl ON g.id = gl.group_id").
+		Joins("LEFT JOIN user_groups ug ON ug.group_id = gl.group_id AND ug.user_id = gl.leader_id").
+		Joins("LEFT JOIN users u ON u.id = ug.user_id AND u.status = 'Active'").
+		Scan(&groups).Error
 
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{
-            "status":  "error",
-            "message": "Failed to get group data: " + err.Error(),
-        })
-        return
-    }
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status":  "error",
+			"message": "Failed to get group data: " + err.Error(),
+		})
+		return
+	}
 
-    c.JSON(http.StatusOK, groups)
+	c.JSON(http.StatusOK, groups)
 }
-
-
 
 func UpdateGroupRequest(c *gin.Context, db *gorm.DB) {
 	var groupPayload UpdateGroupPayload

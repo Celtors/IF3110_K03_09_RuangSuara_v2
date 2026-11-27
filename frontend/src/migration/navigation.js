@@ -1,11 +1,26 @@
-// Each HTML navigation reloads these values. There is no client-side router.
-const params = new URLSearchParams(location.search);
-export const database = params.get("database") ?? "";
-export const id = params.get("id") ?? "";
-export const page =
-  location.pathname.split("/").pop()?.replace(".html", "") || "index";
-export const base = `/api/databases/${encodeURIComponent(database)}`;
-export const detailPath = `${base}/migrations/${encodeURIComponent(id)}`;
+import { getRoute, subscribe } from "./router.js";
+
+// The values of the current page URL. They are live bindings: the router updates them on every
+// client-side navigation, before React renders the new page, so importers always read the
+// current page. (A change request page identifies its request with ?request=; ?id= stays a
+// migration id.)
+export let database;
+export let id;
+export let requestId;
+export let page;
+export let base;
+export let detailPath;
+
+function apply(route) {
+  database = route.database;
+  id = route.id;
+  requestId = route.request;
+  page = route.page;
+  base = `/api/databases/${encodeURIComponent(database)}`;
+  detailPath = `${base}/migrations/${encodeURIComponent(id)}`;
+}
+apply(getRoute());
+subscribe(apply);
 export const titles = {
   index: [
     "A clear history of every change.",
@@ -17,7 +32,7 @@ export const titles = {
   ],
   editor: [
     "Migration editor",
-    "Review your SQL, save a draft, then confirm its execution.",
+    "Save a draft, then submit its SQL for approval.",
   ],
   details: [
     "Migration details",
@@ -30,5 +45,9 @@ export const titles = {
   "query-plan": [
     "Understand the query plan",
     "Inspect PostgreSQL estimates before running a statement.",
+  ],
+  "change-request": [
+    "Change request",
+    "Review the SQL, collect approvals, and follow the change through the queue.",
   ],
 };

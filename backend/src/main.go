@@ -3,7 +3,8 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,18 +14,33 @@ import (
 	accesscontrol "backend/access_control"
 	databasemanagement "backend/database_management"
 	"backend/internal/app"
+	"backend/internal/telemetry"
 	"backend/migration"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
+	gin.SetMode(gin.ReleaseMode)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx); err != nil {
-		log.Print(err)
+	logger, shutdownTelemetry, err := telemetry.Init(ctx, os.Stdout)
+	slog.SetDefault(logger)
+	if err != nil {
+		slog.LogAttrs(ctx, slog.LevelError, "tracing.initialize", telemetry.ErrorAttrs(err)...)
+		os.Exit(1)
+	}
+	err = run(ctx)
+	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	_ = shutdownTelemetry(flushCtx) // Init reports flush errors on its local-only sink.
+	cancel()
+	if err != nil {
+		// run returns fixed startup errors without database configuration or driver text.
+		slog.ErrorContext(ctx, "application.stopped", "status", "failed", "error", err.Error())
 		os.Exit(1)
 	}
 }
@@ -32,9 +48,14 @@ func main() {
 func run(ctx context.Context) error {
 	var repository *migration.Repository
 	if dsn := accesscontrol.PlatformDSN(); dsn != "" {
-		pool, err := pgxpool.New(ctx, dsn)
+		config, err := pgxpool.ParseConfig(dsn)
 		if err != nil {
 			return errors.New("invalid platform database configuration")
+		}
+		config.ConnConfig.Tracer = telemetry.PostgresTracer{Scope: "platform"}
+		pool, err := pgxpool.NewWithConfig(ctx, config)
+		if err != nil {
+			return errors.New("could not open platform database pool")
 		}
 		defer pool.Close()
 		repository = &migration.Repository{Pool: pool}
@@ -45,7 +66,7 @@ func run(ctx context.Context) error {
 			return errors.New("could not initialize Migration platform storage")
 		}
 	} else {
-		log.Print("PLATFORM_DATABASE_URL is unset; Migration storage is unavailable")
+		slog.WarnContext(ctx, "migration.storage", "status", "unavailable")
 	}
 
 	service, closeDependencies, err := migration.MigrationService(ctx, repository)
@@ -57,12 +78,34 @@ func run(ctx context.Context) error {
 	if assets == "" {
 		assets = "../../frontend/dist" // Run Go commands from backend/src.
 	}
-	router, closePlatform, err := newRouter(service, assets)
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	var registry *prometheus.Registry
+	if metricsAddr != "" {
+		registry = telemetry.NewMetricsRegistry()
+	}
+	router, closePlatform, err := newRouter(service, assets, registry)
 	if err != nil {
 		return err
 	}
 	defer closePlatform()
 	migration.RegisterMigrationSession(router, service)
+
+	// Approval workflow: routes, then the queue worker. On shutdown the worker is stopped and
+	// drained first, before the deferred pool closures above run.
+	review := migration.NewReview(service)
+	migration.RegisterReviewRoutes(router, review)
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerConfig := migration.DefaultWorkerConfig()
+	workerConfig.Metrics = registry
+	workerDone := review.StartWorker(workerCtx, workerConfig)
+	defer func() {
+		stopWorker()
+		<-workerDone
+	}()
+	if registry != nil {
+		closeMetrics := startMetricsServer(metricsAddr, promhttp.HandlerFor(registry, promhttp.HandlerOpts{MaxRequestsInFlight: 2}))
+		defer closeMetrics()
+	}
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
 		addr = ":8080" // Preserve the shared backend's default listener.
@@ -81,15 +124,12 @@ func run(ctx context.Context) error {
 		defer close(shutdownDone)
 		select {
 		case <-ctx.Done():
-			clean, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := server.Shutdown(clean); err != nil {
-				_ = server.Close()
-			}
+			// Finish active handlers before closing their pools and flushing spans.
+			_ = server.Shutdown(context.WithoutCancel(ctx))
 		case <-serverDone:
 		}
 	}()
-	log.Printf("Shared backend listening at %s", addr)
+	slog.InfoContext(ctx, "application.starting", "status", "started")
 	err = server.ListenAndServe()
 	close(serverDone)
 	// Shutdown drains active requests before the deferred pool closures run.
@@ -100,14 +140,25 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-func newRouter(service *migration.Service, assets string) (*gin.Engine, func(), error) {
-	router := gin.Default()
-	router.Use(cors.Default())
+func newRouter(service *migration.Service, assets string, registry *prometheus.Registry) (*gin.Engine, func(), error) {
+	router := gin.New()
+	router.UseRawPath = true
+	router.UnescapePathValues = false
+	router.Use(telemetry.HTTP, cors.Default())
 	platform, err := accesscontrol.SetupAccessControl(router)
 	if err != nil {
 		return nil, nil, err
 	}
+	initCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := databasemanagement.Initialize(initCtx, platform); err != nil {
+		if sqlDB, dbErr := platform.DB(); dbErr == nil {
+			_ = sqlDB.Close()
+		}
+		return nil, nil, errors.New("could not initialize database registrations")
+	}
 	provider := databasemanagement.NewProvider(platform)
+	databasemanagement.RegisterRoutes(router, platform, provider)
 	if service.Access == nil {
 		service.Access = migration.ApplicationAccess{Platform: platform}
 	}
@@ -115,10 +166,42 @@ func newRouter(service *migration.Service, assets string) (*gin.Engine, func(), 
 		service.Connections = provider
 	}
 	app.RegisterMigration(router, service, assets)
+	platformSQL, _ := platform.DB()
+	if registry != nil {
+		var platformMigration *pgxpool.Pool
+		if service.Repository != nil {
+			platformMigration = service.Repository.Pool
+			service.Repository.RegisterStateMetrics(registry)
+		}
+		telemetry.RegisterPoolMetrics(registry, platformMigration, platformSQL, provider.MigrationPoolStats)
+	}
 	return router, func() {
 		provider.Close()
-		if pool, err := platform.DB(); err == nil {
-			_ = pool.Close()
+		if platformSQL != nil {
+			_ = platformSQL.Close()
 		}
 	}, nil
+}
+
+func startMetricsServer(addr string, handler http.Handler) func() {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		slog.LogAttrs(context.Background(), slog.LevelWarn, "metrics.listen", telemetry.ErrorAttrs(err)...)
+		return func() {}
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", handler)
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, WriteTimeout: 5 * time.Second}
+	go func() {
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			slog.LogAttrs(context.Background(), slog.LevelWarn, "metrics.serve", telemetry.ErrorAttrs(err)...)
+		}
+	}()
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			_ = server.Close()
+		}
+	}
 }

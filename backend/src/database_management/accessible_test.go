@@ -10,11 +10,11 @@ import (
 func TestSummarizeAccessible(t *testing.T) {
 	rows := []policyRow{
 		{ID: "a", Name: "Alpha", Effect: fx.ViewOnly},
-		{ID: "a", Name: "Alpha", Effect: fx.ViewEdit},    // ViewEdit wins over ViewOnly
+		{ID: "a", Name: "Alpha", Effect: fx.ViewEdit}, // ViewEdit wins over ViewOnly
 		{ID: "b", Name: "Bravo", Effect: fx.ViewOnly},
 		{ID: "c", Name: "Charlie", Effect: fx.ViewEdit},
-		{ID: "c", Name: "Charlie", Effect: fx.Blocked},   // Blocked overrides everything
-		{ID: "d", Name: "Delta", Effect: "Admin"},        // unknown grants nothing
+		{ID: "c", Name: "Charlie", Effect: fx.Blocked}, // Blocked overrides everything
+		{ID: "d", Name: "Delta", Effect: "Admin"},      // unknown grants nothing
 	}
 	got := summarizeAccessible(rows)
 	want := []accessibleDatabase{

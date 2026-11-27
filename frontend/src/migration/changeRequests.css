@@ -1,0 +1,255 @@
+/* Change request / approval workflow. Uses the tokens from index.css so light and dark
+   themes both work. Everything is scoped to .migration-app like style.css. */
+
+/* status and decision badges (the base .badge comes from index.css / style.css) */
+.migration-app .badge.pending_review,
+.migration-app .badge.pending {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--amber) 20%, var(--surface));
+}
+.migration-app .badge.approved {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+.migration-app .badge.queued {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+.migration-app .badge.rejected {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+.migration-app .badge.cancelled {
+  color: var(--muted);
+  background: var(--off-bg);
+}
+
+/* plain inline link (the project's .text-link is an outlined button) */
+.migration-app .cr-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+.migration-app .cr-link:hover {
+  text-decoration: underline;
+}
+
+/* <main> is focused after a client-side navigation so screen readers announce the new page */
+.migration-app .content:focus {
+  outline: none;
+}
+
+/* sidebar count of requests waiting for the signed-in leader */
+.migration-app .nav-count {
+  margin-left: auto;
+  min-width: 1.4rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--amber);
+  color: #241a35;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* progress track: Draft -> Pending review -> Approved -> In queue -> Running -> Success / Failed */
+.migration-app .cr-track {
+  display: flex;
+  list-style: none;
+  margin: 1.5rem 0 1.25rem;
+  padding: 0;
+}
+.migration-app .cr-step {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 5.5rem;
+  padding: 0 0.25rem;
+  text-align: center;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.migration-app .cr-step::before {
+  content: "";
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 1.6rem;
+  height: 1.6rem;
+  margin: 0 auto 0.45rem;
+  border: 2px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.migration-app .cr-step::after {
+  content: "";
+  position: absolute;
+  top: 0.8rem;
+  left: calc(50% + 1rem);
+  right: calc(-50% + 1rem);
+  height: 2px;
+  background: var(--line);
+}
+.migration-app .cr-step:last-child::after {
+  display: none;
+}
+.migration-app .cr-step.done {
+  color: var(--ink);
+}
+.migration-app .cr-step.done::before {
+  content: "✓";
+  background: var(--ok);
+  border-color: var(--ok);
+}
+.migration-app .cr-step.done::after {
+  background: var(--ok);
+}
+.migration-app .cr-step.current {
+  color: var(--ink);
+  font-weight: 600;
+}
+.migration-app .cr-step.current::before {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.migration-app .cr-step.bad {
+  color: var(--danger);
+  font-weight: 600;
+}
+.migration-app .cr-step.bad::before {
+  content: "×";
+  background: var(--danger);
+  border-color: var(--danger);
+  font-size: 1rem;
+}
+
+/* approvals */
+.migration-app .cr-lead {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+}
+.migration-app .table tr.mine {
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+.migration-app .table .cr-comment {
+  white-space: normal;
+  max-width: 28ch;
+}
+.migration-app .cr-decision {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+  margin-top: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+.migration-app .cr-decision p {
+  margin: 0;
+}
+
+/* compact approval meter for lists: one pip per required group */
+.migration-app .cr-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+.migration-app .cr-meter-bar {
+  display: inline-flex;
+  gap: 3px;
+}
+.migration-app .cr-meter-bar i {
+  width: 0.9rem;
+  height: 0.5rem;
+  border-radius: 3px;
+  background: var(--line);
+}
+.migration-app .cr-meter-bar i.approved {
+  background: var(--ok);
+}
+.migration-app .cr-meter-bar i.rejected {
+  background: var(--danger);
+}
+.migration-app .cr-live {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* activity log */
+.migration-app .cr-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 1.1rem;
+  border-left: 2px solid var(--line);
+  display: grid;
+  gap: 0.9rem;
+}
+.migration-app .cr-timeline li {
+  position: relative;
+}
+.migration-app .cr-timeline li::before {
+  content: "";
+  position: absolute;
+  left: calc(-1.1rem - 5px);
+  top: 0.35rem;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.migration-app .cr-timeline small {
+  display: block;
+  color: var(--muted);
+}
+.migration-app .cr-note {
+  margin-left: 0.6rem;
+  color: var(--muted);
+}
+
+/* submit dialog */
+.migration-app .cr-explain {
+  margin: 1rem 0;
+  padding-left: 1.25rem;
+  color: var(--muted);
+  display: grid;
+  gap: 0.25rem;
+}
+
+@media (max-width: 640px) {
+  .migration-app .cr-track {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .migration-app .cr-step {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    text-align: left;
+  }
+  .migration-app .cr-step::before {
+    margin: 0;
+    flex: none;
+  }
+  .migration-app .cr-step::after {
+    display: none;
+  }
+}
+
+.migration-app .exec-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.875rem;
+}
+
+/* Job identifiers may be long; keep the existing panel responsive. */
+.migration-app .job-id { overflow-wrap: anywhere; }
+.migration-app .job-progress { width: 100%; accent-color: var(--accent); }

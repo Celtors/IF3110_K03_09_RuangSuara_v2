@@ -3,6 +3,8 @@ package controlpanel
 import (
 	fx "backend/access_control/effect"
 	"backend/access_control/models"
+	"backend/internal/telemetry"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -71,6 +73,7 @@ func AddGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
+	logPolicyChange(c, "authorization.policy_added", appGroupPayload)
 	c.JSON(http.StatusCreated, gin.H{
 		"status":  "success",
 		"message": "Successfully added policy",
@@ -88,7 +91,16 @@ func RemoveGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	db.Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).Delete(&models.GroupPolicy{})
+	result := db.Where("group_id = ? AND database_id = ?", policyPayload.GroupId, policyPayload.DatabaseId).Delete(&models.GroupPolicy{})
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Could not remove the policy"})
+		return
+	}
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Policy not found"})
+		return
+	}
+	logPolicyChange(c, "authorization.policy_removed", policyPayload)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
@@ -121,10 +133,16 @@ func UpdateGroupPolicyRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
+	logPolicyChange(c, "authorization.policy_updated", policyPayload)
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
 		"message": "Successfully updated policy",
 	})
+}
+
+func logPolicyChange(c *gin.Context, event string, policy GroupPolicyPayload) {
+	slog.LogAttrs(c.Request.Context(), slog.LevelInfo, event, slog.String("status", "succeeded"),
+		telemetry.ID("group_id", policy.GroupId.String()), telemetry.ID("database_id", policy.DatabaseId.String()))
 }
 
 func GetPoliciesRequest(c *gin.Context, db *gorm.DB) {

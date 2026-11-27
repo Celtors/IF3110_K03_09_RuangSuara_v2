@@ -1,7 +1,19 @@
-import { href, date } from "../../migration/api.js";
+import { useState } from "react";
+import { href, date, requestHref } from "../../migration/api.js";
 import { database } from "../../migration/navigation.js";
 import { Badge, SQL } from "../../migration/components.jsx";
-export function Details({ current: m, canEdit }) {
+import { isOpen } from "../../migration/changeRequests.js";
+import { isUnattemptedDraft, nextOperations } from "../../migration/executionHistory.js";
+import { useChangeRequestList } from "../../migration/useChangeRequests.js";
+import { ChangeRequestList } from "./ChangeRequestList.jsx";
+import { SubmitRequestDialog } from "./SubmitRequestDialog.jsx";
+
+export function Details({ current: m, canEdit, nextOperation, reload }) {
+  const [operation, setOperation] = useState("");
+  const requests = useChangeRequestList(database, m.id, reload);
+  const openRequest = requests.items.find((r) => isOpen(r.status));
+  const actionsReady = canEdit && !requests.loading && !requests.error && !openRequest;
+  const operations = canEdit ? nextOperations({ ...m, next_operation: nextOperation }) : [];
   return (
     <>
       <section className="panel">
@@ -12,7 +24,7 @@ export function Details({ current: m, canEdit }) {
           </div>
           <div className="actions">
             <Badge state={m.state} />
-            {canEdit && ["draft", "failed"].includes(m.state) && (
+            {actionsReady && isUnattemptedDraft(m) && !requests.items.some((r) => r.attempt_id) && (
               <a
                 className="btn btn-primary"
                 href={href("editor", database, m.id)}
@@ -38,7 +50,54 @@ export function Details({ current: m, canEdit }) {
           ))}
         </dl>
         <SQL value={m.sql_script} />
+        {m.sql_down?.trim() && (
+          <details>
+            <summary>SQL down (used by rollback)</summary>
+            <SQL value={m.sql_down} />
+          </details>
+        )}
+        {m.irreversible && (
+          <div className="alert notice">
+            Irreversible: {m.irreversible_reason || "no reason recorded"}. It cannot be rolled back.
+          </div>
+        )}
       </section>
+
+      {(operations.length > 0 || openRequest) && (
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Run this migration</h2>
+              <p>
+                Every execution needs approval from each group with access to this database, then runs from the
+                queue.
+              </p>
+            </div>
+            <div className="actions">
+              {operations.map(([op, label]) => (
+                <button
+                  key={op}
+                  className="btn btn-primary"
+                  disabled={!actionsReady}
+                  onClick={() => setOperation(op)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {openRequest && (
+            <div className="alert notice">
+              A change request is already open for this migration.{" "}
+              <a className="cr-link" href={requestHref(database, openRequest.id)}>
+                View request →
+              </a>
+            </div>
+          )}
+        </section>
+      )}
+
+      <ChangeRequestList list={requests} databaseId={database} hideMigration title="Change requests" />
       <section className="panel attempts">
         <div className="panel-heading">
           <h2>
@@ -52,11 +111,13 @@ export function Details({ current: m, canEdit }) {
           m.attempts.map((a, i) => (
             <details key={a.id} open={i === m.attempts.length - 1}>
               <summary>
-                <Badge state={a.status} /> {a.version ? `v${a.version} · ` : ""}
+                <Badge state={a.status} /> {a.operation} · {a.version ? `#${a.version} · ` : ""}
                 {a.executor_user_id} · {date(a.started_at)}
               </summary>
               <div className="attempt-body">
                 <p>Completed: {date(a.completed_at)}</p>
+                <p>Execution ID <code>{a.id}</code></p>
+                {a.reverses_execution_id && <p>Reverses execution <code>{a.reverses_execution_id}</code></p>}
                 {a.error && (
                   <div
                     className={`alert notice ${a.status === "failed" ? "error" : ""}`}
@@ -75,6 +136,14 @@ export function Details({ current: m, canEdit }) {
           <p className="empty">This migration has not been executed.</p>
         )}
       </section>
+      {operation && (
+        <SubmitRequestDialog
+          databaseId={database}
+          migration={m}
+          operation={operation}
+          onClose={() => setOperation("")}
+        />
+      )}
     </>
   );
 }

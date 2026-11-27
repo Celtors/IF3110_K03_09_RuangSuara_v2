@@ -449,6 +449,13 @@
   max-height: calc(100dvh - 2rem);
   overflow: auto;
 }
+.migration-app .modal-body {
+  grid-template-columns: minmax(0, 1fr);
+  overflow-wrap: anywhere;
+}
+.migration-app .attempt-body {
+  overflow-wrap: anywhere;
+}
 .migration-app .modal .sql {
   max-height: 45vh;
   border: 1px solid var(--line);

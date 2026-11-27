@@ -31,8 +31,8 @@ func (u User) AuthorizedGroupCount(database_id uuid.UUID, db *gorm.DB) int {
 
 func (u User) GetHighestAuthorization(database_id uuid.UUID, db *gorm.DB) string {
 	effects := [3]string{"Blocked", "ViewEdit", "ViewOnly"}
-	
-	for _ , value := range effects {
+
+	for _, value := range effects {
 		groups := db.Model(&GroupPolicy{}).Select("group_id").Where("database_id = ? AND effect = ?", database_id, value)
 
 		var userGroup []UserGroup
@@ -40,7 +40,7 @@ func (u User) GetHighestAuthorization(database_id uuid.UUID, db *gorm.DB) string
 
 		if len(userGroup) > 0 {
 			return value
-		} 
+		}
 	}
 
 	return "NotFound"
@@ -87,74 +87,37 @@ func (u User) GetGroupsUUID(db *gorm.DB) *[]uuid.UUID {
 }
 
 type SessionRotation struct {
-	ID uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	SessionId uuid.UUID
+	ID                  uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	SessionId           uuid.UUID
 	OldSessionTokenHash string
 	NewSessionTokenHash string
-	Status           string
-	RotatedAt time.Time
+	Status              string
+	RotatedAt           time.Time
+	ContinuationNonce   string
 }
-
-
 
 type SSOSession struct {
-	ID               uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	UserId           uuid.UUID
-	SessionTokenHash string
-	Status           string
-	CreatedAt        time.Time
-	ExpiresAt        time.Time
-	LastActivityAt   *time.Time
-	RevokedAt        *time.Time
-	RevokedReason    string
-	IpAddress        string
-	UserAgent        string
+	ID                 uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	UserId             uuid.UUID
+	SessionTokenHash   string
+	AuthorizationStamp string
+	Status             string
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	LastActivityAt     *time.Time
+	RevokedAt          *time.Time
+	RevokedReason      string
+	IpAddress          string
+	UserAgent          string
 }
-
-const session_idle_timeout = 24 * time.Hour
 
 func (SSOSession) TableName() string {
 	return "sso_sessions"
 }
 
-func (session SSOSession) IsValid() bool {
-	return session.Status == "Active" && session.ExpiresAt.After(time.Now()) && (session.RevokedAt == nil)
-}
-
-func (session SSOSession) UpdateStatus(db *gorm.DB) {
-	if session.ExpiresAt.Before(time.Now()) {
-		db.Model(&SSOSession{}).Where("id = ?", session.ID).Updates(SSOSession{Status: "Expired"})
-	}
-}
-
-func (session SSOSession) LatestRotation(db * gorm.DB) *SessionRotation {
-	var rotations []SessionRotation
-	db.Model(&SessionRotation{}).Where("session_id = ?", session.ID).Order("rotated_at DESC").Find(&rotations)
-
-	if len(rotations) <= 0 {
-		return nil
-	}
-
-	return &(rotations[0])
-}
-
-func (session SSOSession) MarkActivity(db *gorm.DB) {
-	t := time.Now()
-	if session.LastActivityAt != nil {
-		if session.LastActivityAt.Add(session_idle_timeout).Before(time.Now()) {
-			db.Model(&SSOSession{}).Where("id = ?", session.ID).Updates(SSOSession{Status: "Expired"})
-			return
-		}
-	}
-
-	
-
-	db.Model(&SSOSession{}).Where("id = ?", session.ID).Updates(SSOSession{LastActivityAt: &t})
-}
-
 type Database struct {
 	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	Name        string    `json:"name"`
+	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -183,7 +146,7 @@ type AccessLog struct {
 
 type GroupLeader struct {
 	ID        uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	LeaderId    uuid.UUID `json:"leader_id"`
+	LeaderId  uuid.UUID `json:"leader_id"`
 	GroupId   uuid.UUID `json:"group_id"`
 	CreatedAt time.Time `json:"created_at"`
 }

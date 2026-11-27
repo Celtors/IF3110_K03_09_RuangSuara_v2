@@ -4,6 +4,8 @@ import { HistoryView } from "./HistoryView.jsx";
 import { QueryPlan } from "./QueryPlan.jsx";
 import { SqlConsole } from "./SqlConsole.jsx";
 import { ErrorBox } from "../../migration/components.jsx";
+import { DatabaseViewer } from "./DatabaseViewer.jsx";
+import { ApprovalInbox } from "./ApprovalInbox.jsx";
 
 // Read-only reminder; NOT a selector. Selection happens only in Overview.
 function DatabaseContext({ selected, onChangeRequest }) {
@@ -32,16 +34,28 @@ function NeedDatabase({ onChangeRequest }) {
 }
 
 export function Workspace({
-  databaseId, onDatabaseChange, tab, onTabChange, databases, selected, ready, error, history, reload,
+  databaseId, onDatabaseChange, tab, onTabChange, databases, selected, ready, error, history, reload, approvals,
 }) {
   const usable = Boolean(databaseId && selected); // a valid, accessible selection
   const toOverview = () => onTabChange("overview");
   const panel = (id) => ({
-    role: "tabpanel",
-    id: `panel-${id}`,
-    "aria-labelledby": `tab-${id}`,
+    role: "region",
+    "aria-labelledby": `migration-nav-${id}`,
     hidden: tab !== id,
   });
+  const unavailable = databases.loading ? (
+    <div className="panel" role="status">Loading accessible databases…</div>
+  ) : databases.error ? (
+    <>
+      <ErrorBox error={databases.error} />
+      <button className="btn btn-primary" onClick={databases.reload}>Try again</button>
+    </>
+  ) : (
+    <>
+      {databaseId && <ErrorBox error="The selected database is not accessible to you." />}
+      <NeedDatabase onChangeRequest={toOverview} />
+    </>
+  );
   return (
     <>
       <div {...panel("overview")}>
@@ -70,18 +84,28 @@ export function Workspace({
             )}
           </>
         ) : (
-          <NeedDatabase onChangeRequest={toOverview} />
+          unavailable
         )}
       </div>
+
+      <div {...panel("approvals")}>
+        <ApprovalInbox approvals={approvals} databases={databases.items} />
+      </div>
+
+      {tab === "viewer" && (
+        <div {...panel("viewer")}>
+          <DatabaseViewer databaseId={databaseId} onDatabaseChange={onDatabaseChange} databases={databases} selected={selected} />
+        </div>
+      )}
 
       <div {...panel("console")}>
         {usable ? (
           <>
             <DatabaseContext selected={selected} onChangeRequest={toOverview} />
-            <SqlConsole key={databaseId} databaseId={databaseId} canEdit={selected.permission === "ViewEdit"} />
+            <SqlConsole key={databaseId} databaseId={databaseId} />
           </>
         ) : (
-          <NeedDatabase onChangeRequest={toOverview} />
+          unavailable
         )}
       </div>
 
@@ -92,9 +116,9 @@ export function Workspace({
             <QueryPlan key={databaseId} databaseId={databaseId} />
           </>
         ) : (
-          <NeedDatabase onChangeRequest={toOverview} />
+          unavailable
         )}
       </div>
     </>
   );
-}
+}

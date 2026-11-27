@@ -1,42 +1,79 @@
-import { useState } from "react";
-import { api, href, draftKey } from "../../migration/api.js";
+import { useRef, useState } from "react";
+import { apiWithSessionRetry, correctiveDraftHref, href, draftKey, requestHref } from "../../migration/api.js";
 import { database, base } from "../../migration/navigation.js";
-import { ErrorBox, SQL } from "../../migration/components.jsx";
-import Modal from "../../components/Modal.jsx";
-export function Editor({ current, canEdit }) {
+import { ErrorBox } from "../../migration/components.jsx";
+import { isOpen } from "../../migration/changeRequests.js";
+import { isUnattemptedDraft } from "../../migration/executionHistory.js";
+import { replaceUrl } from "../../migration/router.js";
+import { useChangeRequestList } from "../../migration/useChangeRequests.js";
+import { SubmitRequestDialog } from "./SubmitRequestDialog.jsx";
+export function Editor({ current, canEdit, correctsBatchId }) {
   const [draft, setDraft] = useState(() => ({
     name: current?.name ?? "",
     description: current?.description ?? "",
     release_label: current?.release_label ?? "",
     sql_script:
       current?.sql_script ?? sessionStorage.getItem(draftKey(database)) ?? "",
+    sql_down: current?.sql_down ?? "",
+    irreversible: current?.irreversible ?? false,
+    irreversible_reason: current?.irreversible_reason ?? "",
   }));
   const [saved, setSaved] = useState(current);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const saving = useRef(false);
+  // The SQL is frozen while a change request for it is open: approval covers exactly that SQL.
+  const requests = useChangeRequestList(saved ? database : "", saved?.id ?? "");
+  const openRequest = requests.items.find((r) => isOpen(r.status));
+  const attempted = requests.items.some((r) => r.attempt_id);
   const editable =
-    canEdit && (!saved || ["draft", "failed"].includes(saved.state));
+    canEdit &&
+    !requests.loading &&
+    !requests.error &&
+    !openRequest &&
+    !attempted &&
+    (!saved || isUnattemptedDraft(saved));
   const dirty =
     !saved ||
-    ["name", "description", "release_label", "sql_script"].some(
+    [
+      "name",
+      "description",
+      "release_label",
+      "sql_script",
+      "sql_down",
+      "irreversible",
+      "irreversible_reason",
+    ].some(
       (k) => draft[k] !== saved[k],
     );
   const change = (key, value) => {
-    setDraft((d) => ({ ...d, [key]: value }));
+    setDraft((d) => {
+      const next = { ...d, [key]: value };
+      // The server rejects SQL down on an irreversible migration, and a reason on a
+      // reversible one, so the form never lets both be filled in.
+      if (key === "irreversible") {
+        if (value) next.sql_down = "";
+        else next.irreversible_reason = "";
+      }
+      return next;
+    });
     setMessage("");
     setConfirm(false);
   };
   async function save(event) {
     event.preventDefault();
+    if (!editable || saving.current || !dirty) return;
+    saving.current = true;
     setBusy(true);
     setError("");
     try {
-      const m = await api(
+      const payload = draft;
+      const m = await apiWithSessionRetry(
         saved ? `${base}/migrations/${saved.id}` : `${base}/migrations`,
         saved ? "PATCH" : "POST",
-        draft,
+        payload,
       );
       setSaved(m);
       // Keep the editable form in sync with server normalization (e.g. a
@@ -46,49 +83,47 @@ export function Editor({ current, canEdit }) {
         description: m.description,
         release_label: m.release_label,
         sql_script: m.sql_script,
+        sql_down: m.sql_down ?? "",
+        irreversible: m.irreversible ?? false,
+        irreversible_reason: m.irreversible_reason ?? "",
       });
       sessionStorage.removeItem(draftKey(database));
-      setMessage("Draft saved. Review the SQL before executing.");
-      window.history.replaceState(null, "", href("editor", database, m.id));
+      setMessage("Draft saved. Review the SQL, then submit it for approval.");
+      replaceUrl(correctsBatchId ? correctiveDraftHref(database, correctsBatchId, m.id) : href("editor", database, m.id));
     } catch (e) {
       setError(e.message);
     } finally {
-      setBusy(false);
-    }
-  }
-  async function execute() {
-    if (!saved) return;
-    setBusy(true);
-    setError("");
-    try {
-      await api(`${base}/migrations/${saved.id}/execute`, "POST");
-      location.assign(href("details", database, saved.id));
-    } catch (e) {
-      setError(e.message);
-      setConfirm(false);
-      try {
-        setSaved(await api(`${base}/migrations/${saved.id}`));
-      } catch {
-        /* keep execution error visible */
-      }
-    } finally {
+      saving.current = false;
       setBusy(false);
     }
   }
   return (
     <>
+      {correctsBatchId && <p>Corrective migration for <a className="cr-link" href={requestHref(database, correctsBatchId)}>the partial batch</a>. This request requires all group approvals.</p>}
       <ErrorBox error={error} />
+      <ErrorBox error={requests.error} />
+      {requests.error && <button className="btn" onClick={requests.reload}>Retry change requests</button>}
       {message && (
         <div className="alert notice success" role="status">
           {message}
         </div>
       )}
-      {!editable && (
+      {openRequest && (
         <div className="alert notice">
-          {canEdit
-            ? "This migration is locked because it has been applied or its outcome is unresolved."
-            : "You have viewing permission for this database."}
+          This migration has an open change request, so it is locked until the request finishes or is cancelled.{" "}
+          <a className="cr-link" href={requestHref(database, openRequest.id)}>
+            View request →
+          </a>
         </div>
+      )}
+      {!editable && !openRequest && (
+        !canEdit ? (
+          <div className="alert notice">You have viewing permission for this database.</div>
+        ) : requests.loading ? (
+          <p role="status">Checking change requests…</p>
+        ) : !requests.error && (
+          <div className="alert notice">This definition can no longer be edited. Create a new migration to change its SQL.</div>
+        )
       )}
       <form onSubmit={save}>
         <div className="editor-grid">
@@ -115,6 +150,56 @@ export function Editor({ current, canEdit }) {
             <div className="editor-foot">
               Multiple statements · one transaction · one applied version
             </div>
+            <div className="panel-heading">
+              <h2>SQL down (rollback)</h2>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={draft.irreversible}
+                  onChange={(e) => change("irreversible", e.target.checked)}
+                  disabled={!editable || busy}
+                />{" "}
+                Irreversible
+              </label>
+            </div>
+            {draft.irreversible ? (
+              <>
+                <label htmlFor="irreversible-reason">
+                  Why this cannot be undone
+                </label>
+                <textarea
+                  className="input"
+                  id="irreversible-reason"
+                  value={draft.irreversible_reason}
+                  onChange={(e) => change("irreversible_reason", e.target.value)}
+                  readOnly={!editable || busy}
+                  maxLength={4000}
+                  placeholder="Drops a column; the data cannot be restored by SQL down."
+                />
+                <div className="editor-foot">
+                  Irreversible migrations cannot be rolled back.
+                </div>
+              </>
+            ) : (
+              <>
+                <label className="sr-only" htmlFor="sql-down">
+                  Rollback SQL
+                </label>
+                <textarea
+                  className="input code-editor"
+                  id="sql-down"
+                  value={draft.sql_down}
+                  onChange={(e) => change("sql_down", e.target.value)}
+                  readOnly={!editable || busy}
+                  maxLength={262144}
+                  placeholder={"DROP TABLE IF EXISTS public.example;"}
+                />
+                <div className="editor-foot">
+                  Undoes the SQL script, in reverse order. Required before
+                  submitting unless the migration is irreversible.
+                </div>
+              </>
+            )}
           </section>
           <section className="panel metadata-form">
             <h2>Migration information</h2>
@@ -151,8 +236,10 @@ export function Editor({ current, canEdit }) {
               placeholder="October release"
             />
             <div className="alert notice">
-              Execution applies this SQL to <strong>{database}</strong>. Failed
-              transactions roll back. Uncertain outcomes require reconciliation.
+              Submitting asks every group with access to{" "}
+              <strong>{database}</strong> to approve this SQL. Once approved it
+              runs from the queue. Failed transactions roll back. Uncertain
+              outcomes require reconciliation.
             </div>
             {editable && (
               <>
@@ -169,7 +256,7 @@ export function Editor({ current, canEdit }) {
                   disabled={busy || dirty || !saved}
                   onClick={() => setConfirm(true)}
                 >
-                  Review & execute
+                  Submit for approval
                 </button>
               </>
             )}
@@ -184,34 +271,14 @@ export function Editor({ current, canEdit }) {
           </section>
         </div>
       </form>
-      {confirm && (
-        <Modal
-          title={`Execute “${saved?.name}”?`}
+      {confirm && saved && (
+        <SubmitRequestDialog
+          databaseId={database}
+          migration={saved}
+          operation="apply"
+          correctsBatchId={correctsBatchId}
           onClose={() => setConfirm(false)}
-          wide
-        >
-          <p>
-            This changes database <strong>{database}</strong>. Confirm the exact
-            saved script below.
-          </p>
-          <SQL value={saved?.sql_script ?? ""} />
-          <div className="actions">
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() => setConfirm(false)}
-            >
-              Cancel
-            </button>
-            <button
-              className="btn btn-primary"
-              disabled={busy}
-              onClick={execute}
-            >
-              {busy ? "Executing…" : "Execute migration"}
-            </button>
-          </div>
-        </Modal>
+        />
       )}
     </>
   );

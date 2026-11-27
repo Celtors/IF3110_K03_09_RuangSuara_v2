@@ -1,0 +1,55 @@
+name: ruangsuara-observability
+
+services:
+  collector:
+    image: otel/opentelemetry-collector:0.131.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      GOMEMLIMIT: 160MiB
+    ports:
+      - "127.0.0.1:4318:4318"
+    volumes:
+      - ./observability/collector.yaml:/etc/otelcol/config.yaml:ro
+
+  loki:
+    image: grafana/loki:3.5.3
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/config.yaml:ro
+      - loki:/loki
+
+  jaeger:
+    image: jaegertracing/jaeger:2.8.0
+    ports:
+      - "127.0.0.1:16686:16686"
+    volumes:
+      - ./observability/jaeger.yaml:/etc/jaeger/config.yaml:ro
+    command: ["--config", "/etc/jaeger/config.yaml"]
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d", "--storage.tsdb.retention.size=500MB"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_VIEWERS_CAN_EDIT: "true" # Grants Grafana 12.1 viewers access to Explore.
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  loki:
+  prometheus:

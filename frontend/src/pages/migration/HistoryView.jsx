@@ -1,16 +1,22 @@
 import { useState } from "react";
 import { Badge, ErrorBox } from "../../migration/components.jsx";
-import { api, href, date, databaseBase } from "../../migration/api.js";
+import { apiWithSessionRetry, href, date, databaseBase } from "../../migration/api.js";
+import { useChangeRequestList } from "../../migration/useChangeRequests.js";
+import { ChangeRequestList } from "./ChangeRequestList.jsx";
+import { ExecutionHistory } from "./ExecutionHistory.jsx";
 export function HistoryView({ history, reload, databaseId }) {
   const base = databaseBase(databaseId);
+  const requests = useChangeRequestList(databaseId, "", reload);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   async function reconcile() {
+    if (busy) return;
     setBusy(true);
     setError("");
     try {
-      await api(`${base}/migrations/reconcile`, "POST");
+      await apiWithSessionRetry(`${base}/migrations/reconcile`, "POST");
       reload();
+      requests.reload();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -19,25 +25,24 @@ export function HistoryView({ history, reload, databaseId }) {
   }
   const applied = history.migrations.filter(
     (m) => m.state === "applied",
-  ).length;
+  );
+  const activeVersion = applied.reduce((version, m) => Math.max(version, m.version ?? 0), 0);
   return (
     <>
       <div className="stats">
         <div>
           <span>Applied migrations</span>
-          <strong>{applied.toString().padStart(2, "0")}</strong>
+          <strong>{applied.length.toString().padStart(2, "0")}</strong>
         </div>
         <div>
-          <span>Drafts & unresolved</span>
+          <span>Inactive definitions</span>
           <strong>
-            {(history.migrations.length - applied).toString().padStart(2, "0")}
+            {(history.migrations.length - applied.length).toString().padStart(2, "0")}
           </strong>
         </div>
         <div>
           <span>Current version</span>
-          <strong>
-            v{Math.max(0, ...history.migrations.map((m) => m.version ?? 0))}
-          </strong>
+          <strong>v{activeVersion}</strong>
         </div>
       </div>
       <ErrorBox error={error} />
@@ -122,6 +127,13 @@ export function HistoryView({ history, reload, databaseId }) {
           </div>
         )}
       </section>
+      <ExecutionHistory
+        databaseId={databaseId}
+        migrations={history.migrations}
+        canEdit={history.can_edit}
+        requests={requests}
+      />
+      <ChangeRequestList list={requests} databaseId={databaseId} title="Change requests" />
     </>
   );
 }

@@ -7,19 +7,65 @@ export class ApiError extends Error {
   }
 }
 
+const sessionPath = '/session-manager/me'
+const loginPath = '/session-manager/login'
+const csrfHeader = 'X-CSRF-Token'
+
+let csrf = ''
+let refreshToken
+
+async function sessionResponse() {
+  const response = await fetch(sessionPath, { credentials: 'same-origin' })
+  csrf = response.ok ? response.headers.get(csrfHeader) ?? '' : ''
+  return response
+}
+
+// Only retry a mutation when the server explicitly rejected it before dispatch.
+export async function sessionFetch(path, method = 'GET', body) {
+  if (path === sessionPath) return sessionResponse()
+  const headers = new Headers()
+  if (body !== undefined) headers.set('Content-Type', 'application/json')
+  const send = () => fetch(path, {
+    method,
+    credentials: 'same-origin',
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS' || path === loginPath) {
+    const response = await send()
+    if (path === loginPath && response.ok) csrf = ''
+    return response
+  }
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (!csrf) {
+      refreshToken ??= sessionResponse().finally(() => { refreshToken = undefined })
+      const response = await refreshToken
+      if (!response.ok) return response.clone()
+      if (!csrf) throw new ApiError('The session did not return a CSRF token. Refresh and try again.')
+    }
+    headers.set(csrfHeader, csrf)
+    const response = await send()
+    if (response.status !== 403 || attempt === 1) {
+      if (path === '/session-manager/logout' && response.ok) csrf = ''
+      return response
+    }
+    const error = await response.clone().json().catch(() => null)
+    if (error?.error?.code !== 'csrf_failed') return response
+    csrf = ''
+  }
+}
+
 // Backend error shapes:
 //   login/logout:  { error: { code, message, requestId } }
 //   control panel: { status: "error", message }
 async function request(method, path, body) {
   let res
   try {
-    res = await fetch(path, {
-      method,
-      credentials: 'include',
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    })
-  } catch {
+    res = await sessionFetch(path, method, body)
+  } catch (error) {
+    if (error instanceof ApiError) throw error
     throw new ApiError('Cannot reach the server. Check that the backend is running on port 8080.')
   }
 

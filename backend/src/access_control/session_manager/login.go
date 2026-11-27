@@ -1,107 +1,89 @@
 package sessionmanager
 
 import (
-	"time"
-	"backend/access_control/utility"
-	"backend/access_control/models"
-
+	"errors"
+	"log/slog"
 	"net/http"
+	"time"
+
+	"backend/access_control/models"
+	"backend/access_control/utility"
+	"backend/internal/telemetry"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type LoginPayload struct {
-	Username    string `json:"username" binding:"omitempty"`
-	Password string `json:"password" binding:"omitempty,gte=8"`
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required,gte=8"`
 }
 
-const session_absolute_exp_duration time.Duration = 3600 * time.Hour
-
-func GenerateSession(user models.User, c *gin.Context) (models.SSOSession, string, error) {
-	session_token, err := utility.CryptoRandString(16)
-	if err != nil {
-		return models.SSOSession{}, "", err
-	}
-	token_hash := utility.HashToken(session_token)
-	return models.SSOSession{
-		UserId:           user.ID,
-		SessionTokenHash: token_hash,
-		Status:           "Active",
-		IpAddress: c.ClientIP(),
-		UserAgent: c.Request.UserAgent(),
-		CreatedAt:        time.Now(),
-		ExpiresAt:        time.Now().Add(session_absolute_exp_duration),
-	}, session_token, nil
-}
-
-func UnauthorizedLoginResponse(c *gin.Context, message string) {
-	newUUID, _ := uuid.NewRandom()
-	c.JSON(http.StatusUnauthorized, gin.H{
-		"error": gin.H{
-			"code":      "LOGIN_FAILED",
-			"message":   message,
-			"requestId": newUUID.String(),
-		},
-	})
-}
-
-func InternalServerResponse(c *gin.Context) {
-	newUUID, _ := uuid.NewRandom()
-	c.JSON(http.StatusInternalServerError, gin.H{
-		"error": gin.H{
-			"code":      "SERVER_ERROR",
-			"message":   "Authorization request failed due to a server error",
-			"requestId": newUUID.String(),
-		},
-	})
+func authError(c *gin.Context, status int, code, message string) {
+	c.JSON(status, gin.H{"error": gin.H{"code": code, "message": message, "requestId": uuid.NewString()}})
 }
 
 func LoginRequest(c *gin.Context, db *gorm.DB) {
-	var loginPayload LoginPayload
-
-	if err := c.ShouldBindJSON(&loginPayload); err != nil {
-		UnauthorizedLoginResponse(c, "Invalid login form!")
+	ctx := c.Request.Context()
+	c.Header("Cache-Control", "no-store")
+	if !validOrigin(c.Request) {
+		slog.WarnContext(ctx, "authentication.login", "status", "rejected", "reason", "origin")
+		authError(c, http.StatusForbidden, "csrf_failed", ErrCSRF.Error())
 		return
 	}
-	var users []models.User
-	db.Where("username = ?", loginPayload.Username).Find(&users)
-
-	if len(users) <= 0 {
-		UnauthorizedLoginResponse(c, "Wrong username or password!")
-		return
-	}
-
-	user := users[0]
-
-	if !user.IsActive() {
-		UnauthorizedLoginResponse(c, "User account is inactive!")
+	var payload LoginPayload
+	if c.ContentType() != "application/json" || c.ShouldBindJSON(&payload) != nil {
+		slog.WarnContext(ctx, "authentication.login", "status", "rejected")
+		authError(c, http.StatusUnauthorized, "LOGIN_FAILED", "Wrong username or password")
 		return
 	}
 
-	if !utility.CheckPasswordHash(loginPayload.Password, user.PasswordHash) {
-		UnauthorizedLoginResponse(c, "Wrong username or password!")
+	var token string
+	var session models.SSOSession
+	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&user, "username = ?", payload.Username).Error; err != nil {
+			return sessionLookupError(err)
+		}
+		if !user.IsActive() || !utility.CheckPasswordHash(payload.Password, user.PasswordHash) {
+			return ErrUnauthenticated
+		}
+		ctx = telemetry.With(ctx, telemetry.ID("actor_id", user.ID.String()))
+		c.Request = c.Request.WithContext(ctx)
+		tx = tx.WithContext(ctx)
+		stamp, err := models.AuthorizationStamp(tx, user.ID)
+		if err != nil {
+			return err
+		}
+		token, err = utility.CryptoRandString(32)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		session = models.SSOSession{
+			UserId: user.ID, SessionTokenHash: utility.HashToken(token), AuthorizationStamp: stamp,
+			Status: "Active", IpAddress: c.ClientIP(), UserAgent: c.Request.UserAgent(),
+			CreatedAt: now, ExpiresAt: now.Add(absoluteLifetime), LastActivityAt: &now,
+		}
+		if err = models.RevokeUserSessions(tx, user.ID, "new_session_created"); err != nil {
+			return err
+		}
+		return tx.Create(&session).Error
+	})
+	if errors.Is(err, ErrUnauthenticated) {
+		slog.WarnContext(ctx, "authentication.login", "status", "rejected")
+		authError(c, http.StatusUnauthorized, "LOGIN_FAILED", "Wrong username or password")
 		return
 	}
-
-	session, session_token, err := GenerateSession(users[0], c)
-
 	if err != nil {
-		InternalServerResponse(c)
+		slog.LogAttrs(ctx, slog.LevelError, "authentication.login", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
+		authError(c, http.StatusServiceUnavailable, "authorization_unavailable", "Session storage is unavailable")
 		return
 	}
 
-	result := db.Create(&session)
-	if err := result.Error; err != nil {
-		InternalServerResponse(c)
-		return
-	}
-
-	db.Model(&models.SSOSession{}).
-	   Where("user_id = ? AND id != ? AND status = ?", users[0].ID, session.ID, "Active").
-	   Updates(models.SSOSession{Status: "Revoked", RevokedReason: "new_session_created"})
-	
-	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("ssid", session_token, int(session_absolute_exp_duration.Seconds()), "/", "localhost", true, true)   
+	setSessionCookie(c, token, session.ExpiresAt)
+	slog.InfoContext(ctx, "authentication.login", "status", "succeeded")
+	c.Status(http.StatusOK)
 }
-

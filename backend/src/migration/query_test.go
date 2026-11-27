@@ -23,68 +23,52 @@ func faultCode(err error) string {
 func TestParseConsoleSQL(t *testing.T) {
 	cases := []struct {
 		name, sql string
-		perm      Permission
-		want      string // "" = accepted, otherwise the fault code
+
+		want string // "" = accepted, otherwise the fault code
 	}{
-		// View only: accepted
-		{"select", "SELECT 1", View, ""},
-		{"where order", "SELECT * FROM students WHERE id = 1 ORDER BY name;", View, ""},
-		{"join group", "SELECT d.name, COUNT(s.id) FROM departments d LEFT JOIN students s ON d.id = s.department_id GROUP BY d.name", View, ""},
-		{"cte", "WITH x AS (SELECT 1 AS a) SELECT * FROM x", View, ""},
-		{"subquery", "SELECT * FROM (SELECT 1 AS a) q WHERE a IN (SELECT 1)", View, ""},
-		{"values", "VALUES (1),(2)", View, ""},
-		{"safe function", "SELECT lower('A')", View, ""},
-		// View only: rejected
-		{"insert", "INSERT INTO t VALUES (1)", View, "forbidden"},
-		{"update", "UPDATE t SET a = 1", View, "forbidden"},
-		{"delete", "DELETE FROM t", View, "forbidden"},
-		{"create", "CREATE TABLE t (a int)", View, "forbidden"},
-		{"alter", "ALTER TABLE t ADD b int", View, "forbidden"},
-		{"drop", "DROP TABLE t", View, "forbidden"},
-		{"truncate", "TRUNCATE t", View, "forbidden"},
-		{"grant", "GRANT SELECT ON t TO x", View, "unsupported_sql"},
-		{"revoke", "REVOKE SELECT ON t FROM x", View, "unsupported_sql"},
-		{"writable cte", "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d", View, "forbidden"},
-		{"select into", "SELECT * INTO n FROM t", View, "forbidden"},
-		{"for update", "SELECT * FROM t FOR UPDATE", View, "forbidden"},
-		{"set_config", "SELECT set_config('a','b',false)", View, "unsupported_sql"},
-		{"terminate", "SELECT pg_terminate_backend(1)", View, "unsupported_sql"},
-		{"query_to_xml", "SELECT query_to_xml('select 1', true, true, '')", View, "unsupported_sql"},
-		{"begin", "BEGIN", View, "unsupported_sql"},
-		{"commit", "COMMIT", View, "unsupported_sql"},
-		{"set role", "SET ROLE x", View, "unsupported_sql"},
-		{"do block", "DO $$ BEGIN END $$", View, "unsupported_sql"},
-		{"explain analyze", "EXPLAIN ANALYZE DELETE FROM t", View, "unsupported_sql"},
-		{"multiple", "SELECT 1; SELECT 2", View, "unsupported_sql"},
-		{"empty", "", View, "invalid_sql"},
-		{"blank", "   ", View, "invalid_sql"},
-		{"only semicolon", ";", View, "invalid_sql"},
-		{"syntax", "SELEC 1", View, "invalid_sql"},
-		// View + Edit: accepted
-		{"edit select", "SELECT 1", Edit, ""},
-		{"insert returning", "INSERT INTO t (a) VALUES (1) RETURNING a", Edit, ""},
-		{"update", "UPDATE t SET a = 2 WHERE a = 1", Edit, ""},
-		{"delete returning", "DELETE FROM t WHERE a = 2 RETURNING *", Edit, ""},
-		{"create table", "CREATE TABLE t2 (id integer PRIMARY KEY)", Edit, ""},
-		{"alter table", "ALTER TABLE t2 ADD COLUMN b text", Edit, ""},
-		{"drop table", "DROP TABLE t2", Edit, ""},
-		{"truncate", "TRUNCATE t2", Edit, ""},
-		{"create index", "CREATE INDEX i ON t (a)", Edit, ""},
-		{"writable cte", "WITH x AS (UPDATE t SET a = 1 RETURNING a) SELECT * FROM x", Edit, ""},
-		// View + Edit: still rejected
-		{"edit grant", "GRANT ALL ON t TO x", Edit, "unsupported_sql"},
-		{"concurrent index", "CREATE INDEX CONCURRENTLY i ON t (a)", Edit, "unsupported_sql"},
-		{"alter database", "ALTER DATABASE d RENAME TO e", Edit, "unsupported_sql"},
-		{"comment database", "COMMENT ON DATABASE d IS 'x'", Edit, "unsupported_sql"},
-		{"dblink", "SELECT dblink('a','b')", Edit, "unsupported_sql"},
-		{"drop role", "DROP ROLE x", Edit, "unsupported_sql"},
-		{"create function", "CREATE FUNCTION f() RETURNS int AS 'select 1' LANGUAGE sql", Edit, "unsupported_sql"},
-		{"edit multiple", "SELECT 1; DROP TABLE t", Edit, "unsupported_sql"},
-		{"no access", "SELECT 1", NoAccess, "forbidden"},
+		// Accepted queries
+		{"select", "SELECT 1", ""},
+		{"where order", "SELECT * FROM students WHERE id = 1 ORDER BY name;", ""},
+		{"join group", "SELECT d.name, COUNT(s.id) FROM departments d LEFT JOIN students s ON d.id = s.department_id GROUP BY d.name", ""},
+		{"cte", "WITH x AS (SELECT 1 AS a) SELECT * FROM x", ""},
+		{"subquery", "SELECT * FROM (SELECT 1 AS a) q WHERE a IN (SELECT 1)", ""},
+		{"values", "VALUES (1),(2)", ""},
+		{"safe function", "SELECT lower('A')", ""},
+		// Rejected statements
+		{"insert", "INSERT INTO t VALUES (1)", "forbidden"},
+		{"update", "UPDATE t SET a = 1", "forbidden"},
+		{"delete", "DELETE FROM t", "forbidden"},
+		{"create", "CREATE TABLE t (a int)", "forbidden"},
+		{"alter", "ALTER TABLE t ADD b int", "forbidden"},
+		{"drop", "DROP TABLE t", "forbidden"},
+		{"truncate", "TRUNCATE t", "forbidden"},
+		{"grant", "GRANT SELECT ON t TO x", "unsupported_sql"},
+		{"revoke", "REVOKE SELECT ON t FROM x", "unsupported_sql"},
+		{"writable cte", "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d", "forbidden"},
+		{"select into", "SELECT * INTO n FROM t", "forbidden"},
+		{"for update", "SELECT * FROM t FOR UPDATE", "forbidden"},
+		{"set_config", "SELECT set_config('a','b',false)", "unsupported_sql"},
+		{"terminate", "SELECT pg_terminate_backend(1)", "unsupported_sql"},
+		{"query_to_xml", "SELECT query_to_xml('select 1', true, true, '')", "unsupported_sql"},
+		{"begin", "BEGIN", "unsupported_sql"},
+		{"commit", "COMMIT", "unsupported_sql"},
+		{"set role", "SET ROLE x", "unsupported_sql"},
+		{"do block", "DO $$ BEGIN END $$", "unsupported_sql"},
+		{"explain analyze", "EXPLAIN ANALYZE DELETE FROM t", "unsupported_sql"},
+		{"multiple", "SELECT 1; SELECT 2", "unsupported_sql"},
+		{"empty", "", "invalid_sql"},
+		{"blank", "   ", "invalid_sql"},
+		{"only semicolon", ";", "invalid_sql"},
+		{"syntax", "SELEC 1", "invalid_sql"},
+		{"internal ledger", "SELECT * FROM dmp_batch.checkpoints", "unsupported_sql"},
+		{"dblink", "SELECT dblink('a','b')", "unsupported_sql"},
+		{"drop role", "DROP ROLE x", "unsupported_sql"},
+		{"create function", "CREATE FUNCTION f() RETURNS int AS 'select 1' LANGUAGE sql", "unsupported_sql"},
+		{"edit multiple", "SELECT 1; DROP TABLE t", "unsupported_sql"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := parseConsoleSQL(c.sql, c.perm)
+			_, err := parseConsoleSQL(c.sql)
 			if got := faultCode(err); got != c.want {
 				t.Fatalf("parseConsoleSQL(%q) fault=%q (%v), want %q", c.sql, got, err, c.want)
 			}
@@ -93,7 +77,7 @@ func TestParseConsoleSQL(t *testing.T) {
 }
 
 func TestParseConsoleSQLSizeLimit(t *testing.T) {
-	_, err := parseConsoleSQL("SELECT 1;"+strings.Repeat(" ", maxConsoleSQLBytes), View)
+	_, err := parseConsoleSQL("SELECT 1;" + strings.Repeat(" ", maxConsoleSQLBytes))
 	if faultCode(err) != "invalid_sql" {
 		t.Fatalf("oversized SQL must be rejected, got %v", err)
 	}

@@ -1,7 +1,10 @@
 import { useState } from 'react'
-import { HOME_PAGE, fetchMe, login } from '../auth/session'
+import { useSession } from '../auth/session-context'
 
-export default function Login({ next }) {
+// Where the user goes once signed in is decided by the route table in App.jsx (the ?next= page
+// when they may open it, otherwise their home), so this form only has to sign in.
+export default function Login() {
+  const { signIn } = useSession()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -17,10 +20,8 @@ export default function Login({ next }) {
 
     setBusy(true)
     try {
-      await login(username.trim(), password)
-      // Admins continue to where they were going; everyone else lands on the home page.
-      const me = await fetchMe()
-      window.location.assign(me?.admin ? next : HOME_PAGE)
+      await signIn(username.trim(), password)
+      // The screen is replaced as soon as the session is known; nothing more to do here.
     } catch (err) {
       setError(err.message)
       setPassword('')

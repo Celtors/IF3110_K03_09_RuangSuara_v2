@@ -4,7 +4,7 @@ import { permissionLabel } from "../../migration/permission.js";
 
 const CARDS = [
   ["migration", "01", "Review every change", "Browse applied versions, drafts, and execution outcomes."],
-  ["console", "02", "Run ad-hoc SQL", "Query the selected database and inspect results. Nothing is recorded as a migration."],
+  ["console", "02", "Run ad-hoc SQL", "Run read-only SQL and inspect the results."],
   ["schema-diff", "03", "Design the next schema", "Compare a desired schema and generate candidate SQL."],
   ["plan", "04", "Inspect before execution", "See scan types, indexes, joins, and estimated costs."],
 ];

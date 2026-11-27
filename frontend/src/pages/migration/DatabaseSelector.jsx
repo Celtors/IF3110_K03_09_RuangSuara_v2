@@ -1,13 +1,13 @@
 import { permissionLabel } from "../../migration/permission.js";
-export function DatabaseSelector({ databases, loading, error, onRetry, value, onChange }) {
+export function DatabaseSelector({ id = "database-select", databases, loading, error, onRetry, value, onChange }) {
   const listed = databases.some((d) => d.id === value);
   const inaccessible = Boolean(value) && !loading && !error && !listed;
   return (
     <section className="panel database-selector">
-      <label htmlFor="database-select">Database</label>
+      <label htmlFor={id}>Database</label>
       <select
         className="input"
-        id="database-select"
+        id={id}
         value={value}
         disabled={loading || (!databases.length && !value)}
         onChange={(e) => onChange(e.target.value)}

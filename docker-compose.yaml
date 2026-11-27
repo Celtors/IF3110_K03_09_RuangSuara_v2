@@ -1,6 +1,3 @@
-include:
-  - env_file : ./.env
-
 services:
   access-control-db:
     image: postgres:16-alpine

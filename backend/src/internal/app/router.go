@@ -23,16 +23,23 @@ func RegisterMigration(router *gin.Engine, service *migration.Service, assets st
 		c.Next()
 	})
 	migration.RegisterRoutes(r, service)
-	pages := []string{"index.html", "history.html", "editor.html", "details.html", "schema-diff.html", "query-plan.html"}
-	for _, page := range pages {
-		r.GET("/migrations/"+page, func(c *gin.Context) { c.File(filepath.Join(assets, "migrations", page)) })
+	// The whole frontend is one single-page app. Every screen URL answers with the same shell
+	// (index.html) and the client router picks the screen from the path and query, so a refresh
+	// or a pasted link works. The old .html names are served too; the client replaces them with
+	// the clean URL.
+	shell := func(c *gin.Context) { c.File(filepath.Join(assets, "index.html")) }
+	screens := []string{"/", "/login", "/home", "/migrations", "/migrations/"}
+	legacy := []string{"/index.html", "/login.html", "/home.html", "/migrations/index.html"}
+	for _, section := range []string{"users", "groups", "databases", "policies"} {
+		screens = append(screens, "/admin/"+section)
+		legacy = append(legacy, "/admin/"+section+".html")
 	}
-	// Serve the page directly to avoid an index.html redirect loop.
-	r.GET("/migrations/", func(c *gin.Context) { c.File(filepath.Join(assets, "migrations", "index.html")) })
-	r.GET("/", func(c *gin.Context) { c.File(filepath.Join(assets, "index.html")) })
-	r.GET("/index.html", func(c *gin.Context) { c.File(filepath.Join(assets, "index.html")) })
-	for _, page := range []string{"login.html", "home.html", "admin/users.html", "admin/groups.html", "admin/databases.html", "admin/policies.html"} {
-		r.GET("/"+page, func(c *gin.Context) { c.File(filepath.Join(assets, page)) })
+	for _, page := range []string{"history", "editor", "details", "schema-diff", "query-plan", "change-request"} {
+		screens = append(screens, "/migrations/"+page)
+		legacy = append(legacy, "/migrations/"+page+".html")
+	}
+	for _, path := range append(screens, legacy...) {
+		r.GET(path, shell)
 	}
 	if _, err := os.Stat(filepath.Join(assets, "assets")); err == nil {
 		r.Static("/assets", filepath.Join(assets, "assets"))

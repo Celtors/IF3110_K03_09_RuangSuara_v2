@@ -2,17 +2,21 @@ package migration
 
 import (
 	"context"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func inspectSchema(ctx context.Context, pool *pgxpool.Pool, name string) (Schema, error) {
+func inspectSchema(ctx context.Context, pool, platform *pgxpool.Pool, name string) (Schema, error) {
 	out := Schema{Name: name, Tables: []Table{}, Unsupported: []string{}}
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return out, fault("database_unavailable", "Target connection unavailable")
 	}
-	defer rollback(tx)
+	defer rollback(ctx, tx)
+	if _, err := checkTarget(ctx, tx, platform); err != nil {
+		return out, err
+	}
 	if _, err = tx.Exec(ctx, `SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='2s'`); err != nil {
 		return out, err
 	}

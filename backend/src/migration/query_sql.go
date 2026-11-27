@@ -4,30 +4,22 @@ import (
 	"encoding/json"
 	"strings"
 
+	"backend/internal/targetdb"
+
 	pgquery "github.com/wasilibs/go-pgquery"
 )
 
 const maxConsoleSQLBytes = 256 * 1024
 
-var consoleWriteKinds = map[string]bool{
-	"SelectStmt": true, "InsertStmt": true, "UpdateStmt": true, "DeleteStmt": true,
+var consoleKnownWrites = map[string]bool{
+	"InsertStmt": true, "UpdateStmt": true, "DeleteStmt": true,
 	"CreateStmt": true, "AlterTableStmt": true, "IndexStmt": true, "DropStmt": true,
 	"TruncateStmt": true, "CreateSchemaStmt": true, "RenameStmt": true, "CommentStmt": true,
 }
 
-// Rejected anywhere in the tree for every permission.
-var consoleForbiddenNodes = map[string]bool{
-	"GrantStmt": true, "GrantRoleStmt": true, "AlterDefaultPrivilegesStmt": true,
-}
-
-// Data-modifying nodes: rejected anywhere (CTEs, subqueries) for View only.
+// Data-modifying nodes: rejected anywhere (CTEs, subqueries) for both access tiers.
 var consoleWriteNodes = map[string]bool{
 	"InsertStmt": true, "UpdateStmt": true, "DeleteStmt": true, "MergeStmt": true,
-}
-
-// ALTER/COMMENT on server-level objects is outside "ViewEdit".
-var consoleForbiddenObjects = map[string]bool{
-	"OBJECT_DATABASE": true, "OBJECT_ROLE": true, "OBJECT_TABLESPACE": true,
 }
 
 var consoleBlockedFunctions = map[string]bool{
@@ -42,12 +34,9 @@ var consoleBlockedPrefixes = []string{
 	"pg_logical_", "pg_replication_",
 }
 
-// parseConsoleSQL validates one ad-hoc statement for the user's permission and
+// parseConsoleSQL validates one read-only ad-hoc statement and
 // returns its pg_query node kind (used only for audit logging).
-func parseConsoleSQL(sql string, permission Permission) (string, error) {
-	if permission < View || permission > Edit {
-		return "", fault("forbidden", "You do not have the required database permission")
-	}
+func parseConsoleSQL(sql string) (string, error) {
 	if strings.TrimSpace(sql) == "" || len(sql) > maxConsoleSQLBytes {
 		return "", fault("invalid_sql", "SQL must contain 1 to 262144 bytes")
 	}
@@ -77,58 +66,38 @@ func parseConsoleSQL(sql string, permission Permission) (string, error) {
 	for k := range statement {
 		kind = k
 	}
-	switch {
-	case kind == "SelectStmt":
-	case consoleWriteKinds[kind] && permission < Edit:
-		return kind, fault("forbidden", "View only access allows read-only SELECT statements; this statement requires View + Edit")
-	case !consoleWriteKinds[kind]:
-		return kind, fault("unsupported_sql", kind+" is outside the supported SQL subset")
+	if kind != "SelectStmt" {
+		if consoleKnownWrites[kind] {
+			return kind, fault("forbidden", "The SQL Console is read-only; submit a migration to make changes")
+		}
+		return kind, fault("unsupported_sql", kind+" is outside the supported read-only SQL subset")
 	}
-	if err = checkConsoleObjectType(kind, statement); err != nil {
-		return kind, err
-	}
-	return kind, inspectConsoleNode(statement, permission)
+	return kind, inspectConsoleNode(statement)
 }
 
-func checkConsoleObjectType(kind string, statement map[string]any) error {
-	field := map[string]string{"RenameStmt": "renameType", "CommentStmt": "objtype"}[kind]
-	if field == "" {
-		return nil
-	}
-	body, _ := statement[kind].(map[string]any)
-	if t, _ := body[field].(string); consoleForbiddenObjects[t] {
-		return fault("unsupported_sql", "Server-level objects (database, role, tablespace) cannot be changed here")
-	}
-	return nil
-}
-
-func inspectConsoleNode(value any, permission Permission) error {
+func inspectConsoleNode(value any) error {
 	switch v := value.(type) {
 	case map[string]any:
 		for key, child := range v {
 			switch {
-			case consoleForbiddenNodes[key]:
-				return fault("unsupported_sql", "GRANT, REVOKE and privilege changes are not supported")
-			case permission < Edit && consoleWriteNodes[key]:
-				return fault("forbidden", "Data-modifying statements require View + Edit access")
-			case permission < Edit && key == "intoClause":
-				return fault("forbidden", "SELECT INTO creates a table and requires View + Edit access")
-			case permission < Edit && key == "lockingClause":
-				return fault("forbidden", "Row locking (FOR UPDATE/SHARE) requires View + Edit access")
-			case key == "concurrent" && child == true:
-				return fault("unsupported_sql", "Concurrent index operations cannot run inside a transaction")
+			case consoleWriteNodes[key], key == "intoClause", key == "lockingClause":
+				return fault("forbidden", "The SQL Console is read-only; submit a migration to make changes")
 			case key == "FuncCall":
-				if err := checkConsoleFunction(child); err != nil {
+				if err := checkTargetFunction(child); err != nil {
 					return err
 				}
 			}
-			if err := inspectConsoleNode(child, permission); err != nil {
+			if err := inspectConsoleNode(child); err != nil {
 				return err
 			}
 		}
+	case string:
+		if strings.EqualFold(v, targetdb.LedgerSchema) {
+			return fault("unsupported_sql", "The internal batch ledger is reserved")
+		}
 	case []any:
 		for _, item := range v {
-			if err := inspectConsoleNode(item, permission); err != nil {
+			if err := inspectConsoleNode(item); err != nil {
 				return err
 			}
 		}
@@ -136,7 +105,7 @@ func inspectConsoleNode(value any, permission Permission) error {
 	return nil
 }
 
-func checkConsoleFunction(call any) error {
+func checkTargetFunction(call any) error {
 	node, _ := call.(map[string]any)
 	names, _ := node["funcname"].([]any)
 	name := ""
@@ -151,7 +120,7 @@ func checkConsoleFunction(call any) error {
 		blocked = blocked || strings.HasPrefix(name, prefix)
 	}
 	if blocked {
-		return fault("unsupported_sql", "Function "+name+" is not available in the SQL Console")
+		return fault("unsupported_sql", "Function "+name+" is not available in managed SQL")
 	}
 	return nil
 }

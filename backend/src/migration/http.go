@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 )
@@ -13,32 +15,19 @@ import (
 // Authentication and authorization fail closed.
 func RegisterRoutes(router gin.IRouter, s *Service) {
 	g := router.Group("/api/databases/:id")
-	g.Use(func(c *gin.Context) {
-		if s.Access == nil {
-			respond(c, nil, fault("unauthenticated", "Authentication is not configured"))
-			c.Abort()
-			return
-		}
-		user, err := s.Access.Identity(c)
-		if err != nil || user == "" {
-			var f *Fault
-			if errors.As(err, &f) && f.Code == "authorization_unavailable" {
-				respond(c, nil, f)
-			} else {
-				respond(c, nil, fault("unauthenticated", "A validated session is required"))
-			}
-			c.Abort()
-			return
-		}
-		if c.Request.Method != http.MethodGet {
-			if err = s.Access.CSRF(c.Request); err != nil {
-				respond(c, nil, fault("csrf_failed", "CSRF token or request origin is invalid"))
-				c.Abort()
+	g.Use(requireSession(s))
+	g.GET("/migration-history", func(c *gin.Context) {
+		hideRollback := false
+		if value, present := c.GetQuery("hide_rollback"); present {
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				respond(c, nil, fault("invalid_input", "hide_rollback must be a boolean"))
 				return
 			}
+			hideRollback = parsed
 		}
-		c.Set("migration_user", user)
-		c.Next()
+		history, err := s.ExecutionHistory(c.Request.Context(), c.GetString("migration_user"), c.Param("id"), hideRollback)
+		respond(c, gin.H{"attempts": history}, err)
 	})
 	g.GET("/migrations", func(c *gin.Context) {
 		ms, p, e := s.History(c.Request.Context(), c.GetString("migration_user"), c.Param("id"))
@@ -67,8 +56,7 @@ func RegisterRoutes(router gin.IRouter, s *Service) {
 	g.POST("/migrations", save)
 	g.PATCH("/migrations/:migrationId", save)
 	g.POST("/migrations/:migrationId/execute", func(c *gin.Context) {
-		a, e := s.Execute(c.Request.Context(), c.GetString("migration_user"), c.Param("id"), c.Param("migrationId"))
-		respond(c, gin.H{"attempt": a}, e)
+		respond(c, nil, fault("approval_required", "Submit a change request; it runs after every required group approves"))
 	})
 	g.POST("/migrations/reconcile", func(c *gin.Context) {
 		e := s.Reconcile(c.Request.Context(), c.GetString("migration_user"), c.Param("id"))
@@ -136,10 +124,12 @@ func respond(c *gin.Context, data any, err error) {
 	if !errors.As(err, &f) {
 		f = &Fault{"internal_error", "The migration operation could not be completed"}
 	}
-	statuses := map[string]int{"unauthenticated": 401, "forbidden": 403, "csrf_failed": 403, "not_found": 404, "invalid_input": 400, "invalid_sql": 422, "unsupported_sql": 422, "conflict": 409, "already_applied": 409, "indeterminate": 409, "execution_failed": 422, "database_unavailable": 503, "authorization_unavailable": 503, "query_failed": 422, "query_timeout": 504}
+	statuses := map[string]int{"unauthenticated": 401, "forbidden": 403, "requester_lost_access": 403, "csrf_failed": 403, "not_found": 404, "invalid_input": 400, "invalid_sql": 422, "unsupported_sql": 422, "conflict": 409, "approval_required": 409, "approval_missing": 409, "approvers_changed": 409, "sql_changed": 409, "already_applied": 409, "migration_order_conflict": 409, "indeterminate": 409, "execution_failed": 422, "database_unavailable": 503, "authorization_unavailable": 503, "query_failed": 422, "query_timeout": 504}
 	status, ok := statuses[f.Code]
 	if !ok {
 		status = 500
 	}
+	slog.WarnContext(c.Request.Context(), "migration.request_failed", "status", "failed",
+		"reason", f.Code, "route", c.FullPath())
 	c.JSON(status, gin.H{"error": f, "data": data})
 }

@@ -16,7 +16,7 @@ function writeStored(value) {
     if (value) sessionStorage.setItem(KEY, value)
     else sessionStorage.removeItem(KEY)
   } catch {
-    
+    ;
   }
 }
 
@@ -33,7 +33,7 @@ export default function AuthProvider({ children }) {
     try {
       await api.logout()
     } catch {
-
+      ;
     }
     writeStored(null)
     setUsername(null)

@@ -3,7 +3,6 @@ package migration
 import (
 	"context"
 	"errors"
-	"net/http"
 
 	"backend/access_control/models"
 	sessionmanager "backend/access_control/session_manager"
@@ -17,11 +16,13 @@ type ApplicationAccess struct{ Platform *gorm.DB }
 
 func (a ApplicationAccess) Identity(c *gin.Context) (string, error) {
 	user, err := sessionmanager.CurrentUser(c, a.Platform)
-	if err != nil {
-		if !errors.Is(err, sessionmanager.ErrUnauthenticated) && !errors.Is(err, sessionmanager.ErrNoSession) {
-			return "", fault("authorization_unavailable", "Session validation is unavailable")
-		}
+	switch {
+	case errors.Is(err, sessionmanager.ErrUnauthenticated):
 		return "", err
+	case errors.Is(err, sessionmanager.ErrCSRF):
+		return "", fault("csrf_failed", err.Error())
+	case err != nil:
+		return "", fault("authorization_unavailable", "Session validation is unavailable")
 	}
 	return user.ID.String(), nil
 }
@@ -32,8 +33,4 @@ func (a ApplicationAccess) Permission(ctx context.Context, user, database string
 	}
 	effective, err := models.EffectiveAuthorization(ctx, a.Platform, user, database)
 	return PermissionFromEffective(effective), err
-}
-
-func (ApplicationAccess) CSRF(request *http.Request) error {
-	return sessionmanager.ValidateCSRF(request)
 }

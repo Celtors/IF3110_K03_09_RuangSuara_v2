@@ -6,19 +6,37 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"errors"
+	"log/slog"
+	"strings"
 	"time"
+
+	"backend/internal/telemetry"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 //go:embed storage.sql
 var storageSQL string
 
+//go:embed review.sql
+var reviewSQL string
+
+//go:embed batch.sql
+var batchSQL string
+
 type Repository struct{ Pool *pgxpool.Pool }
 
+// Initialize creates the migration tables, then the change request workflow tables that depend on them.
 func (r *Repository) Initialize(ctx context.Context) error {
-	_, err := r.Pool.Exec(ctx, storageSQL)
+	if _, err := r.Pool.Exec(ctx, storageSQL); err != nil {
+		return err
+	}
+	if _, err := r.Pool.Exec(ctx, reviewSQL); err != nil {
+		return err
+	}
+	_, err := r.Pool.Exec(ctx, batchSQL)
 	return err
 }
 func newID() string {
@@ -29,11 +47,15 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-const definitionColumns = `id,database_id,name,description,sql_script,release_label,author_user_id,created_at,updated_at,state,version`
+const definitionColumns = `id,database_id,name,description,sql_script,sql_down,irreversible,irreversible_reason,
+ release_label,author_user_id,created_at,updated_at,state,version`
 
 func scanMigration(row pgx.Row, includeHistory bool) (Migration, error) {
 	var m Migration
-	fields := []any{&m.ID, &m.DatabaseID, &m.Name, &m.Description, &m.SQL, &m.ReleaseLabel, &m.Author, &m.Created, &m.Updated, &m.State, &m.Version}
+	fields := []any{
+		&m.ID, &m.DatabaseID, &m.Name, &m.Description, &m.SQLUp, &m.SQLDown, &m.Irreversible, &m.IrreversibleReason,
+		&m.ReleaseLabel, &m.Author, &m.Created, &m.Updated, &m.State, &m.Version,
+	}
 	if includeHistory {
 		fields = append(fields, &m.LastExecutor, &m.LastExecuted)
 	}
@@ -65,8 +87,69 @@ func (r *Repository) List(ctx context.Context, db string) ([]Migration, error) {
 func (r *Repository) Get(ctx context.Context, db, id string) (Migration, error) {
 	return scanMigration(r.Pool.QueryRow(ctx, `SELECT `+definitionColumns+` FROM dmp_migration.definitions WHERE database_id=$1 AND id=$2`, db, id), false)
 }
+
+// History exposes operation hints using the same ordering checks as execution.
+// Submission and the worker still check the current state under the database lock.
+func (r *Repository) setNextOperations(ctx context.Context, db string, migrations []Migration) error {
+	conn, err := r.Pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+
+	var activeVersion int64
+	var hasRolledBack bool
+	for _, m := range migrations {
+		if m.State == "applied" && m.Version != nil {
+			activeVersion = max(activeVersion, *m.Version)
+		}
+		hasRolledBack = hasRolledBack || m.State == "rolled_back"
+	}
+	var forwardID string
+	if hasRolledBack {
+		forwardID, err = nextForwardID(ctx, conn, db)
+		if err != nil {
+			return err
+		}
+	}
+
+	for i := range migrations {
+		m := &migrations[i]
+		var checkErr error
+		switch m.State {
+		case "draft", "failed":
+			if m.LastExecuted != nil || m.Version != nil {
+				checkErr = checkApplyOrder(ctx, conn, *m)
+			}
+			if checkErr == nil {
+				m.NextOperation = OperationApply
+			}
+		case "applied":
+			if m.Version != nil && *m.Version == activeVersion && !m.Irreversible && strings.TrimSpace(m.SQLDown) != "" {
+				_, checkErr = rollbackExecutionID(ctx, conn, *m)
+				if checkErr == nil {
+					m.NextOperation = OperationRollback
+				}
+			}
+		case "rolled_back":
+			if m.ID == forwardID {
+				m.NextOperation = OperationForward
+			}
+		}
+		var unavailable *Fault
+		if checkErr != nil && !errors.As(checkErr, &unavailable) {
+			return checkErr
+		}
+	}
+	return nil
+}
 func (r *Repository) Attempts(ctx context.Context, db, id string) ([]Attempt, error) {
-	rows, err := r.Pool.Query(ctx, `SELECT id,migration_id,database_id,sql_script_snapshot,executor_user_id,started_at,completed_at,status,version,target_xid,postgres_error_code,error_message FROM dmp_migration.attempts WHERE database_id=$1 AND migration_id=$2 ORDER BY started_at,id`, db, id)
+	rows, err := r.Pool.Query(ctx, `
+ SELECT id,migration_id,database_id,operation,reverses_execution_id,sql_script_snapshot,
+        executor_user_id,started_at,completed_at,status,version,target_xid,postgres_error_code,error_message
+ FROM dmp_migration.attempts
+ WHERE database_id=$1 AND migration_id=$2
+ ORDER BY started_at,id`, db, id)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +157,9 @@ func (r *Repository) Attempts(ctx context.Context, db, id string) ([]Attempt, er
 	out := []Attempt{}
 	for rows.Next() {
 		var a Attempt
-		if err = rows.Scan(&a.ID, &a.MigrationID, &a.DatabaseID, &a.SQL, &a.Executor, &a.Started, &a.Completed, &a.Status, &a.Version, &a.XID, &a.ErrorCode, &a.Error); err != nil {
+		err = rows.Scan(&a.ID, &a.MigrationID, &a.DatabaseID, &a.Operation, &a.ReversesExecutionID, &a.SQL,
+			&a.Executor, &a.Started, &a.Completed, &a.Status, &a.SuccessOrder, &a.XID, &a.ErrorCode, &a.Error)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -82,32 +167,76 @@ func (r *Repository) Attempts(ctx context.Context, db, id string) ([]Attempt, er
 	return out, rows.Err()
 }
 
-// Lock this database so migration edits and executions cannot overlap.
-func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func(), error) {
-	c, err := r.Pool.Acquire(ctx)
+func (r *Repository) ExecutionHistory(ctx context.Context, db string) ([]ExecutionHistoryEntry, error) {
+	rows, err := r.Pool.Query(ctx, `
+ SELECT a.id,a.migration_id,d.name,d.version,a.version,a.operation,a.status,a.reverses_execution_id,
+        a.executor_user_id,a.started_at,a.completed_at,a.sql_script_snapshot,a.postgres_error_code,a.error_message
+ FROM dmp_migration.attempts a
+ JOIN dmp_migration.definitions d ON d.id=a.migration_id AND d.database_id=a.database_id
+ WHERE a.database_id=$1
+ ORDER BY a.started_at,a.id`, db)
 	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	history := []ExecutionHistoryEntry{}
+	for rows.Next() {
+		var entry ExecutionHistoryEntry
+		err := rows.Scan(&entry.ExecutionID, &entry.MigrationID, &entry.MigrationName, &entry.MigrationVersion,
+			&entry.SuccessOrder, &entry.Operation, &entry.Status, &entry.ReversesExecutionID,
+			&entry.ExecutorUserID, &entry.StartedAt, &entry.CompletedAt, &entry.SQLSnapshot, &entry.PostgresErrorCode, &entry.Error)
+		if err != nil {
+			return nil, err
+		}
+		history = append(history, entry)
+	}
+	return history, rows.Err()
+}
+
+// Lock this database so migration edits and executions cannot overlap.
+var errPlatformLockBusy = fault("conflict", "Another migration operation is in progress")
+
+func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func(), error) {
+	lockCtx, span := telemetry.Start(ctx, "migration.lock")
+	defer telemetry.EndSpan(span)
+	c, err := r.Pool.Acquire(lockCtx)
+	if err != nil {
+		span.SetAttributes(attribute.String("outcome", "failed"))
+		telemetry.SpanError(span, err)
+		slog.LogAttrs(lockCtx, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 		return nil, nil, err
 	}
 	var ok bool
-	err = c.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtextextended($1,781349))`, db).Scan(&ok)
+	probeStart := time.Now()
+	err = c.QueryRow(lockCtx, `SELECT pg_try_advisory_lock(hashtextextended($1,781349))`, db).Scan(&ok)
+	telemetry.ObserveLockProbe("platform", time.Since(probeStart), ok, err)
 	if err != nil || !ok {
 		// If locking may have succeeded, close the connection to avoid leaving a lock.
 		if err != nil {
-			clean, cancel := cleanupContext()
+			clean, cancel := cleanupContext(lockCtx)
 			_ = c.Conn().Close(clean)
 			cancel()
 		}
 		c.Release()
 		if err != nil {
+			span.SetAttributes(attribute.String("outcome", "failed"))
+			telemetry.SpanError(span, err)
+			slog.LogAttrs(lockCtx, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 			return nil, nil, err
 		}
-		return nil, nil, fault("conflict", "Another migration operation is in progress")
+		span.SetAttributes(attribute.String("outcome", "busy"))
+		slog.WarnContext(lockCtx, "migration.lock", "status", "busy")
+		return nil, nil, errPlatformLockBusy
 	}
+	span.SetAttributes(attribute.String("outcome", "acquired"))
+	slog.InfoContext(lockCtx, "migration.lock", "status", "acquired")
 	release := func() {
-		clean, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		clean, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		var unlocked bool
 		if e := c.QueryRow(clean, `SELECT pg_advisory_unlock(hashtextextended($1,781349))`, db).Scan(&unlocked); e != nil || !unlocked {
+			slog.LogAttrs(clean, slog.LevelWarn, "migration.lock", append(telemetry.ErrorAttrs(e), slog.String("status", "release_failed"))...)
 			_ = c.Conn().Close(clean)
 		}
 		c.Release()
@@ -115,83 +244,191 @@ func (r *Repository) lock(ctx context.Context, db string) (*pgxpool.Conn, func()
 	return c, release, nil
 }
 
-func (r *Repository) save(ctx context.Context, db, id, user string, d Draft) (Migration, error) {
+func (r *Repository) save(ctx context.Context, db, id, user string, d Draft, authorize func() error) (Migration, error) {
 	c, release, err := r.lock(ctx, db)
 	if err != nil {
 		return Migration{}, err
 	}
 	defer release()
-	if id == "" {
-		return scanMigration(c.QueryRow(ctx, `INSERT INTO dmp_migration.definitions(id,database_id,name,description,sql_script,release_label,author_user_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING `+definitionColumns, newID(), db, d.Name, d.Description, d.SQL, d.ReleaseLabel, user), false)
+	if err := authorize(); err != nil {
+		return Migration{}, err
 	}
+
+	if id == "" {
+		id := newID()
+		ctx = telemetry.With(ctx, telemetry.ID("migration_id", id))
+		row := c.QueryRow(ctx, `INSERT INTO dmp_migration.definitions
+ (id,database_id,name,description,sql_script,sql_down,irreversible,irreversible_reason,release_label,author_user_id)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING `+definitionColumns,
+			id, db, d.Name, d.Description, d.SQLUp, d.SQLDown, d.Irreversible, d.IrreversibleReason, d.ReleaseLabel, user)
+		return scanMigration(row, false)
+	}
+
 	m, err := scanMigration(c.QueryRow(ctx, `SELECT `+definitionColumns+` FROM dmp_migration.definitions WHERE database_id=$1 AND id=$2`, db, id), false)
 	if err != nil {
 		return m, err
 	}
-	if m.State != "draft" && m.State != "failed" {
-		return m, fault("conflict", "Only unapplied drafts with a resolved outcome can be edited")
+	if m.State != "draft" {
+		return m, fault("conflict", "Only unattempted draft migrations can be edited")
 	}
-	return scanMigration(c.QueryRow(ctx, `UPDATE dmp_migration.definitions SET name=$3,description=$4,sql_script=$5,release_label=$6,state='draft',updated_at=now() WHERE database_id=$1 AND id=$2 RETURNING `+definitionColumns, db, id, d.Name, d.Description, d.SQL, d.ReleaseLabel), false)
+
+	// Milestone 1 could reset a failed definition to draft without removing its attempts.
+	var hasAttempt bool
+	err = c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.attempts WHERE migration_id=$1)`, id).Scan(&hasAttempt)
+	if err != nil {
+		return m, err
+	}
+	if hasAttempt {
+		return m, fault("conflict", "A migration that has been attempted cannot be edited. Create a new migration to change its SQL")
+	}
+
+	// Approval covers an exact SQL hash, so the SQL is frozen while a change request is open.
+	var hasOpenRequest bool
+	err = c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests
+ WHERE migration_id=$1 AND status IN ('pending_review','approved','queued','running','unknown'))`, id).Scan(&hasOpenRequest)
+	if err != nil {
+		return m, err
+	}
+	if hasOpenRequest {
+		return m, fault("conflict", "This migration has an open change request. Cancel it before editing the migration")
+	}
+
+	row := c.QueryRow(ctx, `UPDATE dmp_migration.definitions
+ SET name=$3,description=$4,sql_script=$5,sql_down=$6,irreversible=$7,irreversible_reason=$8,release_label=$9,updated_at=now()
+ WHERE database_id=$1 AND id=$2 RETURNING `+definitionColumns,
+		db, id, d.Name, d.Description, d.SQLUp, d.SQLDown, d.Irreversible, d.IrreversibleReason, d.ReleaseLabel)
+	return scanMigration(row, false)
 }
 
-func beginAttempt(ctx context.Context, c *pgxpool.Conn, m Migration, user, identity string) (Attempt, error) {
-	a := Attempt{ID: newID(), MigrationID: m.ID, DatabaseID: m.DatabaseID, SQL: m.SQL, Executor: user, Status: "running"}
+func beginAttempt(ctx context.Context, c *pgxpool.Conn, definition Migration, user string, operation Operation, sql string, reversesExecutionID *string) (Attempt, error) {
+	attempt := Attempt{
+		ID: newID(), MigrationID: definition.ID, DatabaseID: definition.DatabaseID,
+		Operation: operation, ReversesExecutionID: reversesExecutionID,
+		SQL: sql, Executor: user, Status: "running", migrationVersion: definition.Version,
+	}
+	ctx = attemptContext(ctx, attempt)
 	tx, err := c.Begin(ctx)
 	if err != nil {
-		return a, err
+		return attempt, err
 	}
-	defer rollback(tx)
-	a.TargetIdentity = identity
-	err = tx.QueryRow(ctx, `INSERT INTO dmp_migration.attempts(id,migration_id,database_id,sql_script_snapshot,executor_user_id,status,target_identity) VALUES($1,$2,$3,$4,$5,'running',$6) RETURNING started_at`, a.ID, a.MigrationID, a.DatabaseID, a.SQL, user, identity).Scan(&a.Started)
-	if err != nil {
-		return a, err
-	}
-	_, err = tx.Exec(ctx, `UPDATE dmp_migration.definitions SET state='running',updated_at=now() WHERE id=$1`, m.ID)
-	if err != nil {
-		return a, err
-	}
-	return a, tx.Commit(ctx)
-}
-func finishAttempt(ctx context.Context, c *pgxpool.Conn, a *Attempt, status, code, message string) error {
-	tx, err := c.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer rollback(tx)
-	var version *int64
-	if status == "succeeded" {
-		var v int64
-		err = tx.QueryRow(ctx, `SELECT COALESCE(MAX(version),0)+1 FROM dmp_migration.attempts WHERE database_id=$1`, a.DatabaseID).Scan(&v)
-		if err != nil {
-			return err
+	defer rollback(ctx, tx)
+
+	if definition.Version == nil {
+		if err := reserveMigrationVersion(ctx, tx, definition.DatabaseID, definition.ID); err != nil {
+			return attempt, err
 		}
-		version = &v
 	}
-	var completed time.Time
-	err = tx.QueryRow(ctx, `UPDATE dmp_migration.attempts SET status=$2,version=$3,completed_at=now(),postgres_error_code=$4,error_message=$5 WHERE id=$1 AND status IN ('running','unknown') RETURNING completed_at`, a.ID, status, version, code, message).Scan(&completed)
+
+	err = tx.QueryRow(ctx, `
+ INSERT INTO dmp_migration.attempts
+     (id,migration_id,database_id,operation,reverses_execution_id,sql_script_snapshot,executor_user_id,status,target_identity)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,'running','pending')
+ RETURNING started_at, (SELECT version FROM dmp_migration.definitions WHERE id=$2)`,
+		attempt.ID, attempt.MigrationID, attempt.DatabaseID, operation, reversesExecutionID, sql, user,
+	).Scan(&attempt.Started, &attempt.migrationVersion)
+	if err != nil {
+		return attempt, err
+	}
+	ctx = attemptContext(ctx, attempt)
+	return attempt, tx.Commit(ctx)
+}
+
+// The caller holds the database lock while allocating this position.
+func reserveMigrationVersion(ctx context.Context, tx pgx.Tx, databaseID, migrationID string) error {
+	_, err := tx.Exec(ctx, `
+ UPDATE dmp_migration.definitions
+ SET version=(SELECT COALESCE(MAX(version),0)+1 FROM dmp_migration.definitions WHERE database_id=$1),
+     updated_at=now()
+ WHERE database_id=$1 AND id=$2 AND version IS NULL`, databaseID, migrationID)
+	return err
+}
+
+func finishAttempt(ctx context.Context, c *pgxpool.Conn, attempt *Attempt, mode, status, code, message string) error {
+	tx, err := c.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	state := status
-	if status == "succeeded" {
-		state = "applied"
-	}
-	_, err = tx.Exec(ctx, `UPDATE dmp_migration.definitions SET state=$2,version=$3,updated_at=now() WHERE id=$1`, a.MigrationID, state, version)
+	defer rollback(ctx, tx)
+
+	recorded, err := recordAttemptOutcome(ctx, tx, attempt, mode, status, code, message)
 	if err != nil {
 		return err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
-	a.Status = status
-	a.Version = version
-	a.Completed = &completed
-	a.ErrorCode = code
-	a.Error = message
+	recorded()
 	return nil
 }
-func rollback(tx pgx.Tx) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+
+// Return the in-memory update and telemetry to publish after the caller commits.
+func recordAttemptOutcome(ctx context.Context, tx pgx.Tx, attempt *Attempt, mode, status, code, message string) (func(), error) {
+	var successOrder *int64
+	if status == "succeeded" {
+		var nextOrder int64
+		err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version),0)+1 FROM dmp_migration.attempts WHERE database_id=$1`,
+			attempt.DatabaseID).Scan(&nextOrder)
+		if err != nil {
+			return nil, err
+		}
+		successOrder = &nextOrder
+	}
+
+	var completed *time.Time
+	var started time.Time
+	err := tx.QueryRow(ctx, `
+ UPDATE dmp_migration.attempts
+ SET status=$2,version=$3,completed_at=CASE WHEN $2='unknown' THEN NULL ELSE now() END,
+     postgres_error_code=$4,error_message=$5
+ WHERE id=$1 AND status IN ('running','unknown')
+ RETURNING started_at,completed_at`, attempt.ID, status, successOrder, code, message).Scan(&started, &completed)
+	if err != nil {
+		return nil, err
+	}
+
+	var state string
+	if status == "succeeded" {
+		state = "applied"
+		if attempt.Operation == OperationRollback {
+			state = "rolled_back"
+		}
+		if attempt.Operation == OperationApply {
+			// A committed M1 attempt recovered after the upgrade may have no reserved version.
+			if err := reserveMigrationVersion(ctx, tx, attempt.DatabaseID, attempt.MigrationID); err != nil {
+				return nil, err
+			}
+		}
+	} else if status == "failed" && attempt.Operation == OperationApply {
+		state = "failed"
+	}
+
+	if state != "" {
+		_, err = tx.Exec(ctx, `UPDATE dmp_migration.definitions SET state=$3,updated_at=now() WHERE database_id=$1 AND id=$2`,
+			attempt.DatabaseID, attempt.MigrationID, state)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return func() {
+		if completed != nil {
+			telemetry.ObserveCompletion(mode, string(attempt.Operation), status, completed.Sub(started))
+		}
+		attempt.Status, attempt.SuccessOrder, attempt.Completed = status, successOrder, completed
+		attempt.ErrorCode, attempt.Error = code, message
+		level := slog.LevelInfo
+		if status != "succeeded" {
+			level = slog.LevelWarn
+		}
+		attrs := []slog.Attr{slog.String("status", status)}
+		if state := telemetry.SQLStateAttr(code); state.Key != "" {
+			attrs = append(attrs, state)
+		}
+		slog.LogAttrs(ctx, level, "migration.attempt_finished", attrs...)
+	}, nil
+}
+func rollback(ctx context.Context, tx pgx.Tx) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
 	_ = tx.Rollback(ctx)
 }

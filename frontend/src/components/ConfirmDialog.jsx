@@ -1,11 +1,14 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import Modal from './Modal'
 
 export default function ConfirmDialog({ title, children, confirmLabel, onConfirm, onClose }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const inFlight = useRef(false)
 
   async function run() {
+    if (inFlight.current) return
+    inFlight.current = true
     setBusy(true)
     setError('')
     try {
@@ -13,12 +16,13 @@ export default function ConfirmDialog({ title, children, confirmLabel, onConfirm
       onClose()
     } catch (e) {
       setError(e.message)
+      inFlight.current = false
       setBusy(false)
     }
   }
 
   return (
-    <Modal title={title} onClose={onClose}>
+    <Modal title={title} onClose={onClose} busy={busy}>
       <div className="stack">
         <p>{children}</p>
         {error && <p className="alert alert-error" role="alert">{error}</p>}

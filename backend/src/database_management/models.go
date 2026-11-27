@@ -11,16 +11,17 @@ import (
 )
 
 type Database struct {
-	ID                 uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
-	Name               string    `json:"name" gorm:"not null;size:100"`
-	Host               string    `json:"host" gorm:"not null;size:253"`
-	Port               int       `json:"port" gorm:"not null"`
-	DatabaseName       string    `json:"database_name" gorm:"column:database_name;not null;size:128"`
-	Username           string    `json:"username" gorm:"not null;size:128"`
-	PasswordCiphertext string    `json:"-" gorm:"column:password_ciphertext;not null;type:text"`
-	SSLMode            string    `json:"ssl_mode" gorm:"not null;default:verify-full;size:32"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                  uuid.UUID `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	Name                string    `json:"name" gorm:"not null;size:100"`
+	Host                string    `json:"host" gorm:"not null;size:253"`
+	Port                int       `json:"port" gorm:"not null"`
+	DatabaseName        string    `json:"database_name" gorm:"column:database_name;not null;size:128"`
+	Username            string    `json:"username" gorm:"not null;size:128"`
+	PhysicalFingerprint *string   `json:"-"`
+	PasswordCiphertext  string    `json:"-" gorm:"column:password_ciphertext;not null;type:text"`
+	SSLMode             string    `json:"ssl_mode" gorm:"not null;default:verify-full;size:32"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 func (Database) TableName() string { return "databases" }
@@ -74,6 +75,9 @@ func (r CreateDatabaseRequest) Validate() error {
 	if strings.TrimSpace(r.Username) == "" || len(r.Username) > 128 {
 		return fmt.Errorf("invalid username")
 	}
+	if validateSSLMode(strings.TrimSpace(r.SSLMode)) == "" {
+		return fmt.Errorf("invalid PostgreSQL SSL mode")
+	}
 	return validateHost(r.Host)
 }
 func validateHost(host string) error {
@@ -126,7 +130,6 @@ func validateIdentifier(s string) bool {
 	return s != "" && len(s) <= 63 && !strings.ContainsRune(s, 0)
 }
 
-
 // Proses validasi database in perlu di pastikan lagi
 const (
 	DBMSPostgres = "postgres"
@@ -138,4 +141,4 @@ func normalizeDBMS(v string) string {
 	}
 	return strings.ToLower(strings.TrimSpace(v))
 }
-func validDBMS(v string) bool { v = normalizeDBMS(v); return v == DBMSPostgres}
+func validDBMS(v string) bool { v = normalizeDBMS(v); return v == DBMSPostgres }

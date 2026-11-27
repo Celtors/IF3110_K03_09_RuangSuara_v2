@@ -1,0 +1,114 @@
+name: CodeQL SAST
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main, 'feat/**']
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  packages: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+    env:
+      CODEQL_EXTRACTOR_GO_OPTION_EXTRACT_TESTS: 'true'
+      # Set only for an authorized artifact-only scan (see docs/security/sast-codeql.md).
+      CODEQL_UPLOAD: ${{ vars.CODEQL_SARIF_ONLY == 'true' && 'never' || 'always' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: backend/src/go.mod
+          cache: false
+
+      - name: Install C toolchain for cgo
+        if: matrix.language == 'go'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Initialize CodeQL
+        id: init
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Build backend
+        if: matrix.language == 'go'
+        working-directory: backend/src
+        env:
+          CGO_ENABLED: '1'
+        run: go build ./...
+
+      # JavaScript/JSX uses source extraction; no npm install or Vite build needed.
+      - name: Record scan metadata
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/codeql-evidence
+          CODEQL_VERSION: ${{ steps.init.outputs.codeql-version }}
+          SCAN_LANGUAGE: ${{ matrix.language }}
+          SCAN_BUILD_MODE: ${{ matrix.build-mode }}
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, pathlib, subprocess
+          e = os.environ
+          p = pathlib.Path(e['EVIDENCE_DIR'])
+          p.mkdir(parents=True, exist_ok=True)
+          data = {
+              'run_url': f"{e['GITHUB_SERVER_URL']}/{e['GITHUB_REPOSITORY']}/actions/runs/{e['GITHUB_RUN_ID']}",
+              'run_attempt': e['GITHUB_RUN_ATTEMPT'],
+              'commit_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'ref': e['GITHUB_REF'],
+              'event': e['GITHUB_EVENT_NAME'],
+              'timestamp_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'codeql_version': e['CODEQL_VERSION'],
+              'language': e['SCAN_LANGUAGE'],
+              'build_mode': e['SCAN_BUILD_MODE'],
+              'query_suite': 'security-extended',
+              'upload_mode': e['CODEQL_UPLOAD'],
+          }
+          (p / 'metadata.json').write_text(json.dumps(data, indent=2) + '\n')
+          PY
+
+      - name: Analyze and upload to code scanning
+        id: analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:${{ matrix.language }}'
+          output: ${{ runner.temp }}/codeql-evidence/sarif
+          upload: ${{ env.CODEQL_UPLOAD }}
+          upload-database: false
+
+      - name: Preserve SARIF and metadata
+        if: always() && steps.init.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: codeql-${{ matrix.language }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-evidence/
+          if-no-files-found: error
+          retention-days: 30

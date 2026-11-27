@@ -1,54 +1,70 @@
 package sessionmanager
 
-
 import (
-	"backend/access_control/utility"
-	"backend/access_control/models"
-
+	"errors"
+	"log/slog"
 	"net/http"
+	"time"
+
+	"backend/access_control/models"
+	"backend/internal/telemetry"
+
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
-func UnauthorizedResponse(c *gin.Context, msg string) {
-	newUUID, _ := uuid.NewRandom()
-	c.JSON(http.StatusUnauthorized, gin.H{
-		"error": gin.H{
-			"code":      "INVALID_GRANT",
-			"message":   msg,
-			"requestId": newUUID.String(),
-		},
-	})
-}
-
-
 func LogoutRequest(c *gin.Context, db *gorm.DB) {
-	session_token, err := c.Cookie("ssid")
-	if err != nil {
-		UnauthorizedResponse(c, "No session found")
+	ctx := c.Request.Context()
+	c.Header("Cache-Control", "no-store")
+	if !validOrigin(c.Request) {
+		slog.WarnContext(ctx, "authentication.logout", "status", "rejected", "reason", "origin")
+		authError(c, http.StatusForbidden, "csrf_failed", ErrCSRF.Error())
 		return
 	}
 
-	var sessions []models.SSOSession
-
-	db.Model(&models.SSOSession{}).
-	   Where("session_token_hash = ? AND status = ?", utility.HashToken(session_token), "Active").
-	   Find(&sessions)
-	
-	if len(sessions) != 1 {
-		InternalServerResponse(c)
+	token, _ := c.Cookie(sessionCookie)
+	err := ErrUnauthenticated
+	if token != "" {
+		err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			user, session, _, err := resolve(tx, token)
+			if err != nil {
+				return err
+			}
+			ctx = telemetry.With(ctx, telemetry.ID("actor_id", user.ID.String()))
+			c.Request = c.Request.WithContext(ctx)
+			if err := ValidateCSRF(c.Request); err != nil {
+				return err
+			}
+			now := time.Now()
+			result := tx.WithContext(ctx).Model(&session).Where("status = ?", "Active").Updates(models.SSOSession{
+				Status: "Revoked", RevokedReason: "user_logout", RevokedAt: &now,
+			})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errors.New("session revocation affected an unexpected number of rows")
+			}
+			return nil
+		})
+	}
+	if errors.Is(err, ErrCSRF) {
+		slog.WarnContext(ctx, "authentication.logout", "status", "rejected", "reason", "csrf")
+		authError(c, http.StatusForbidden, "csrf_failed", ErrCSRF.Error())
+		return
+	}
+	if err != nil && !errors.Is(err, ErrUnauthenticated) {
+		slog.LogAttrs(ctx, slog.LevelWarn, "authentication.logout", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
+		authError(c, http.StatusServiceUnavailable, "authorization_unavailable", "Could not revoke the session. Try signing out again.")
 		return
 	}
 
-
-	db.Model(&models.SSOSession{}).
-	   Where("session_token_hash = ?", utility.HashToken(session_token)).
-	   Updates(models.SSOSession{Status: "Revoked", RevokedReason: "user_logout"})
-
-	c.SetCookie("ssid", "", -1, "/", "", false, true)
-	c.JSON(http.StatusOK, gin.H{
-		"status":  "success",
-		"message": "Logout successful",
-	})
+	setSessionCookie(c, "", time.Unix(1, 0))
+	if err == nil {
+		slog.InfoContext(ctx, "authentication.logout", "status", "succeeded")
+		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Logout successful"})
+		return
+	}
+	slog.InfoContext(ctx, "authentication.logout", "status", "already_inactive")
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "No active session"})
 }

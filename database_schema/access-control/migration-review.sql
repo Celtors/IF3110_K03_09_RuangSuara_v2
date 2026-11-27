@@ -1,0 +1,4 @@
+-- Migration review tables depend on migration definitions and attempts.
+-- The backend migration.Repository.Initialize creates storage, review, and
+-- batch schemas in dependency order, including upgrades to existing databases.
+-- Do not bootstrap the dependent tables before their parents here.

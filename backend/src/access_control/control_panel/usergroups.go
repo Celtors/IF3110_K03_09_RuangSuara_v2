@@ -2,13 +2,16 @@ package controlpanel
 
 import (
 	"backend/access_control/models"
+	"backend/internal/telemetry"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type UserGroupPayload struct {
@@ -18,34 +21,34 @@ type UserGroupPayload struct {
 
 type UserFromGroupPayload struct {
 	UserId   uuid.UUID `json:"user_id"`
-	Username     string        `json:"username"`
-	Status   string			   `json:"status"`
-	PlacedAt time.Time         `json:"placed_at"`
+	Username string    `json:"username"`
+	Status   string    `json:"status"`
+	PlacedAt time.Time `json:"placed_at"`
 }
 
 type GroupFromUserPayload struct {
 	GroupId     uuid.UUID `json:"group_id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	PlacedAt    time.Time         `json:"placed_at"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	PlacedAt    time.Time `json:"placed_at"`
 }
 
 type GroupLeaderPayload struct {
 	UserId   uuid.UUID `json:"user_id"`
-	Username     string        `json:"username"`
+	Username string    `json:"username"`
 }
 
-func (payload UserGroupPayload) GetDBStructCreate() (models.UserGroup) {
+func (payload UserGroupPayload) GetDBStructCreate() models.UserGroup {
 	return models.UserGroup{
 		UserId:  payload.UserId,
 		GroupId: payload.GroupId,
 	}
 }
 
-func (payload UserGroupPayload) GetLeaderStruct() (models.GroupLeader) {
+func (payload UserGroupPayload) GetLeaderStruct() models.GroupLeader {
 	return models.GroupLeader{
-		LeaderId:  payload.UserId,
-		GroupId: payload.GroupId,
+		LeaderId: payload.UserId,
+		GroupId:  payload.GroupId,
 	}
 }
 
@@ -62,7 +65,6 @@ func AddUserToGroup(c *gin.Context, db *gorm.DB) {
 
 	userGroupModel := userGroupPayload.GetDBStructCreate()
 
-
 	if err := db.Create(&userGroupModel).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  "error",
@@ -71,6 +73,9 @@ func AddUserToGroup(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
+	slog.LogAttrs(c.Request.Context(), slog.LevelInfo, "authorization.membership_added",
+		slog.String("status", "succeeded"), telemetry.ID("group_id", userGroupPayload.GroupId.String()),
+		telemetry.ID("affected_user_id", userGroupPayload.UserId.String()))
 	c.JSON(http.StatusCreated, gin.H{
 		"status":  "success",
 		"message": "Successfully added user to group",
@@ -88,11 +93,32 @@ func RemoveUserFromGroup(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	db.Where("user_id = ? AND group_id = ?", userGroupPayload.UserId, userGroupPayload.GroupId).Delete(&models.UserGroup{})
+	err := db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Where("user_id = ? AND group_id = ?", userGroupPayload.UserId, userGroupPayload.GroupId).Delete(&models.UserGroup{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return tx.Where("leader_id = ? AND group_id = ?", userGroupPayload.UserId, userGroupPayload.GroupId).
+			Delete(&models.GroupLeader{}).Error
+	})
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Group membership not found"})
+		return
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Could not remove the group membership"})
+		return
+	}
+	slog.LogAttrs(c.Request.Context(), slog.LevelInfo, "authorization.membership_removed",
+		slog.String("status", "succeeded"), telemetry.ID("group_id", userGroupPayload.GroupId.String()),
+		telemetry.ID("affected_user_id", userGroupPayload.UserId.String()))
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
-		"message": "Successfully removed user to group",
+		"message": "Successfully removed user from group",
 	})
 }
 
@@ -151,69 +177,58 @@ func SetGroupLeader(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	groupLeaderModel := userGroupPayload.GetLeaderStruct()
-
-	var leader models.GroupLeader
-	err := db.Where("group_id = ?", groupLeaderModel.GroupId).Take(&leader).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		if err := db.Create(&groupLeaderModel).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"status":  "error",
-				"message": "Failed to set leader to group: " + err.Error(),
-			})
-			return
+	leader := userGroupPayload.GetLeaderStruct()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).
+			Take(&user, "id = ? AND status = ?", leader.LeaderId, "Active").Error; err != nil {
+			return err
 		}
-	} else if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"status":  "error",
-			"message": "Failed to set leader to group: " + err.Error(),
-		})
-		return
-	} else {
-		err2 := db.Model(models.GroupLeader{}).
-				Where("group_id = ?", groupLeaderModel.GroupId).
-				Update("leader_id", groupLeaderModel.LeaderId).Error
-		if err2 != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-			"status":  "error",
-			"message": "Failed to set leader to group: " + err2.Error(),
-		})
-		return
+		var member models.UserGroup
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Take(&member, "user_id = ? AND group_id = ?", leader.LeaderId, leader.GroupId).Error; err != nil {
+			return err
 		}
+		return tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "group_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"leader_id"}),
+		}).Create(&leader).Error
+	})
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "The leader must be an active group member"})
+		return
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Could not assign the group leader"})
+		return
 	}
-
+	slog.LogAttrs(c.Request.Context(), slog.LevelInfo, "authorization.group_leader_assigned",
+		slog.String("status", "succeeded"), telemetry.ID("group_id", leader.GroupId.String()),
+		telemetry.ID("affected_user_id", leader.LeaderId.String()))
 	c.JSON(http.StatusCreated, gin.H{
 		"status":  "success",
 		"message": "Successfully set user to be leader of group",
 	})
 }
 
-
 func GetGroupLeader(c *gin.Context, db *gorm.DB) {
-	var groupLeader []GroupLeaderPayload
-
-	group_id, exists := c.GetQuery("id")
-
-	if !exists {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"status":  "error",
-			"message": "Failed to get leader from group",
-		})
+	groupID, err := uuid.Parse(c.Query("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "A valid group ID is required"})
 		return
 	}
-
-	db.Model(&models.GroupLeader{}).
-		Select("group_leaders.user_id, users.username").
-		Joins("LEFT JOIN users ON users.id = group_leaders.leader_id").
-		Where("group_id = ?", group_id).
-		Find(&groupLeader)
-	
-	if len(groupLeader) < 1 {
-		c.JSON(http.StatusNotFound, gin.H{
-			"status":  "Not Found",
-			"message": "Leader not found",
-		})
+	var leader GroupLeaderPayload
+	err = db.Table("group_leaders gl").
+		Select("gl.leader_id AS user_id, u.username").
+		Joins("JOIN user_groups ug ON ug.group_id = gl.group_id AND ug.user_id = gl.leader_id").
+		Joins("JOIN users u ON u.id = gl.leader_id AND u.status = 'Active'").
+		Where("gl.group_id = ?", groupID).Take(&leader).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Leader not found"})
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Could not load the group leader"})
+	default:
+		c.JSON(http.StatusOK, leader)
 	}
-
-	c.JSON(http.StatusOK, groupLeader[0])
 }

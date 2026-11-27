@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 
-export default function Modal({ title, onClose, children, wide = false }) {
+export default function Modal({ title, onClose, children, wide = false, busy = false }) {
   const ref = useRef(null)
 
   useEffect(() => {
@@ -13,13 +13,14 @@ export default function Modal({ title, onClose, children, wide = false }) {
       ref={ref}
       className={wide ? 'modal modal-wide' : 'modal'}
       onClose={onClose}
-      onClick={(e) => e.target === ref.current && ref.current.close()}
+      onCancel={(e) => { if (busy) e.preventDefault() }}
+      onClick={(e) => !busy && e.target === ref.current && ref.current.close()}
       aria-labelledby="modal-title"
     >
       <div className="modal-body">
         <header className="modal-head">
           <h2 id="modal-title">{title}</h2>
-          <button type="button" className="icon-btn" aria-label="Close" onClick={() => ref.current.close()}>
+          <button type="button" className="icon-btn" aria-label="Close" disabled={busy} onClick={() => ref.current.close()}>
             ×
           </button>
         </header>

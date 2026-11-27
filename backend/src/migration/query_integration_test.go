@@ -3,7 +3,6 @@ package migration
 import (
 	"context"
 	"errors"
-	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -20,7 +19,6 @@ func (fakeAccess) Identity(*gin.Context) (string, error) { return "", nil }
 func (f fakeAccess) Permission(_ context.Context, user, _ string) (Permission, error) {
 	return f.perms[user], nil
 }
-func (fakeAccess) CSRF(*http.Request) error { return nil }
 
 type fakeConnections struct {
 	pool *pgxpool.Pool
@@ -41,8 +39,9 @@ CREATE TABLE console_it_types (i int, b bigint, n numeric(10,2), t text, f boole
 INSERT INTO console_it_types VALUES (1, 9007199254740993, 12.50, 'x', true, '2026-01-02 03:04:05+00', '2026-01-02', '{"k":1}', '11111111-1111-4111-8111-111111111111', '{1,2}', '\xdead');`
 
 // Run with a disposable PostgreSQL (docker-compose.yaml provides both):
-//   SQL_CONSOLE_TEST_TARGET_DSN=postgres://target_user:target_password@localhost:9001/target-test-db?sslmode=disable
-//   SQL_CONSOLE_TEST_PLATFORM_DSN=postgres://myuser:mypassword@localhost:9000/access-control-db?sslmode=disable
+//
+//	SQL_CONSOLE_TEST_TARGET_DSN=postgres://target_user:target_password@localhost:9001/target-test-db?sslmode=disable
+//	SQL_CONSOLE_TEST_PLATFORM_DSN=postgres://myuser:mypassword@localhost:9000/access-control-db?sslmode=disable
 func consoleTestService(t *testing.T) (*Service, *pgxpool.Pool) {
 	t.Helper()
 	targetDSN, platformDSN := os.Getenv("SQL_CONSOLE_TEST_TARGET_DSN"), os.Getenv("SQL_CONSOLE_TEST_PLATFORM_DSN")
@@ -147,37 +146,6 @@ func TestSQLConsoleIntegration(t *testing.T) {
 			t.Fatalf("column types: %v", r.ColumnTypes)
 		}
 	})
-	t.Run("9 insert returning", func(t *testing.T) {
-		r := ok(t, "edit", "INSERT INTO console_it_students(name) VALUES ('Dina') RETURNING id, name")
-		if !r.HasResultSet || r.RowCount != 1 || r.Rows[0][1] != "Dina" || r.RowsAffected == nil || *r.RowsAffected != 1 || r.AccessMode != "read_write" {
-			t.Fatalf("%+v", r)
-		}
-		if count(t, "SELECT count(*) FROM console_it_students WHERE name='Dina'") != 1 {
-			t.Fatal("ViewEdit writes must be committed")
-		}
-	})
-	t.Run("10 update returning", func(t *testing.T) {
-		if r := ok(t, "edit", "UPDATE console_it_students SET email='d@example.com' WHERE name='Dina' RETURNING email"); r.Rows[0][0] != "d@example.com" {
-			t.Fatalf("%+v", r)
-		}
-	})
-	t.Run("11 delete returning", func(t *testing.T) {
-		if r := ok(t, "edit", "DELETE FROM console_it_students WHERE name='Dina' RETURNING name"); r.RowCount != 1 {
-			t.Fatalf("%+v", r)
-		}
-	})
-	t.Run("12 update without returning", func(t *testing.T) {
-		r := ok(t, "edit", "UPDATE console_it_students SET email = 'x@example.com' WHERE department_id = 1")
-		if r.HasResultSet || r.RowsAffected == nil || *r.RowsAffected != 2 || r.Command != "UPDATE" || len(r.Columns) != 0 {
-			t.Fatalf("%+v", r)
-		}
-	})
-	t.Run("13 create table", func(t *testing.T) {
-		r := ok(t, "edit", "CREATE TABLE console_it_created (id int)")
-		if r.HasResultSet || r.Command != "CREATE TABLE" || r.RowsAffected != nil {
-			t.Fatalf("%+v", r)
-		}
-	})
 	t.Run("14 invalid syntax", func(t *testing.T) {
 		wantFault(t, "edit", "SELEC * FROM console_it_students", "invalid_sql")
 	})
@@ -188,21 +156,29 @@ func TestSQLConsoleIntegration(t *testing.T) {
 			t.Fatalf("expected PostgreSQL message, got %v", err)
 		}
 	})
-	t.Run("15 view only rejects writes", func(t *testing.T) {
+	t.Run("both tiers are read-only", func(t *testing.T) {
 		before := count(t, "SELECT count(*) FROM console_it_students")
-		for _, sql := range []string{"INSERT INTO console_it_students(name) VALUES ('Eve')", "DROP TABLE console_it_students", "TRUNCATE console_it_students"} {
-			wantFault(t, "view", sql, "forbidden")
+		for _, user := range []string{"view", "edit"} {
+			for _, sql := range []string{"INSERT INTO console_it_students(name) VALUES ('Eve')", "DROP TABLE console_it_students", "TRUNCATE console_it_students"} {
+				wantFault(t, user, sql, "forbidden")
+			}
+			wantFault(t, user, "SELECT nextval(pg_get_serial_sequence('console_it_students','id'))", "forbidden")
+			if r := ok(t, user, "SELECT 1"); r.AccessMode != "read_only" {
+				t.Fatalf("%s access mode %q", user, r.AccessMode)
+			}
 		}
 		if count(t, "SELECT count(*) FROM console_it_students") != before {
-			t.Fatal("View only must not change data")
-		}
-		if r := ok(t, "view", "SELECT 1"); r.AccessMode != "read_only" {
-			t.Fatalf("access mode %q", r.AccessMode)
+			t.Fatal("console changed target rows")
 		}
 	})
-	t.Run("15b read-only transaction backs up the validator", func(t *testing.T) {
-		// A function the validator cannot see through: PostgreSQL must refuse it.
-		wantFault(t, "view", "SELECT nextval(pg_get_serial_sequence('console_it_students','id'))", "forbidden")
+	t.Run("query plan leaves writes unapplied", func(t *testing.T) {
+		before := count(t, "SELECT count(*) FROM console_it_students")
+		if _, err := svc.Plan(ctx, "edit", consoleTestDB, "DELETE FROM console_it_students"); err != nil {
+			t.Fatal(err)
+		}
+		if count(t, "SELECT count(*) FROM console_it_students") != before {
+			t.Fatal("planning changed target rows")
+		}
 	})
 	t.Run("17 unauthorized", func(t *testing.T) {
 		wantFault(t, "none", "SELECT 1", "forbidden")
@@ -222,13 +198,6 @@ func TestSQLConsoleIntegration(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	})
-	t.Run("20b truncated write still commits fully", func(t *testing.T) {
-		t.Setenv("SQL_CONSOLE_MAX_ROWS", "1")
-		r := ok(t, "edit", "UPDATE console_it_students SET name = name RETURNING id")
-		if !r.Truncated || r.RowCount != 1 || r.RowsAffected == nil || *r.RowsAffected != 3 {
-			t.Fatalf("%+v", r)
-		}
-	})
 	t.Run("21 connection failure", func(t *testing.T) {
 		down := *svc
 		down.Connections = fakeConnections{err: errors.New("dial tcp 10.0.0.5:5432: refused")}
@@ -243,6 +212,19 @@ func TestSQLConsoleIntegration(t *testing.T) {
 		same.Repository = &Repository{Pool: target} // "platform" == target
 		if _, err := same.Query(ctx, "edit", consoleTestDB, "SELECT 1"); faultCode(err) != "forbidden" {
 			t.Fatalf("expected forbidden, got %v", err)
+		}
+		if _, err := same.Plan(ctx, "edit", consoleTestDB, "SELECT 1"); faultCode(err) != "forbidden" {
+			t.Fatalf("platform plan: %v", err)
+		}
+		if _, err := same.Schema(ctx, "edit", consoleTestDB, "public"); faultCode(err) != "forbidden" {
+			t.Fatalf("platform schema: %v", err)
+		}
+		result := executePostgres(ctx, target, target, "SELECT 1", "", func(string, string) error {
+			t.Error("platform target reached XID recording")
+			return nil
+		}, nil, nil, nil)
+		if result.Status != "failed" || result.FaultCode != "forbidden" {
+			t.Fatalf("platform execution: %+v", result)
 		}
 	})
 	t.Run("no migration history is created", func(t *testing.T) {
