@@ -3,24 +3,16 @@ import { href, date, requestHref } from "../../migration/api.js";
 import { database } from "../../migration/navigation.js";
 import { Badge, SQL } from "../../migration/components.jsx";
 import { isOpen } from "../../migration/changeRequests.js";
+import { nextOperations } from "../../migration/executionHistory.js";
 import { useChangeRequestList } from "../../migration/useChangeRequests.js";
 import { ChangeRequestList } from "./ChangeRequestList.jsx";
 import { SubmitRequestDialog } from "./SubmitRequestDialog.jsx";
-
-// The operations a migration can be asked to run next, given its state. Each one needs approval.
-function availableOperations(m) {
-  if (m.state === "draft") return [["apply", "Submit for approval"]];
-  if (m.state === "failed") return [["apply", "Resubmit for approval"]];
-  if (m.state === "applied" && !m.irreversible && m.sql_down?.trim()) return [["rollback", "Request rollback"]];
-  if (m.state === "rolled_back") return [["forward", "Request roll forward"]];
-  return [];
-}
 
 export function Details({ current: m, canEdit }) {
   const [operation, setOperation] = useState("");
   const requests = useChangeRequestList(database, m.id);
   const openRequest = requests.items.find((r) => isOpen(r.status));
-  const operations = canEdit ? availableOperations(m) : [];
+  const operations = canEdit ? nextOperations(m) : [];
   return (
     <>
       <section className="panel">

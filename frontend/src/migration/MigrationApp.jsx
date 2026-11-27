@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { api, session, href, workspaceHref, databaseBase } from "./api.js";
 import { titles } from "./navigation.js";
-import { interceptLinks, replaceUrl, useRoute } from "./router.js";
+import { replaceUrl, useRoute } from "./router.js";
 import { ErrorBox } from "./components.jsx";
 import { useAccessibleDatabases } from "./useAccessibleDatabases.js"
 import { usePendingApprovals } from "./useChangeRequests.js";
@@ -10,6 +10,8 @@ import { Editor } from "../pages/migration/Editor.jsx";
 import { Details } from "../pages/migration/Details.jsx";
 import { SchemaDiff } from "../pages/migration/SchemaDiff.jsx";
 import { Workspace } from "../pages/migration/Workspace.jsx";
+import "./style.css";
+import "./changeRequests.css";
 
 const WORKSPACE_PAGES = ["index", "history", "query-plan"];
 const TABS = ["overview", "migration", "approvals", "console", "plan"];
@@ -104,12 +106,6 @@ export function MigrationApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [route.key]);
 
-  // Plain clicks on links to other pages of this app navigate in place.
-  useEffect(() => {
-    document.addEventListener("click", interceptLinks);
-    return () => document.removeEventListener("click", interceptLinks);
-  }, []);
-
   useEffect(() => {
     if (!databaseId) return;
     let active = true;
@@ -164,12 +160,12 @@ export function MigrationApp() {
   return (
     <div className="shell migration-app">
       <aside className="sidebar">
-        <a className="brand-mark migration-brand" href="/index.html">
+        <a className="brand-mark migration-brand" href="/">
           RuangSuara
         </a>
         <div className="migration-navigation">
           <nav aria-label="Application navigation">
-            <a className="nav-link" href="/admin/users.html">
+            <a className="nav-link" href="/admin/users">
               Administration
             </a>
           </nav>
@@ -205,7 +201,7 @@ export function MigrationApp() {
       <div className="workspace">
         <header className="migration-header">
           <nav aria-label="Breadcrumb">
-            <a href="/index.html">RuangSuara</a>
+            <a href="/">RuangSuara</a>
             <span aria-hidden="true">/</span>
             <a href={workspaceHref("overview", databaseId)}>Migration</a>
           </nav>

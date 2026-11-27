@@ -6,6 +6,7 @@ import DataState from '../components/DataState'
 import Modal from '../components/Modal'
 import { useToast } from '../components/toast-context'
 import { formatDate } from '../components/format'
+import GroupLeaderDialog from './GroupLeaderDialog'
 import MembershipDialog from './MembershipDialog'
 
 const fetchUsers = () => api.listUsers()
@@ -55,7 +56,9 @@ function GroupForm({ group, onClose, onSaved }) {
   )
 }
 
-export default function Groups() {
+// canEdit: the signed-in admin may change things. Setting a group's leader is an admin-only action,
+// so everyone else sees who the leader is but gets no control to change it.
+export default function Groups({ canEdit = false }) {
   const toast = useToast()
   const groups = useResource(fetchGroups)
   const users = useResource(fetchUsers)
@@ -89,16 +92,28 @@ export default function Groups() {
         <div className="table-wrap">
           <table className="table">
             <thead>
-              <tr><th>Name</th><th>Description</th><th>Created</th><th><span className="sr-only">Actions</span></th></tr>
+              <tr><th>Name</th><th>Description</th><th>Leader</th><th>Created</th><th><span className="sr-only">Actions</span></th></tr>
             </thead>
             <tbody>
               {list.map((g) => (
                 <tr key={g.id}>
                   <td><strong>{g.name}</strong></td>
                   <td className="muted">{g.description || '—'}</td>
+                  <td>
+                    {g.leader_name ? (
+                      <strong>{g.leader_name}</strong>
+                    ) : (
+                      <span className="badge badge-warn" title="Changes to databases this group can access cannot be approved until it has a leader">No leader</span>
+                    )}
+                  </td>
                   <td className="muted">{formatDate(g.created_at)}</td>
                   <td className="row-actions">
                     <button className="btn btn-small" onClick={() => setModal({ type: 'members', group: g })}>Members</button>
+                    {canEdit && (
+                      <button className="btn btn-small" onClick={() => setModal({ type: 'leader', group: g })}>
+                        {g.leader_name ? 'Change leader' : 'Set leader'}
+                      </button>
+                    )}
                     <button className="btn btn-small" onClick={() => setModal({ type: 'form', group: g })}>Edit</button>
                     <button className="btn btn-small btn-danger-quiet" onClick={() => setModal({ type: 'delete', group: g })}>Delete</button>
                   </td>
@@ -112,10 +127,14 @@ export default function Groups() {
       {modal?.type === 'form' && (
         <GroupForm group={modal.group} onClose={close} onSaved={(m) => { toast(m); groups.reload() }} />
       )}
+      {modal?.type === 'leader' && (
+        <GroupLeaderDialog group={modal.group} onClose={close} onSaved={(m) => { toast(m); groups.reload() }} />
+      )}
       {modal?.type === 'members' && (
         <MembershipDialog
           mode="group"
           entity={modal.group}
+          leaderName={modal.group.leader_name}
           options={(users.data ?? []).map((u) => ({ id: u.id, label: u.username }))}
           onClose={close}
         />
