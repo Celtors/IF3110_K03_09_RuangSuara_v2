@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"backend/internal/telemetry"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // WorkerConfig tunes the queue worker.
@@ -83,6 +84,7 @@ func (r *Review) runWorker(ctx context.Context, cfg WorkerConfig) {
 
 // drain starts requests until the queue has nothing runnable or the worker is full.
 func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.WaitGroup) {
+	attempted := map[string]bool{}
 	for ctx.Err() == nil {
 		select {
 		case sem <- struct{}{}:
@@ -90,6 +92,9 @@ func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.Wai
 			return
 		}
 		q, err := r.repo().claim(ctx, r.revalidate)
+		if err == nil && q == nil {
+			q, err = r.nextBatch(ctx, attempted)
+		}
 		if err != nil {
 			<-sem
 			if ctx.Err() == nil {
@@ -101,9 +106,15 @@ func (r *Review) drain(ctx context.Context, sem chan struct{}, running *sync.Wai
 			<-sem
 			return
 		}
+		attempted[q.ID] = true
+		if _, loaded := r.inflight.LoadOrStore(q.ID, struct{}{}); loaded {
+			<-sem
+			return
+		}
 		running.Add(1)
 		go func(q QueuedRequest) {
 			defer running.Done()
+			defer r.inflight.Delete(q.ID)
 			defer func() { <-sem }()
 			// Shutdown must not abort SQL halfway: the request gets its own context and
 			// the worker waits for it. A killed process is handled by recoverInterrupted.
@@ -176,17 +187,38 @@ func (r *Review) revalidate(ctx context.Context, q QueuedRequest) (bool, string,
 func (r *Review) process(ctx context.Context, q QueuedRequest) {
 	ctx = q.logContext(ctx)
 	slog.InfoContext(ctx, "queue.execution_started", "status", "running")
-	r.inflight.Store(q.ID, struct{}{})
-	defer r.inflight.Delete(q.ID)
+	if _, e := loadBatch(ctx, r.repo().Pool, q.ID); e == nil {
+		r.processBatch(ctx, q)
+		return
+	} else if !isNoRows(e) {
+		return
+	}
 
 	var attemptID string
-	attempt, err := r.Service.executeOperation(ctx, q.RequestedBy, q.DatabaseID, q.MigrationID, q.Operation, func(attemptCtx context.Context, a Attempt) {
+	attempt, err := r.Service.executeOperation(ctx, q.RequestedBy, q.DatabaseID, q.MigrationID, q.Operation, func(ctx context.Context, c *pgxpool.Conn) error {
+		var valid bool
+		if e := c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests WHERE id=$1 AND status='running' AND started_at=$2 AND attempt_id IS NULL)`, q.ID, q.startedAt).Scan(&valid); e != nil {
+			return e
+		}
+		if !valid {
+			return fault("stale_job", "Claim was recovered by another worker")
+		}
+		return nil
+	}, func(attemptCtx context.Context, a Attempt) error {
 		attemptID = a.ID
 		clean, cancel := cleanupContext(attemptCtx)
 		defer cancel()
-		if e := r.repo().linkAttempt(clean, q.ID, a.ID); e != nil {
-			slog.LogAttrs(clean, slog.LevelWarn, "queue.link_attempt", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
+		if sqlHash(a.SQL) != q.SQLHash {
+			return fault("conflict", "Approved SQL changed")
 		}
+		ok, code, message, e := r.revalidate(clean, q)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			return fault(code, message)
+		}
+		return r.repo().linkAttempt(clean, q.ID, a.ID)
 	})
 
 	if attemptID != "" {
@@ -195,6 +227,9 @@ func (r *Review) process(ctx context.Context, q QueuedRequest) {
 	status, code, message := RequestSucceeded, "", ""
 	if err != nil {
 		code, message = faultInfo(err)
+		if code == "stale_job" || (attemptID == "" && attempt.ID != "") {
+			return
+		}
 		status = RequestFailed
 		// The attempt exists but its outcome could not be confirmed: keep the request
 		// unresolved until recovery learns what the target did.
@@ -208,7 +243,7 @@ func (r *Review) process(ctx context.Context, q QueuedRequest) {
 
 	clean, cancel := cleanupContext(ctx)
 	defer cancel()
-	if err = r.repo().finishRequest(clean, q.ID, status, code, message, attemptID); err != nil {
+	if err = r.repo().finishRequest(clean, q.ID, status, code, message, attemptID, q.startedAt); err != nil {
 		// The request stays running; recoverInterrupted settles it from the attempt record.
 		slog.LogAttrs(ctx, slog.LevelError, "queue.record_outcome", append(telemetry.ErrorAttrs(err), slog.String("status", "failed"))...)
 	}
@@ -252,6 +287,15 @@ func (r *Review) recoverInterrupted(ctx context.Context, cfg WorkerConfig) {
 
 func (r *Review) recoverOne(ctx context.Context, q InFlightRequest) {
 	ctx = q.logContext(ctx)
+	lock, release, e := r.repo().lock(ctx, q.DatabaseID)
+	if e != nil {
+		return
+	}
+	defer release()
+	var current bool
+	if e = lock.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM dmp_migration.change_requests WHERE id=$1 AND status IN ('running','unknown') AND started_at=$2)`, q.ID, q.StartedAt).Scan(&current); e != nil || !current {
+		return
+	}
 	slog.InfoContext(ctx, "queue.recovery", "status", "started")
 	attemptID, status, code, message, err := r.repo().attemptFor(ctx, q)
 	if err != nil {
@@ -260,9 +304,11 @@ func (r *Review) recoverOne(ctx context.Context, q InFlightRequest) {
 	}
 	if status == "running" || status == "unknown" {
 		// Ask the target database what happened to the interrupted transaction.
-		if e := r.Service.Reconcile(ctx, q.RequestedBy, q.DatabaseID); e != nil {
-			if c, _ := faultInfo(e); c != "indeterminate" && c != "conflict" {
-				slog.LogAttrs(ctx, slog.LevelWarn, "queue.reconcile", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
+		if pool, e := r.Service.connection(ctx, q.DatabaseID); e == nil {
+			if e := r.Service.reconcileLocked(ctx, lock, pool, q.DatabaseID); e != nil {
+				if c, _ := faultInfo(e); c != "indeterminate" && c != "conflict" {
+					slog.LogAttrs(ctx, slog.LevelWarn, "queue.reconcile", append(telemetry.ErrorAttrs(e), slog.String("status", "failed"))...)
+				}
 			}
 		}
 		attemptID, status, code, message, err = r.repo().attemptFor(ctx, q)
@@ -289,7 +335,13 @@ func (r *Review) recoverOne(ctx context.Context, q InFlightRequest) {
 		if q.Status != RequestRunning {
 			return
 		}
-		finalStatus, code, message = RequestFailed, "interrupted", "The worker stopped before the migration started. Submit a new change request"
+		_, err = lock.Exec(clean, `UPDATE dmp_migration.change_requests SET status='queued',started_at=NULL WHERE id=$1 AND status='running' AND attempt_id IS NULL`, q.ID)
+		if err != nil {
+			slog.ErrorContext(ctx, "queue.requeue_failed", "job_id", q.ID)
+		} else {
+			r.notify()
+		}
+		return
 	default: // still running or unknown on the target
 		if q.Status == RequestUnknown {
 			return
