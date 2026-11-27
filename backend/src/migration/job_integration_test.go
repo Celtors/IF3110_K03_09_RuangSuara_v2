@@ -17,12 +17,19 @@ import (
 	"backend/internal/telemetry"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+)
+
+const (
+	jobEditor   = "77777777-7777-4777-8777-000000000001"
+	jobLeader   = "77777777-7777-4777-8777-000000000002"
+	jobReviewer = "77777777-7777-4777-8777-000000000003"
 )
 
 type jobTestAccess struct {
@@ -37,22 +44,16 @@ func (a *jobTestAccess) Permission(_ context.Context, user, _ string) (Permissio
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch user {
-	case "editor":
+	case jobEditor:
 		if !a.revoked {
 			return Edit, nil
 		}
-	case "leader":
+	case jobLeader, jobReviewer:
 		return View, nil
 	}
 	return NoAccess, nil
 }
 func (*jobTestAccess) CSRF(*http.Request) error { return nil }
-
-type jobTestApprovers struct{}
-
-func (jobTestApprovers) RequiredApprovers(context.Context, string) ([]RequiredApprover, error) {
-	return []RequiredApprover{{GroupID: "g1", GroupName: "test", LeaderID: "leader", LeaderActive: true}}, nil
-}
 
 type jobHarness struct {
 	r                *Review
@@ -60,6 +61,7 @@ type jobHarness struct {
 	target, platform *pgxpool.Pool
 	db               string
 	access           *jobTestAccess
+	group            string
 }
 
 func newJobHarness(t *testing.T) *jobHarness {
@@ -81,19 +83,38 @@ func newJobHarness(t *testing.T) *jobHarness {
 		t.Fatal(err)
 	}
 	t.Cleanup(platform.Close)
+	var hasAccessSchema bool
+	if err = platform.QueryRow(ctx, `SELECT to_regclass('public.users') IS NOT NULL`).Scan(&hasAccessSchema); err != nil {
+		t.Fatal(err)
+	}
+	if !hasAccessSchema {
+		schema, err := os.ReadFile("../../../database_schema/access-control/access-control-db.sql")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, platform, string(schema))
+	}
 	repo := &Repository{Pool: platform}
 	if err = repo.Initialize(ctx); err != nil {
 		t.Fatal(err)
 	}
 	access := &jobTestAccess{}
 	r := NewReview(&Service{Repository: repo, Access: access, Connections: fakeConnections{pool: target}})
-	r.Approvers = jobTestApprovers{}
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(telemetry.HTTP)
 	RegisterReviewRoutes(router, r)
-	db := canonicalDatabaseID(newID())
-	h := &jobHarness{r, router, target, platform, db, access}
+	RegisterRoutes(router, r.Service)
+	db := uuid.NewString()
+	h := &jobHarness{r: r, router: router, target: target, platform: platform, db: db, access: access}
+	h.execPlatform(t, `INSERT INTO users (id,username,password_hash) VALUES
+ ($1,'job-editor','fixture'), ($2,'job-leader','fixture'), ($3,'job-reviewer','fixture')
+ ON CONFLICT (id) DO NOTHING`, jobEditor, jobLeader, jobReviewer)
+	h.execPlatform(t, `INSERT INTO databases (id,name,host,port,database_name,username,password_ciphertext)
+ VALUES ($1,$2,'localhost',5432,'fixture','fixture','fixture')`, db, db)
+	t.Cleanup(func() { h.execPlatform(t, `DELETE FROM databases WHERE id=$1`, db) })
+	h.group = h.addApprovalGroup(t, "ViewEdit", jobEditor, jobLeader)
+	h.execPlatform(t, `INSERT INTO group_leaders (group_id,leader_id) VALUES ($1,$2)`, h.group, jobLeader)
 	t.Cleanup(func() { // cleanup only this test database's records; audit triggers may reject DELETE, so require disposable platform
 		jobs, e := platform.Query(ctx, `SELECT b.id FROM dmp_migration.batch_jobs b JOIN dmp_migration.change_requests r ON r.id=b.id WHERE r.database_id=$1`, db)
 		if e == nil {
@@ -112,6 +133,25 @@ func newJobHarness(t *testing.T) *jobHarness {
 		_, _ = platform.Exec(ctx, `DELETE FROM dmp_migration.definitions WHERE database_id=$1`, db)
 	})
 	return h
+}
+
+func (h *jobHarness) execPlatform(t *testing.T, sql string, args ...any) {
+	t.Helper()
+	if _, err := h.platform.Exec(context.Background(), sql, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (h *jobHarness) addApprovalGroup(t *testing.T, effect string, members ...string) string {
+	t.Helper()
+	group := uuid.NewString()
+	h.execPlatform(t, `INSERT INTO groups_ (id,name) VALUES ($1,$2)`, group, group)
+	t.Cleanup(func() { h.execPlatform(t, `DELETE FROM groups_ WHERE id=$1`, group) })
+	h.execPlatform(t, `INSERT INTO group_policies (group_id,database_id,effect) VALUES ($1,$2,$3)`, group, h.db, effect)
+	for _, member := range members {
+		h.execPlatform(t, `INSERT INTO user_groups (group_id,user_id) VALUES ($1,$2)`, group, member)
+	}
+	return group
 }
 func (h *jobHarness) request(t *testing.T, user, method, path string, body any, want int) map[string]any {
 	t.Helper()
@@ -132,7 +172,7 @@ func (h *jobHarness) request(t *testing.T, user, method, path string, body any, 
 }
 func (h *jobHarness) submit(t *testing.T, up, down string, batch int) string {
 	t.Helper()
-	m, err := h.r.Service.Save(context.Background(), "editor", h.db, "", Draft{Name: newID(), SQLUp: up, SQLDown: down})
+	m, err := h.r.Service.Save(context.Background(), jobEditor, h.db, "", Draft{Name: newID(), SQLUp: up, SQLDown: down})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,15 +182,15 @@ func (h *jobHarness) submit(t *testing.T, up, down string, batch int) string {
 		in.BatchAttribute = "id"
 		in.BatchSize = batch
 	}
-	out := h.request(t, "editor", "POST", "/change-requests", in, 201)
+	out := h.request(t, jobEditor, "POST", "/change-requests", in, 201)
 	id := out["job_id"].(string)
 	return id
 }
 func (h *jobHarness) approve(t *testing.T, id string) {
-	h.request(t, "leader", "POST", "/change-requests/"+id+"/approve", DecisionBody{}, 200)
+	h.request(t, jobLeader, "POST", "/change-requests/"+id+"/approve", DecisionBody{}, 200)
 }
 func (h *jobHarness) status(t *testing.T, id string) map[string]any {
-	return h.request(t, "editor", "GET", "/jobs/"+id, nil, 200)
+	return h.request(t, jobEditor, "GET", "/jobs/"+id, nil, 200)
 }
 func (h *jobHarness) wait(t *testing.T, id, state string, paused bool) map[string]any {
 	t.Helper()
@@ -177,8 +217,88 @@ func (h *jobHarness) worker(t *testing.T) func() {
 	t.Cleanup(stop)
 	return stop
 }
+func TestGroupApprovalsIntegration(t *testing.T) {
+	h := newJobHarness(t)
+	ctx := context.Background()
+	group := h.addApprovalGroup(t, "ViewOnly", jobReviewer)
+	id := h.submit(t, "CREATE TABLE public.group_approval_test (id integer)", "DROP TABLE public.group_approval_test", 0)
+	approvePath := "/change-requests/" + id + "/approve"
+	get := func(user string) ChangeRequest {
+		t.Helper()
+		q, err := h.r.Get(ctx, user, h.db, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return q
+	}
+	approvalForGroup := func(q ChangeRequest) Approval {
+		t.Helper()
+		for _, a := range q.Approvals {
+			if a.GroupID == group {
+				return a
+			}
+		}
+		t.Fatalf("required group %s missing from approvals: %+v", group, q.Approvals)
+		return Approval{}
+	}
+
+	q := get(jobReviewer)
+	h.request(t, jobEditor, "POST", "/migrations/"+q.MigrationID+"/execute", nil, 409)
+	if a := approvalForGroup(q); len(q.Approvals) != 2 || a.RequiredLeaderID != "" || a.Mine || a.Decision != "pending" {
+		t.Fatalf("leaderless group must await approval: %+v", q.Approvals)
+	}
+	h.request(t, jobEditor, "POST", approvePath, DecisionBody{}, 403)
+	h.request(t, "outsider", "POST", approvePath, DecisionBody{}, 403)
+	h.request(t, jobReviewer, "POST", approvePath, DecisionBody{}, 403)
+	h.approve(t, id)
+	if q = get(jobReviewer); q.Status != RequestPendingReview || q.QueuedAt != nil {
+		t.Fatalf("queued before all groups approved: %+v", q)
+	}
+
+	h.execPlatform(t, `INSERT INTO group_leaders (group_id,leader_id) VALUES ($1,$2)`, group, jobReviewer)
+	if a := approvalForGroup(get(jobReviewer)); !a.Mine || a.RequiredLeaderID != jobReviewer {
+		t.Fatalf("new leader is missing from the pending approval: %+v", a)
+	}
+	h.execPlatform(t, `DELETE FROM user_groups WHERE group_id=$1 AND user_id=$2`, group, jobReviewer)
+	h.request(t, jobReviewer, "POST", approvePath, DecisionBody{}, 403)
+	h.execPlatform(t, `INSERT INTO user_groups (group_id,user_id) VALUES ($1,$2)`, group, jobReviewer)
+	h.execPlatform(t, `UPDATE users SET status='Inactive' WHERE id=$1`, jobReviewer)
+	t.Cleanup(func() { h.execPlatform(t, `UPDATE users SET status='Active' WHERE id=$1`, jobReviewer) })
+	h.request(t, jobReviewer, "POST", approvePath, DecisionBody{}, 403)
+	h.execPlatform(t, `UPDATE users SET status='Active' WHERE id=$1`, jobReviewer)
+	inbox, err := h.r.PendingApprovals(ctx, jobReviewer)
+	if err != nil || len(inbox) != 1 || inbox[0].ID != id || !approvalForGroup(inbox[0]).Mine {
+		t.Fatalf("new leader's inbox: %+v, %v", inbox, err)
+	}
+	h.request(t, jobReviewer, "POST", approvePath, DecisionBody{}, 200)
+	h.request(t, jobReviewer, "POST", approvePath, DecisionBody{}, 409)
+	h.execPlatform(t, `INSERT INTO user_groups (group_id,user_id) VALUES ($1,$2)`, group, jobEditor)
+	h.execPlatform(t, `UPDATE group_leaders SET leader_id=$2 WHERE group_id=$1`, group, jobEditor)
+
+	q = get(jobEditor)
+	a := approvalForGroup(q)
+	queuedEvents := 0
+	for _, event := range q.Events {
+		if event.Event == "queued" {
+			queuedEvents++
+		}
+	}
+	if q.Status != RequestQueued || q.QueuedAt == nil || queuedEvents != 1 ||
+		a.Decision != "approved" || a.DecidedBy == nil || *a.DecidedBy != jobReviewer ||
+		a.RequiredLeaderID != jobReviewer || a.LeaderUsername != "job-reviewer" {
+		t.Fatalf("final approval must queue once and retain the decision-maker: %+v", q)
+	}
+	h.request(t, jobEditor, "POST", "/change-requests/"+id+"/cancel", DecisionBody{}, 200)
+}
+
 func TestAsyncJobsAndRecoveryIntegration(t *testing.T) {
 	h := newJobHarness(t)
+	metrics := telemetry.NewMetricsRegistry()
+	initialRows := workflowMetric(t, metrics, "batch_rows_total", "action", "apply")
+	initialBatches := workflowMetric(t, metrics, "batch_commits_total", "action", "apply")
+	initialCompletions := workflowMetric(t, metrics, "migration_completions_total", "mode", "batch", "operation", "apply", "outcome", "succeeded")
+	initialFailed := workflowMetric(t, metrics, "migration_completions_total", "mode", "batch", "operation", "apply", "outcome", "failed")
+	initialResume := workflowMetric(t, metrics, "migration_retries_total", "kind", "batch_resume_accepted")
 	var logs bytes.Buffer
 	slogBefore, tracingBefore := slog.Default(), otel.GetTracerProvider()
 	exporter := tracetest.NewInMemoryExporter()
@@ -195,7 +315,7 @@ func TestAsyncJobsAndRecoveryIntegration(t *testing.T) {
 	if p := h.status(t, id); p["status"] != "pending_review" {
 		t.Fatal(p)
 	}
-	h.request(t, "editor", "POST", "/change-requests/"+id+"/approve", DecisionBody{}, 403)
+	h.request(t, jobEditor, "POST", "/change-requests/"+id+"/approve", DecisionBody{}, 403)
 	h.request(t, "none", "GET", "/jobs/"+id, nil, 403)
 	h.approve(t, id)
 	if h.status(t, id)["status"] != "queued" || score(t, h.target, rel, 1) != 0 {
@@ -207,6 +327,11 @@ func TestAsyncJobsAndRecoveryIntegration(t *testing.T) {
 	if p["committed_batches"] != float64(1) || p["committed_rows"] != float64(2) {
 		t.Fatal(p)
 	}
+	if workflowMetric(t, metrics, "batch_rows_total", "action", "apply") != initialRows+2 ||
+		workflowMetric(t, metrics, "batch_commits_total", "action", "apply") != initialBatches+1 ||
+		workflowMetric(t, metrics, "migration_completions_total", "mode", "batch", "operation", "apply", "outcome", "failed") != initialFailed {
+		t.Fatal("paused batch counted rolled-back work or a terminal failure")
+	}
 	// Later same-database operation remains queued while partial.
 	later := h.submit(t, `UPDATE `+rel+` SET score=score+2`, `UPDATE `+rel+` SET score=score-2`, 0)
 	h.approve(t, later)
@@ -216,9 +341,8 @@ func TestAsyncJobsAndRecoveryIntegration(t *testing.T) {
 	}
 	stop()
 	mustExec(t, h.target, `ALTER TABLE `+rel+` DROP CONSTRAINT limited_score`)
-	h.request(t, "editor", "POST", "/jobs/"+id+"/resume", nil, 202)
+	h.request(t, jobEditor, "POST", "/jobs/"+id+"/resume", nil, 202)
 	h.r = NewReview(h.r.Service) // Fresh worker state, same PostgreSQL storage.
-	h.r.Approvers = jobTestApprovers{}
 	stop = h.worker(t)
 	p = h.wait(t, id, "completed", false)
 	if p["committed_batches"] != float64(3) || p["committed_rows"] != float64(5) {
@@ -226,6 +350,12 @@ func TestAsyncJobsAndRecoveryIntegration(t *testing.T) {
 	}
 	h.wait(t, later, "completed", false)
 	stop()
+	if workflowMetric(t, metrics, "batch_rows_total", "action", "apply") != initialRows+5 ||
+		workflowMetric(t, metrics, "batch_commits_total", "action", "apply") != initialBatches+3 ||
+		workflowMetric(t, metrics, "migration_completions_total", "mode", "batch", "operation", "apply", "outcome", "succeeded") != initialCompletions+1 ||
+		workflowMetric(t, metrics, "migration_retries_total", "kind", "batch_resume_accepted") != initialResume+1 {
+		t.Fatal("resume duplicated checkpoint progress or omitted a durable terminal outcome")
+	}
 	assertBatchResumeTelemetry(t, logs.String(), exporter.GetSpans(), id, strings.TrimPrefix(rel, "public."))
 }
 
@@ -330,7 +460,7 @@ func TestAsyncPermissionRevalidationIntegration(t *testing.T) {
 	h.worker(t)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		q, e := h.r.Get(context.Background(), "leader", h.db, id)
+		q, e := h.r.Get(context.Background(), jobLeader, h.db, id)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -386,7 +516,7 @@ func TestAsyncRecoveryAfterAccessRevoked(t *testing.T) {
 	h.access.mu.Lock()
 	h.access.revoked = true
 	h.access.mu.Unlock()
-	if code, _ := faultInfo(h.r.Service.Reconcile(ctx, "editor", h.db)); code != "forbidden" {
+	if code, _ := faultInfo(h.r.Service.Reconcile(ctx, jobEditor, h.db)); code != "forbidden" {
 		t.Fatalf("public reconciliation with revoked access returned %q", code)
 	}
 	candidate := InFlightRequest{ID: id, DatabaseID: h.db, MigrationID: m.ID, Operation: q.Operation,
@@ -394,12 +524,12 @@ func TestAsyncRecoveryAfterAccessRevoked(t *testing.T) {
 	stale := candidate
 	stale.StartedAt = stale.StartedAt.Add(-time.Second)
 	h.r.recoverOne(ctx, stale)
-	stored, err := h.r.Get(ctx, "leader", h.db, id)
+	stored, err := h.r.Get(ctx, jobLeader, h.db, id)
 	if err != nil || stored.Status != RequestRunning {
 		t.Fatalf("stale recovery changed the current claim: %v %v", stored.Status, err)
 	}
 	h.r.recoverOne(ctx, candidate)
-	stored, err = h.r.Get(ctx, "leader", h.db, id)
+	stored, err = h.r.Get(ctx, jobLeader, h.db, id)
 	if err != nil || stored.Status != RequestSucceeded || stored.AttemptID == nil || *stored.AttemptID != attempt.ID {
 		t.Fatalf("internal recovery did not settle the linked attempt: %v %v", stored.Status, err)
 	}
@@ -409,6 +539,9 @@ func TestAsyncRecoveryAfterAccessRevoked(t *testing.T) {
 }
 func TestBatchUnmirroredCommitRecoveryIntegration(t *testing.T) {
 	h := newJobHarness(t)
+	metrics := telemetry.NewMetricsRegistry()
+	initialBatches := workflowMetric(t, metrics, "batch_commits_total", "action", "apply")
+	initialRows := workflowMetric(t, metrics, "batch_rows_total", "action", "apply")
 	rel, up, down := batchFixture(t, h.target, 5, false)
 	id := h.submit(t, up, down, 2)
 	h.approve(t, id)
@@ -472,6 +605,9 @@ func TestBatchUnmirroredCommitRecoveryIntegration(t *testing.T) {
 	if h.status(t, id)["committed_rows"] != float64(0) || score(t, h.target, rel, 1) != 1 {
 		t.Fatal("interruption fixture invalid")
 	}
+	if workflowMetric(t, metrics, "batch_rows_total", "action", "apply") != initialRows {
+		t.Fatal("unverified platform progress was counted")
+	}
 	h.worker(t)
 	p := h.wait(t, id, "completed", false)
 	if p["committed_rows"] != float64(5) || score(t, h.target, rel, 1) != 1 || score(t, h.target, rel, 5) != 10 {
@@ -480,7 +616,7 @@ func TestBatchUnmirroredCommitRecoveryIntegration(t *testing.T) {
 	// Rollback and forward use the original completed batch scope through the queue.
 	mustExec(t, h.target, `INSERT INTO `+rel+`(score) VALUES(20)`)
 	for _, op := range []Operation{OperationRollback, OperationForward} {
-		out := h.request(t, "editor", "POST", "/change-requests", SubmitRequest{MigrationID: q.MigrationID, Operation: op}, 201)
+		out := h.request(t, jobEditor, "POST", "/change-requests", SubmitRequest{MigrationID: q.MigrationID, Operation: op}, 201)
 		jid := out["job_id"].(string)
 		h.approve(t, jid)
 		h.wait(t, jid, "completed", false)
@@ -491,6 +627,10 @@ func TestBatchUnmirroredCommitRecoveryIntegration(t *testing.T) {
 		if score(t, h.target, rel, 1) != expected || score(t, h.target, rel, 6) != 20 {
 			t.Fatalf("scoped %s failed", op)
 		}
+	}
+	if workflowMetric(t, metrics, "batch_commits_total", "action", "apply") != initialBatches+3 ||
+		workflowMetric(t, metrics, "batch_rows_total", "action", "apply") != initialRows+5 {
+		t.Fatal("recovery omitted the unmirrored checkpoint or counted it twice")
 	}
 }
 
@@ -575,15 +715,24 @@ func TestBatchPerformanceAcceptance(t *testing.T) {
 
 func TestCompensationJobIntegration(t *testing.T) {
 	h := newJobHarness(t)
+	metrics := telemetry.NewMetricsRegistry()
+	initialBatches := workflowMetric(t, metrics, "batch_commits_total", "action", "compensate")
+	initialRows := workflowMetric(t, metrics, "batch_rows_total", "action", "compensate")
 	rel, up, down := batchFixture(t, h.target, 5, true)
 	id := h.submit(t, up, down, 2)
 	h.approve(t, id)
-	h.worker(t)
+	stop := h.worker(t)
 	h.wait(t, id, "partial", true)
-	h.request(t, "leader", "POST", "/jobs/"+id+"/compensate", nil, 403)
-	h.request(t, "editor", "POST", "/jobs/"+id+"/compensate", nil, 202)
+	stop() // The paused state is durable before processBatch releases its lock.
+	h.request(t, jobLeader, "POST", "/jobs/"+id+"/compensate", nil, 403)
+	h.request(t, jobEditor, "POST", "/jobs/"+id+"/compensate", nil, 202)
+	h.worker(t)
 	p := h.wait(t, id, "reverted", false)
 	if p["compensation_status"] != "reverted" || p["reverted_batches"] != float64(1) || score(t, h.target, rel, 1) != 0 || score(t, h.target, rel, 3) != 9 {
 		t.Fatalf("compensation failed: %v", p)
+	}
+	if workflowMetric(t, metrics, "batch_commits_total", "action", "compensate") != initialBatches+1 ||
+		workflowMetric(t, metrics, "batch_rows_total", "action", "compensate") != initialRows+2 {
+		t.Fatal("verified compensation was omitted from its own counters")
 	}
 }

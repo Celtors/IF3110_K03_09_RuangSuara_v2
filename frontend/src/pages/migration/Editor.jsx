@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { apiWithSessionRetry, href, draftKey, requestHref } from "../../migration/api.js";
 import { database, base } from "../../migration/navigation.js";
 import { ErrorBox } from "../../migration/components.jsx";
@@ -23,6 +23,7 @@ export function Editor({ current, canEdit }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const saving = useRef(false);
   // The SQL is frozen while a change request for it is open: approval covers exactly that SQL.
   const requests = useChangeRequestList(saved ? database : "", saved?.id ?? "");
   const openRequest = requests.items.find((r) => isOpen(r.status));
@@ -63,7 +64,8 @@ export function Editor({ current, canEdit }) {
   };
   async function save(event) {
     event.preventDefault();
-    if (!editable || busy || !dirty) return;
+    if (!editable || saving.current || !dirty) return;
+    saving.current = true;
     setBusy(true);
     setError("");
     try {
@@ -91,6 +93,7 @@ export function Editor({ current, canEdit }) {
     } catch (e) {
       setError(e.message);
     } finally {
+      saving.current = false;
       setBusy(false);
     }
   }

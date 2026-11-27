@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Modal from "../../components/Modal.jsx";
 
 const COPY = {
@@ -33,10 +33,12 @@ export function DecisionDialog({ kind, onSubmit, onClose }) {
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const inFlight = useRef(false);
   const missing = copy.required && !comment.trim();
   async function run(event) {
     event.preventDefault();
-    if (busy || missing) return;
+    if (inFlight.current || missing) return;
+    inFlight.current = true;
     setBusy(true);
     setError("");
     try {
@@ -44,6 +46,7 @@ export function DecisionDialog({ kind, onSubmit, onClose }) {
       onClose();
     } catch (e) {
       setError(e.message);
+      inFlight.current = false;
       setBusy(false);
     }
   }
@@ -60,6 +63,7 @@ export function DecisionDialog({ kind, onSubmit, onClose }) {
           maxLength={2000}
           rows={3}
           required={Boolean(copy.required)}
+          readOnly={busy}
           autoFocus
         />
         {error && (

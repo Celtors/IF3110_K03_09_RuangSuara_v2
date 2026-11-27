@@ -30,6 +30,7 @@ export function JobProgress({ databaseId, jobId, resource, canEdit, isRequester,
   const continuing = compensation === "partially_reverted" || compensation === "failed";
   const compensate = dialog === "compensate";
   async function recover() {
+    if (!actions.includes(dialog)) throw new Error("This recovery action is no longer available. Refresh the job to check its status.");
     try {
       await recoverJob(databaseId, jobId, dialog);
       setSubmittedJob(job);

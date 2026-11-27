@@ -66,15 +66,19 @@ export function useChangeRequest(databaseId, requestId, { poll = true, revision 
   const scope = `${databaseId}|${requestId}`;
   const [tick, setTick] = useState(0);
   const [state, setState] = useState({ scope: "", request: undefined, error: "" });
+  const revisionAtDecision = useRef(0);
   useEffect(() => {
     if (!databaseId || !requestId) return;
     let active = true;
+    const readRevision = revisionAtDecision.current;
     (async () => {
       try {
         const request = await getChangeRequest(databaseId, requestId);
-        if (active) setState({ scope, request, error: "" });
+        if (active && readRevision === revisionAtDecision.current) setState({ scope, request, error: "" });
       } catch (e) {
-        if (active) setState((s) => ({ scope, request: s.scope === scope ? s.request : undefined, error: e.message }));
+        if (active && readRevision === revisionAtDecision.current) {
+          setState((s) => ({ scope, request: s.scope === scope ? s.request : undefined, error: e.message }));
+        }
       }
     })();
     return () => {
@@ -89,8 +93,11 @@ export function useChangeRequest(databaseId, requestId, { poll = true, revision 
     return () => clearInterval(timer);
   }, [live]);
   const reload = useCallback(() => setTick((n) => n + 1), []);
-  // After an approve/reject/cancel the server returns the updated request; show it at once.
-  const replace = useCallback((request) => setState({ scope, request, error: "" }), [scope]);
+  // A read started before a decision must not replace the decision response.
+  const replace = useCallback((request) => {
+    revisionAtDecision.current++;
+    setState({ scope, request, error: "" });
+  }, [scope]);
   return {
     request: current.request,
     error: current.error,

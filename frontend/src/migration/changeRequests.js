@@ -25,7 +25,7 @@ export const STATUS = {
   failed: { label: "Failed", badge: "failed", recoverable: true },
   partial: { label: "Partial", badge: "unknown", open: true, blocks: true, recoverable: true },
   unresolved: { label: "Unresolved (awaiting recovery)", badge: "unknown", open: true, blocks: true },
-  unknown: { label: "Unresolved", badge: "unknown", open: true, blocks: true },
+  unknown: { label: "Unresolved", badge: "unknown", live: true, open: true, blocks: true },
   reverted: { label: "Reverted", badge: "succeeded" },
   partially_reverted: { label: "Partially reverted", badge: "unknown", open: true, blocks: true },
   rejected: { label: "Rejected", badge: "rejected" },
@@ -81,11 +81,13 @@ export async function pendingApprovals() {
 export function viewerRole(request, userId = viewerId()) {
   // The server marks the approvals addressed to a group the signed-in user leads.
   const mine = (request.approvals ?? []).filter((a) => a.mine);
+  const pending = request.status === "pending_review" ? mine.filter((a) => a.decision === "pending") : [];
   const isRequester = Boolean(userId) && request.requested_by === userId;
   return {
     isRequester,
     mine,
-    canDecide: request.status === "pending_review" && mine.some((a) => a.decision === "pending"),
+    pending,
+    canDecide: pending.length > 0,
     canCancel: isRequester && ["pending_review", "approved", "queued"].includes(request.status),
   };
 }
@@ -95,7 +97,7 @@ export function approvalProgress(request) {
   return { approved: approvals.filter((a) => a.decision === "approved").length, total: approvals.length };
 }
 
-// The API returns usernames for group leaders in approval records.
+// Approval records name current leaders and past reviewers.
 export function namesFrom(requests) {
   const names = {};
   for (const request of requests ?? []) {

@@ -28,7 +28,7 @@ func TestSQLHashIsStableAndSensitive(t *testing.T) {
 }
 
 func TestCheckApprovers(t *testing.T) {
-	ok := RequiredApprover{GroupID: "g1", GroupName: "data-engineers", LeaderID: "u1", LeaderUsername: "alice", LeaderActive: true}
+	ok := RequiredApprover{GroupID: "g1", GroupName: "data-engineers", LeaderID: "u1", LeaderUsername: "alice"}
 	cases := []struct {
 		name      string
 		approvers []RequiredApprover
@@ -40,9 +40,8 @@ func TestCheckApprovers(t *testing.T) {
 		// until a leader is assigned and decides it.
 		{"group without a leader", []RequiredApprover{ok, {GroupID: "g2", GroupName: "analysts"}}, "", ""},
 		{"only group has no leader", []RequiredApprover{{GroupID: "g2", GroupName: "analysts"}}, "", ""},
-		{"inactive leader", []RequiredApprover{{GroupID: "g2", GroupName: "analysts", LeaderID: "u2", LeaderUsername: "dave"}}, "", ""},
 		{"single team with a leader", []RequiredApprover{ok}, "", ""},
-		{"several teams, all led", []RequiredApprover{ok, {GroupID: "g2", GroupName: "analysts", LeaderID: "u2", LeaderUsername: "bob", LeaderActive: true}}, "", ""},
+		{"several teams, all led", []RequiredApprover{ok, {GroupID: "g2", GroupName: "analysts", LeaderID: "u2", LeaderUsername: "bob"}}, "", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

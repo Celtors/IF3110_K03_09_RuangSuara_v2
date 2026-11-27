@@ -15,7 +15,7 @@ beforeEach(() => {
   HTMLDialogElement.prototype.showModal ??= function () { this.open = true; };
   HTMLDialogElement.prototype.close ??= function () { this.open = false; };
   navigate.mockReset();
-  api.mockReset().mockResolvedValue({ job_id: "job-123", change_request: { id: "job-123" } });
+  api.mockReset().mockResolvedValue({ job_id: "job-123", change_request: { id: "request-123" } });
 });
 
 describe("asynchronous submission", () => {
