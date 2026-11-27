@@ -186,6 +186,9 @@ func initBatchScope(ctx context.Context, c *pgxpool.Conn, id string, b batchStat
 	if err = configureBatchTx(ctx, tx, b); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(ctx, targetBatchDDL); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO dmp_batch.jobs(id,relation_oid) VALUES($1,$2::text::regclass)`, id, b.relation()); err != nil {
 		return err
 	}
@@ -492,26 +495,25 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
  WHERE database_id=$1 AND migration_id=$2 AND operation='apply' AND status='running' AND started_at >= $3`,
 			q.DatabaseID, q.MigrationID, q.startedAt).Scan(&old)
 		if isNoRows(err) {
-			ok, code, msg, e := r.revalidate(ctx, q)
-			if e != nil || !ok {
-				if e == nil {
-					e = fault(code, msg)
+			if e := r.authorizeExecution(ctx, q); e != nil {
+				code, message := faultInfo(e)
+				if code == "authorization_unavailable" {
+					return "authorization_unavailable", e
 				}
-				_, message := faultInfo(e)
 				if err = mirrorBatch(ctx, c, q.ID, p, "failed", message); err != nil {
 					return "record_failed", err
 				}
-				if err = r.repo().finishRequest(ctx, q.ID, RequestFailed, "authorization_failed", message, "", q.startedAt); err != nil {
+				if err = r.repo().finishRequest(ctx, q.ID, RequestFailed, code, message, "", q.startedAt); err != nil {
 					return "record_failed", err
 				}
 				return "failed", e
 			}
 			if _, _, err = prepareExecution(ctx, c, m, OperationApply); err != nil {
 				_, message := faultInfo(err)
-				if e = mirrorBatch(ctx, c, q.ID, p, "failed", message); e != nil {
+				if e := mirrorBatch(ctx, c, q.ID, p, "failed", message); e != nil {
 					return "record_failed", e
 				}
-				if e = r.repo().finishRequest(ctx, q.ID, RequestFailed, "execution_failed", message, "", q.startedAt); e != nil {
+				if e := r.repo().finishRequest(ctx, q.ID, RequestFailed, "execution_failed", message, "", q.startedAt); e != nil {
 					return "record_failed", e
 				}
 				return "failed", err
@@ -587,11 +589,6 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 		return "record_failed", err
 	}
 	// Reconcile before authorization: reading evidence cannot execute new SQL.
-	if p.Intent == "" && !p.ScopeReady {
-		if _, err = target.Exec(ctx, targetBatchDDL); err != nil {
-			return pause("unresolved", err)
-		}
-	}
 	verifiedBefore := p
 	recoveryStart := time.Now()
 	err = targetProgress(ctx, target, q.ID, &p)
@@ -599,16 +596,20 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 		p = verifiedBefore
 		return pause("unresolved", fault("indeterminate", "Target checkpoint regressed"))
 	}
-	if isNoRows(err) {
+	if isNoRows(err) || postgresCode(err) == "42P01" {
 		if verifiedBefore.ScopeReady || verifiedBefore.Batches > 0 || (p.Intent != "" && p.Intent != "scope") {
 			return pause("unresolved", fault("indeterminate", "Target checkpoint is missing"))
 		}
-		ok, code, msg, e := r.revalidate(ctx, q)
-		if e != nil || !ok {
-			if e == nil {
-				e = fault(code, msg)
+		if e := r.authorizeExecution(ctx, q); e != nil {
+			code, message := faultInfo(e)
+			if code == "authorization_unavailable" {
+				return pause("unresolved", e)
 			}
-			return pause("paused", e)
+			// A missing checkpoint under the target lock settles any prior scope intent.
+			if writeErr := mirrorBatch(ctx, c, q.ID, p, "paused", message); writeErr != nil {
+				return "record_failed", writeErr
+			}
+			return "paused", e
 		}
 		if err = batchIntent(ctx, c, q.ID, "scope"); err != nil {
 			return "record_failed", err
@@ -617,7 +618,7 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 		scopeStart := time.Now()
 		initErr := initBatchScope(ctx, target, q.ID, b)
 		err = targetProgress(ctx, target, q.ID, &p)
-		if initErr != nil && isNoRows(err) {
+		if initErr != nil && (isNoRows(err) || postgresCode(err) == "42P01") {
 			return finish("failed", initErr, "Scope creation failed before data execution")
 		}
 		if err == nil {
@@ -661,13 +662,6 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 			}
 			return finish("completed", nil, "")
 		}
-		ok, code, msg, e := r.revalidate(ctx, q)
-		if e != nil || !ok {
-			if e == nil {
-				e = fault(code, msg)
-			}
-			return pause("paused", e)
-		}
 		number := p.Batches + 1
 		if undo {
 			number = p.Batches - p.Reverted
@@ -679,7 +673,12 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 		}
 		p.Intent = intent
 		batchStart := time.Now()
+		var authorizationErr error
 		err = retryBatchTransaction(batchCtx, func() error {
+			authorizationErr = r.authorizeExecution(batchCtx, q)
+			if authorizationErr != nil {
+				return authorizationErr
+			}
 			return runBatchTx(batchCtx, target, q.ID, sql, b, p, undo)
 		}, func() bool {
 			var verified batchProgress
@@ -703,16 +702,16 @@ func (r *Review) processBatch(ctx context.Context, q QueuedRequest, dispatched b
 				continue
 			}
 			code, message := faultInfo(err)
-			if code == "indeterminate" {
+			if code == "indeterminate" || code == "authorization_unavailable" {
 				return pause("unresolved", err)
 			}
 			if code == "internal_error" {
 				message = "Batch failed (SQLSTATE " + postgresCode(err) + "); resume or compensate after correcting the cause"
 			}
-			if p.Batches == 0 && !undo {
+			if authorizationErr == nil && p.Batches == 0 && !undo {
 				return finish("failed", err, message)
 			}
-			if e = mirrorBatch(ctx, c, q.ID, p, "paused", message); e != nil {
+			if e := mirrorBatch(ctx, c, q.ID, p, "paused", message); e != nil {
 				return "record_failed", e
 			}
 			if undo && p.Reverted > 0 {
@@ -785,12 +784,8 @@ func (r *Review) batchAction(ctx context.Context, user, db, id, action string) e
 	if status != "running" || p.State != "paused" {
 		return fault("conflict", "Only a paused, verified batch job can be resumed or compensated")
 	}
-	ok, code, msg, err := r.revalidate(ctx, q)
-	if err != nil {
+	if err := r.authorizeExecution(ctx, q); err != nil {
 		return err
-	}
-	if !ok {
-		return fault(code, msg)
 	}
 	if action == "compensate" {
 		if p.Batches == 0 || p.DownHash == "" {

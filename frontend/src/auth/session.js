@@ -25,11 +25,10 @@ export const login = (username, password) => api.login(username, password)
 export async function logout() {
   try {
     await api.logout()
-  } catch {
-    /* the session may already be gone server-side; carry on to the login page regardless */
+  } catch (error) {
+    if (error.status !== 401) throw error
   }
 }
-
 // Where to go after signing in. A ?next= destination is honoured only when it is a page of this
 // app (same-site path, nothing the server answers itself) and the user may open it; otherwise
 // admins land on the admin console and everyone else on the home page.

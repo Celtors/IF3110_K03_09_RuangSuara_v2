@@ -2,7 +2,6 @@ package migration
 
 import (
 	"errors"
-	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -112,7 +111,7 @@ func requireSession(s *Service) gin.HandlerFunc {
 		user, err := s.Access.Identity(c)
 		if err != nil || user == "" {
 			var f *Fault
-			if errors.As(err, &f) && f.Code == "authorization_unavailable" {
+			if errors.As(err, &f) && (f.Code == "authorization_unavailable" || f.Code == "csrf_failed") {
 				respond(c, nil, f)
 			} else {
 				respond(c, nil, fault("unauthenticated", "A validated session is required"))
@@ -123,14 +122,6 @@ func requireSession(s *Service) gin.HandlerFunc {
 		ctx := telemetry.With(c.Request.Context(), telemetry.ID("actor_id", user),
 			telemetry.ID("migration_id", c.Param("migrationId")), telemetry.ID("job_id", c.Param("requestId")))
 		c.Request = c.Request.WithContext(ctx)
-		if c.Request.Method != http.MethodGet {
-			if err = s.Access.CSRF(c.Request); err != nil {
-				slog.WarnContext(ctx, "authorization.csrf", "status", "denied")
-				respond(c, nil, fault("csrf_failed", "CSRF token or request origin is invalid"))
-				c.Abort()
-				return
-			}
-		}
 		c.Set("migration_user", user)
 		c.Next()
 	}

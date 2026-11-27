@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -57,56 +56,33 @@ func fail(c *gin.Context, status int, code, message string) {
 }
 func (h *Handler) requireSession(c *gin.Context) {
 	user, err := sessionmanager.CurrentUser(c, h.platform)
-	if err != nil {
-		if errors.Is(err, sessionmanager.ErrNoSession) {
-			fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "A valid session is required")
-			return
-		}
-		fail(c, http.StatusUnauthorized, "INVALID_SESSION", "A valid session is required")
+	switch {
+	case errors.Is(err, sessionmanager.ErrUnauthenticated):
+		fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "A valid session is required")
+		return
+	case errors.Is(err, sessionmanager.ErrCSRF):
+		fail(c, http.StatusForbidden, "csrf_failed", err.Error())
+		return
+	case err != nil:
+		fail(c, http.StatusServiceUnavailable, "authorization_unavailable", "Session storage is unavailable")
 		return
 	}
 	c.Set("principal_id", user.ID.String())
+	c.Set("principal", user)
 	c.Next()
-}
-
-func adminDatabaseName() string {
-	if v := strings.TrimSpace(os.Getenv("ADMIN_DATABASE_NAME")); v != "" {
-		return v
-	}
-	return "users_db"
-}
-
-func (h *Handler) adminAccess(ctx context.Context, userID string) (view, edit bool) {
-	platform := h.platform.WithContext(context.WithoutCancel(ctx))
-	var ids []string
-	var group_ids []string
-
-	if err := platform.Table("groups_").Where("name = ?", "platform-admins").Pluck("id", &group_ids).Error; err != nil || len(group_ids) != 1 {
-		return false, false
-	}
-
-	if err := platform.Table("user_groups").Where("group_id = ? AND user_id = ?", group_ids[0], userID).Pluck("id", &ids).Error; err != nil || len(ids) != 1 {
-		return false, false
-	}
-	return true, true
-}
-
-func isReadOnlyMethod(method string) bool {
-	return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
 }
 
 func (h *Handler) requireAdmin(c *gin.Context) {
 	id, _ := c.Get("principal_id")
 	ctx := c.Request.Context()
-	view, edit := h.adminAccess(ctx, fmt.Sprint(id))
-	if !view {
-		slog.WarnContext(ctx, "authorization.admin", "status", "denied")
-		fail(c, http.StatusForbidden, "FORBIDDEN", "You do not have access to the admin console")
+	admin, err := acmodels.HasPlatformAdmin(ctx, h.platform, fmt.Sprint(id))
+	if err != nil {
+		fail(c, http.StatusServiceUnavailable, "authorization_unavailable", "Admin authorization is unavailable")
 		return
 	}
-	if !isReadOnlyMethod(c.Request.Method) && !edit {
+	if !admin {
 		slog.WarnContext(ctx, "authorization.admin", "status", "denied")
-		fail(c, http.StatusForbidden, "READ_ONLY", "Your access to the admin console is view only")
+		fail(c, http.StatusForbidden, "FORBIDDEN", "You do not have access to the admin console")
 		return
 	}
 	slog.InfoContext(ctx, "authorization.admin", "status", "allowed")
@@ -114,22 +90,21 @@ func (h *Handler) requireAdmin(c *gin.Context) {
 }
 
 func (h *Handler) me(c *gin.Context) {
-	id := fmt.Sprint(c.MustGet("principal_id"))
-	var user acmodels.User
-	if err := h.platform.WithContext(context.WithoutCancel(c.Request.Context())).First(&user, "id = ?", id).Error; err != nil {
-		fail(c, http.StatusUnauthorized, "INVALID_SESSION", "A valid session is required")
+	user := c.MustGet("principal").(acmodels.User)
+	admin, err := acmodels.HasPlatformAdmin(c.Request.Context(), h.platform, user.ID.String())
+	if err != nil {
+		fail(c, http.StatusServiceUnavailable, "authorization_unavailable", "Admin authorization is unavailable")
 		return
 	}
-	view, edit := h.adminAccess(c.Request.Context(), id)
 	access := "none"
-	if edit {
+	if admin {
 		access = fx.ViewEdit
-	} else if view {
-		access = fx.ViewOnly
 	}
 	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, gin.H{"id": user.ID, "username": user.Username, "admin": view, "admin_access": access, "csrf_token": sessionmanager.CSRFToken(c.Request)})
+	c.Header(sessionmanager.CSRFHeader, c.GetString(sessionmanager.CSRFHeader))
+	c.JSON(http.StatusOK, gin.H{"id": user.ID, "username": user.Username, "admin": admin, "admin_access": access})
 }
+
 func (h *Handler) requireView(c *gin.Context) {
 	id := c.Param("id")
 	if _, err := uuid.Parse(id); err != nil {
@@ -138,7 +113,12 @@ func (h *Handler) requireView(c *gin.Context) {
 	}
 	principal, _ := c.Get("principal_id")
 	ctx := c.Request.Context()
-	if !h.hasPermission(ctx, fmt.Sprint(principal), id, false) {
+	permission, err := acmodels.EffectiveAuthorization(ctx, h.platform, fmt.Sprint(principal), id)
+	if err != nil {
+		fail(c, http.StatusServiceUnavailable, "authorization_unavailable", "Database authorization is unavailable")
+		return
+	}
+	if permission != fx.ViewEdit && permission != fx.ViewOnly {
 		slog.WarnContext(ctx, "authorization.database", "status", "denied", "required_permission", "view")
 		fail(c, http.StatusForbidden, "FORBIDDEN", "You do not have view access to this database")
 		return
@@ -162,13 +142,6 @@ func effectivePermission(rows []policyGrant, edit bool) bool {
 	return fx.Grants(effects, edit)
 }
 
-func (h *Handler) hasPermission(ctx context.Context, userID, databaseID string, edit bool) bool {
-	permission, err := acmodels.EffectiveAuthorization(context.WithoutCancel(ctx), h.platform, userID, databaseID)
-	if err != nil {
-		return false
-	}
-	return permission == fx.ViewEdit || (!edit && permission == fx.ViewOnly)
-}
 func (h *Handler) createDatabase(c *gin.Context) {
 	var req CreateDatabaseRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

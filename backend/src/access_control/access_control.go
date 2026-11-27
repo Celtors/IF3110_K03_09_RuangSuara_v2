@@ -46,6 +46,15 @@ func SetupAccessControl(r *gin.Engine) (*gorm.DB, error) {
 		sqlDB.SetMaxIdleConns(3)
 		sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	}
+	initCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sessionmanager.Initialize(initCtx, access_control_db); err != nil {
+		if sqlDB, dbErr := access_control_db.DB(); dbErr == nil {
+			_ = sqlDB.Close()
+		}
+		return nil, errors.New("could not initialize session storage")
+	}
+
 	dbmanagement.RegisterRoutes(r, access_control_db)
 	admin := r.Group("/admin-control-panel", dbmanagement.PlatformAdminMiddlewares(access_control_db)...)
 	withPlatform := func(handler func(*gin.Context, *gorm.DB)) gin.HandlerFunc {

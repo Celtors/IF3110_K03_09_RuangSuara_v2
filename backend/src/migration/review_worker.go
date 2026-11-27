@@ -192,6 +192,17 @@ func (r *Review) revalidate(ctx context.Context, q QueuedRequest) (bool, string,
 	return true, "", "", nil
 }
 
+func (r *Review) authorizeExecution(ctx context.Context, q QueuedRequest) error {
+	ok, code, message, err := r.revalidate(ctx, q)
+	if err != nil {
+		return fault("authorization_unavailable", "Execution authorization could not be verified")
+	}
+	if !ok {
+		return fault(code, message)
+	}
+	return nil
+}
+
 // process executes a fresh claim or reloads a running batch from durable state.
 func (r *Review) process(ctx context.Context, q QueuedRequest, lockWaits *batchLockWaits) {
 	ctx = q.logContext(ctx)
@@ -236,12 +247,8 @@ func (r *Review) process(ctx context.Context, q QueuedRequest, lockWaits *batchL
 		if sqlHash(a.SQL) != q.SQLHash {
 			return fault("conflict", "Approved SQL changed")
 		}
-		ok, code, message, e := r.revalidate(clean, q)
-		if e != nil {
+		if e := r.authorizeExecution(clean, q); e != nil {
 			return e
-		}
-		if !ok {
-			return fault(code, message)
 		}
 		return r.repo().linkAttempt(clean, q.ID, a.ID)
 	})
@@ -309,7 +316,7 @@ func (r *Review) recoverInterrupted(ctx context.Context, cfg WorkerConfig) {
 			telemetry.ID("correlation_id", jobCorrelation(q.submissionCorrelationID, q.ID)))
 		blockedCtx = q.queueTrace.Extract(blockedCtx)
 		blockedCtx, span := telemetry.Start(blockedCtx, "queue.reconcile_blocked")
-		if e := r.Service.Reconcile(blockedCtx, q.RequestedBy, q.DatabaseID); e != nil {
+		if e := r.Service.reconcileDatabase(blockedCtx, q.DatabaseID); e != nil {
 			span.SetAttributes(attribute.String("outcome", "unresolved"))
 			traceMigrationError(span, e)
 			if code, _ := faultInfo(e); code != "indeterminate" && code != "conflict" {

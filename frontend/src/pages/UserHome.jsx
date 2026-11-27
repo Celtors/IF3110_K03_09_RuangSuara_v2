@@ -3,7 +3,7 @@ import { useSession } from '../auth/session-context'
 
 // Placeholder landing page for signed-in users who cannot use the admin console.
 export default function UserHome({ username, admin }) {
-  const { signOut } = useSession()
+  const { signOut, error } = useSession()
 
   return (
     <main className="home">
@@ -15,6 +15,7 @@ export default function UserHome({ username, admin }) {
             ? 'You can manage users, groups and database access.'
             : 'You’re signed in'}
         </p>
+        {error && <p className="alert alert-error" role="alert">{error}</p>}
         <div className="actions home-actions">
           <a className="btn" href="/migrations">Open migrations</a>
           {admin && <a className="btn btn-primary" href={ADMIN_PAGE}>Open admin console</a>}

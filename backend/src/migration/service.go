@@ -345,6 +345,9 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 			telemetry.RecordRetry("failed_apply")
 		}
 		result = executePostgres(ctx, pool, attempt.SQL, expectedTarget, func(xid, identity string) error {
+			if err := s.authorize(ctx, user, db, Edit); err != nil {
+				return err
+			}
 			_, recordErr := platformConn.Exec(ctx, `UPDATE dmp_migration.attempts SET target_xid=$2,target_identity=$3,prepared_rows=NULL WHERE id=$1`, attempt.ID, xid, identity)
 			if recordErr == nil {
 				attempt.XID = &xid
@@ -368,7 +371,8 @@ func (s *Service) executeOperation(ctx context.Context, user, db, id string, ope
 		}
 		if onBegin != nil {
 			if e := onBegin(ctx, attempt); e != nil {
-				result = executionResult{Status: "failed", FaultCode: "forbidden", Message: "Execution authorization could not be revalidated before retry"}
+				code, message := faultInfo(e)
+				result = executionResult{Status: "failed", FaultCode: code, Message: message}
 				break
 			}
 		}
@@ -402,6 +406,12 @@ func (s *Service) Reconcile(ctx context.Context, user, db string) error {
 	if err := s.authorize(ctx, user, db, Edit); err != nil {
 		return err
 	}
+	return s.reconcileDatabase(ctx, db)
+}
+
+// reconcileDatabase only settles recorded target outcomes. Workers may call it
+// after permission loss. The HTTP entry point still requires Edit.
+func (s *Service) reconcileDatabase(ctx context.Context, db string) error {
 	pool, err := s.connection(ctx, db)
 	if err != nil {
 		return err

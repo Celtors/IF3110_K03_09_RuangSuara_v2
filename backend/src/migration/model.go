@@ -2,7 +2,6 @@ package migration
 
 import (
 	"context"
-	"net/http"
 	"time"
 
 	databasemanagement "backend/database_management"
@@ -25,7 +24,6 @@ const (
 type Access interface {
 	Identity(*gin.Context) (string, error)
 	Permission(context.Context, string, string) (Permission, error)
-	CSRF(*http.Request) error
 }
 
 // Connections provides PostgreSQL connections for managed databases.

@@ -3,6 +3,9 @@ package controlpanel
 import (
 	"backend/access_control/models"
 	"backend/access_control/utility"
+	"backend/internal/telemetry"
+	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -114,18 +117,43 @@ func UpdateUserRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
+	if userPayload.Status != "" && userPayload.Status != "Active" && userPayload.Status != "Inactive" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Status must be Active or Inactive"})
+		return
+	}
 	userQuery, updatedUserModel, err := userPayload.GetDBStruct()
-
 	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Could not hash the new password"})
 		return
 	}
 
-	if err := db.Model(&userQuery).Updates(updatedUserModel).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"status":  "error",
-			"message": "Failed to update user: " + err.Error(),
-		})
+	err = db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&userQuery).Updates(updatedUserModel)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		if updatedUserModel.Status == "Inactive" {
+			if err := models.RevokeUserSessions(tx, userQuery.ID, "account_deactivated"); err != nil {
+				return err
+			}
+			return tx.Where("leader_id = ?", userQuery.ID).Delete(&models.GroupLeader{}).Error
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "User not found"})
 		return
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "Could not update the user"})
+		return
+	}
+	if updatedUserModel.Status == "Inactive" {
+		slog.LogAttrs(c.Request.Context(), slog.LevelInfo, "authentication.account_deactivated",
+			slog.String("status", "succeeded"), telemetry.ID("affected_user_id", userQuery.ID.String()))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
