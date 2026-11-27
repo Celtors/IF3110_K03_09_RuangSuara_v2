@@ -16,7 +16,10 @@ import {
   useMigrationDefinition,
   useSqlIntegrity,
 } from "../../migration/useChangeRequests.js";
-import { ActivityLog, ApprovalsTable, RequestBadge, StatusTrack, Who, namesFrom } from "./ChangeRequestParts.jsx";
+import { ActivityLog, ApprovalsTable, RequestBadge, StatusTrack, Who} from "./ChangeRequestParts.jsx";
+import { namesFrom } from "./NamesFrom.jsx";
+import { useJob } from "../../migration/useJob.js";
+import { JobProgress } from "./JobProgress.jsx";
 import { DecisionDialog } from "./DecisionDialog.jsx";
 
 // What the request is doing now, in a sentence.
@@ -91,30 +94,38 @@ function Integrity({ value }) {
 
 // One change request: progress, who must approve, the SQL under review, and the actions the
 // signed-in user may take. Refreshes itself while the request can still change.
-export function ChangeRequestPage({ databaseId }) {
-  const { request, error, loading, reload, replace } = useChangeRequest(databaseId, requestId);
+export function ChangeRequestPage({ databaseId, canEdit }) {
+  const job = useJob(databaseId, requestId);
+  const { request, error, loading, reload, replace } = useChangeRequest(databaseId, requestId, {
+    poll: job.job?.approval_status === "pending_review",
+    revision: `${job.job?.approval_status ?? ""}|${job.job?.status ?? ""}|${job.job?.compensation_status ?? ""}`,
+  });
   const definition = useMigrationDefinition(databaseId, request?.migration_id);
   const sql = sqlFor(definition.migration, request);
   const integrity = useSqlIntegrity(sql, request?.sql_hash);
+  const downIntegrity = useSqlIntegrity(definition.migration?.sql_down, request?.compensation_sql_hash);
   const [dialog, setDialog] = useState(null);
   const me = viewerId();
   const names = namesFrom(request ? [request] : []);
 
   if (!requestId) return <ErrorBox error="No change request selected. Open one from the migration history." />;
-  if (loading && !request) return <div className="panel" role="status">Loading change request…</div>;
   if (!request)
     return (
       <>
-        <ErrorBox error={error || "Change request not found."} />
-        <button className="btn btn-primary" onClick={reload}>
-          Try again
-        </button>
+        {loading ? <p role="status">Loading change request…</p> : <>
+          <ErrorBox error={error || "Change request not found."} />
+          <button className="btn btn-primary" onClick={reload}>Try again</button>
+        </>}
+        <JobProgress databaseId={databaseId} jobId={requestId} resource={job} canEdit={false} isRequester={false} onRefresh={reload} />
       </>
     );
 
   const role = viewerRole(request, me);
-  const act = (fn) => async (comment) => replace(await fn(databaseId, request.id, comment));
-  const mismatched = integrity === false;
+  const act = (fn) => async (comment) => {
+    replace(await fn(databaseId, request.id, comment));
+    job.reload();
+  };
+  const mismatched = integrity === false || downIntegrity === false;
 
   return (
     <>
@@ -133,7 +144,7 @@ export function ChangeRequestPage({ databaseId }) {
             </p>
           </div>
           <div className="actions">
-            <RequestBadge status={request.status} />
+            <span>Approval workflow: <RequestBadge status={request.status} /></span>
             {role.canCancel && (
               <button className="btn btn-danger-quiet" onClick={() => setDialog("cancel")}>
                 Cancel request
@@ -141,8 +152,10 @@ export function ChangeRequestPage({ databaseId }) {
             )}
           </div>
         </div>
-        <StatusTrack request={request} />
-        <Outcome request={request} />
+        {["pending_review", "approved", "rejected", "cancelled"].includes(request.status) && <>
+          <StatusTrack request={request} />
+          <Outcome request={request} />
+        </>}
         <dl className="details-grid">
           {[
             ["Database", request.database_id],
@@ -170,6 +183,8 @@ export function ChangeRequestPage({ databaseId }) {
           ))}
         </dl>
       </section>
+
+      <JobProgress databaseId={databaseId} jobId={requestId} resource={job} canEdit={canEdit} isRequester={role.isRequester} onRefresh={reload} />
 
       <section className="panel">
         <div className="panel-heading">
@@ -209,6 +224,7 @@ export function ChangeRequestPage({ databaseId }) {
           <h2>{request.operation === "rollback" ? "SQL down to run" : "SQL to run"}</h2>
           <span className="mono">PostgreSQL</span>
         </div>
+        {request.batch && <p>Batch execution · attribute: <strong>{request.batch.batch_attribute}</strong> · size: <strong>{request.batch.batch_size}</strong></p>}
         <Integrity value={integrity} />
         {definition.error ? (
           <ErrorBox error={definition.error} />
@@ -217,6 +233,11 @@ export function ChangeRequestPage({ databaseId }) {
         ) : (
           <SQL value={sql} />
         )}
+        {request.compensation_sql_hash && definition.migration && <>
+          <h3>Approved compensation SQL down</h3>
+          <Integrity value={downIntegrity} />
+          <SQL value={definition.migration.sql_down} />
+        </>}
       </section>
 
       <section className="panel">
